@@ -1,6 +1,5 @@
 .env
 *.env
-CLAUDE.md
 
 __pycache__/
 *.pyc
@@ -16,6 +15,7 @@ venv/
 *.sqlite3
 data/
 
+sessions/
 *.session
 *.session-journal
 

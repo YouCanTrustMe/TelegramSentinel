@@ -1,0 +1,9 @@
+services:
+  sentinel:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./sessions:/app/sessions
+    working_dir: /app

@@ -26,11 +26,11 @@ async def source_exists(url: str) -> bool:
             return await cur.fetchone() is not None
 
 
-async def add_source(type_: str, name: str, url: str) -> int:
+async def add_source(type_: str, name: str, url: str, category: str) -> int:
     async with await get_db() as db:
         cur = await db.execute(
-            "INSERT INTO sources (type, name, url) VALUES (?, ?, ?)",
-            (type_, name, url),
+            "INSERT INTO sources (type, name, url, category) VALUES (?, ?, ?, ?)",
+            (type_, name, url, category),
         )
         await db.commit()
         return cur.lastrowid
@@ -38,9 +38,7 @@ async def add_source(type_: str, name: str, url: str) -> int:
 
 async def remove_source(source_id: int) -> bool:
     async with await get_db() as db:
-        cur = await db.execute(
-            "DELETE FROM sources WHERE id = ?", (source_id,)
-        )
+        cur = await db.execute("DELETE FROM sources WHERE id = ?", (source_id,))
         await db.commit()
         return cur.rowcount > 0
 
@@ -71,8 +69,8 @@ async def save_item(
     original_url: str | None,
     published_at: str | None,
     summary: str | None,
-    category: str | None,
-    importance: str | None,
+    category: str,
+    importance: str,
     processed_at: str,
 ) -> int:
     async with await get_db() as db:
@@ -91,7 +89,7 @@ async def save_item(
 async def get_unsent_items() -> list[aiosqlite.Row]:
     async with await get_db() as db:
         async with db.execute(
-            "SELECT * FROM items WHERE sent = 0 ORDER BY published_at ASC"
+            "SELECT * FROM items WHERE sent = 0 ORDER BY category, importance DESC, published_at ASC"
         ) as cur:
             return await cur.fetchall()
 
@@ -124,19 +122,9 @@ async def add_category(name: str, emoji: str) -> int:
 
 async def remove_category(name: str) -> bool:
     async with await get_db() as db:
-        cur = await db.execute(
-            "DELETE FROM categories WHERE name = ?", (name,)
-        )
+        cur = await db.execute("DELETE FROM categories WHERE name = ?", (name,))
         await db.commit()
         return cur.rowcount > 0
-
-
-async def set_category_topic(name: str, topic_id: int) -> None:
-    async with await get_db() as db:
-        await db.execute(
-            "UPDATE categories SET topic_id = ? WHERE name = ?", (topic_id, name)
-        )
-        await db.commit()
 
 
 async def log_digest(total: int, high: int, low: int, status: str = "ok") -> None:

@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS sources (
     type TEXT NOT NULL CHECK(type IN ('telegram', 'rss')),
     name TEXT NOT NULL,
     url TEXT NOT NULL UNIQUE,
+    category TEXT NOT NULL DEFAULT 'other',
     is_active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -11,7 +12,6 @@ CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     emoji TEXT NOT NULL DEFAULT '📌',
-    topic_id INTEGER,
     is_active INTEGER NOT NULL DEFAULT 1
 );
 

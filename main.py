@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 
 from pyrogram import idle
 
@@ -18,6 +19,7 @@ log = logging.getLogger(__name__)
 
 
 async def main() -> None:
+    Path("sessions").mkdir(exist_ok=True)
     await init_db()
     log.info("Database initialized")
 

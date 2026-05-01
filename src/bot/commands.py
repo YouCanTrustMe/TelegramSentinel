@@ -27,6 +27,10 @@ def _is_rss(url: str) -> bool:
 def register_commands() -> None:
     admin = filters.user(settings.telegram_admin_id) & filters.private
 
+    @bot.on_message(filters.private)
+    async def cmd_debug_all(_, message: Message) -> None:
+        log.info("DEBUG incoming: user_id=%s text=%r", message.from_user.id if message.from_user else None, message.text)
+
     @bot.on_message(filters.command("add_source") & admin)
     async def cmd_add_source(_, message: Message) -> None:
         parts = message.text.split(maxsplit=3)

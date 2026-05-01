@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str
     telegram_supergroup_id: int
+    telegram_admin_id: int
 
     gemini_api_key: str
     gemini_model: str = "gemini-2.0-flash"

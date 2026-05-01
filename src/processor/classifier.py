@@ -23,6 +23,11 @@ High importance criteria:
 Respond ONLY with valid JSON:
 {"importance": "high" | "low", "summary": "<Ukrainian summary>"}"""
 
+_model = genai.GenerativeModel(
+    model_name=settings.gemini_model,
+    system_instruction=_SYSTEM_PROMPT,
+)
+
 
 @dataclass
 class ClassificationResult:
@@ -31,23 +36,21 @@ class ClassificationResult:
 
 
 async def classify(text: str) -> ClassificationResult:
-    model = genai.GenerativeModel(
-        model_name=settings.gemini_model,
-        system_instruction=_SYSTEM_PROMPT,
-    )
-
-    response = await model.generate_content_async(
-        text[:4000],
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-            temperature=0.1,
-        ),
-    )
-
-    data = json.loads(response.text)
-    result = ClassificationResult(
-        importance=data.get("importance", "low"),
-        summary=data.get("summary", ""),
-    )
-    log.debug("Classified: importance=%s", result.importance)
-    return result
+    try:
+        response = await _model.generate_content_async(
+            text[:4000],
+            generation_config=genai.GenerationConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+        data = json.loads(response.text)
+        result = ClassificationResult(
+            importance=data.get("importance", "low"),
+            summary=data.get("summary", ""),
+        )
+        log.debug("Classified: importance=%s", result.importance)
+        return result
+    except Exception as exc:
+        log.warning("Classification failed, using fallback: %s", exc)
+        return ClassificationResult(importance="low", summary="")

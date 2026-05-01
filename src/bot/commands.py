@@ -25,8 +25,9 @@ def _is_rss(url: str) -> bool:
 
 
 def register_commands() -> None:
+    admin = filters.user(settings.telegram_admin_id) & filters.private
 
-    @bot.on_message(filters.command("add_source") & filters.private)
+    @bot.on_message(filters.command("add_source") & admin)
     async def cmd_add_source(_, message: Message) -> None:
         parts = message.text.split(maxsplit=3)
         if len(parts) < 4:
@@ -50,7 +51,7 @@ def register_commands() -> None:
             f"Category: <b>{category}</b> | ID: <code>{source_id}</code>"
         )
 
-    @bot.on_message(filters.command("remove_source") & filters.private)
+    @bot.on_message(filters.command("remove_source") & admin)
     async def cmd_remove_source(_, message: Message) -> None:
         parts = message.text.split()
         if len(parts) < 2 or not parts[1].isdigit():
@@ -65,7 +66,7 @@ def register_commands() -> None:
         else:
             await message.reply("Source not found.")
 
-    @bot.on_message(filters.command("list_sources") & filters.private)
+    @bot.on_message(filters.command("list_sources") & admin)
     async def cmd_list_sources(_, message: Message) -> None:
         sources = await get_active_sources()
         if not sources:
@@ -77,7 +78,7 @@ def register_commands() -> None:
         ]
         await message.reply("\n".join(lines))
 
-    @bot.on_message(filters.command("add_category") & filters.private)
+    @bot.on_message(filters.command("add_category") & admin)
     async def cmd_add_category(_, message: Message) -> None:
         parts = message.text.split(maxsplit=2)
         if len(parts) < 3:
@@ -88,7 +89,7 @@ def register_commands() -> None:
         log.info("Category added: %s %s", emoji, name)
         await message.reply(f"✅ Category <b>{emoji} {name}</b> added.")
 
-    @bot.on_message(filters.command("remove_category") & filters.private)
+    @bot.on_message(filters.command("remove_category") & admin)
     async def cmd_remove_category(_, message: Message) -> None:
         parts = message.text.split()
         if len(parts) < 2:
@@ -99,7 +100,7 @@ def register_commands() -> None:
             log.info("Category removed: %s", parts[1])
         await message.reply("✅ Category removed." if removed else "Category not found.")
 
-    @bot.on_message(filters.command("list_categories") & filters.private)
+    @bot.on_message(filters.command("list_categories") & admin)
     async def cmd_list_categories(_, message: Message) -> None:
         cats = await get_categories()
         if not cats:
@@ -108,14 +109,14 @@ def register_commands() -> None:
         lines = [f"{r['emoji']} <b>{r['name']}</b>" for r in cats]
         await message.reply("\n".join(lines))
 
-    @bot.on_message(filters.command("digest") & filters.private)
+    @bot.on_message(filters.command("digest") & admin)
     async def cmd_digest(_, message: Message) -> None:
         log.info("Manual digest triggered by user")
         await message.reply("⏳ Building digest...")
         await send_digest()
         await message.reply("✅ Digest sent.")
 
-    @bot.on_message(filters.command("schedule") & filters.private)
+    @bot.on_message(filters.command("schedule") & admin)
     async def cmd_schedule(_, message: Message) -> None:
         parts = message.text.split()
         if len(parts) < 2:
@@ -135,7 +136,7 @@ def register_commands() -> None:
         log.info("Digest rescheduled to %s (%s)", time_str, settings.digest_timezone)
         await message.reply(f"✅ Digest scheduled at <b>{time_str}</b> ({settings.digest_timezone})")
 
-    @bot.on_message(filters.command("stats") & filters.private)
+    @bot.on_message(filters.command("stats") & admin)
     async def cmd_stats(_, message: Message) -> None:
         import aiosqlite
         async with aiosqlite.connect(settings.database_path) as db:
@@ -155,7 +156,7 @@ def register_commands() -> None:
             f"Low importance: <b>{row['low'] or 0}</b>"
         )
 
-    @bot.on_message(filters.command("start") & filters.private)
+    @bot.on_message(filters.command("start") & admin)
     async def cmd_start(_, message: Message) -> None:
         await message.reply(
             "<b>TelegramSentinel</b>\n\n"

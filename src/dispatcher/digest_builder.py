@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timezone
+from html import escape
 
 from src.db.models import get_categories, get_unsent_items, log_digest, mark_sent
 from src.dispatcher.sender import send_message
@@ -12,12 +13,12 @@ _TELEGRAM_LIMIT = 4000
 def _format_high(item) -> str:
     url = item["original_url"] or ""
     link = f' <a href="{url}">→</a>' if url else ""
-    return f"• {item['summary']}{link}"
+    return f"• {escape(item['summary'] or '')}{link}"
 
 
 def _format_low(item) -> str:
     url = item["original_url"] or ""
-    title = (item["raw_text"] or "")[:80].split("\n")[0]
+    title = escape((item["raw_text"] or "")[:80].split("\n")[0])
     return f'• <a href="{url}">{title}</a>' if url else f"• {title}"
 
 

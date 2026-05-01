@@ -6,7 +6,7 @@ from pyrogram import idle
 
 from src.bot.commands import register_commands
 from src.collectors.rss_collector import run_rss_collector
-from src.collectors.telegram_collector import load_watched_channels, userbot
+from src.collectors.telegram_collector import load_watched_channels, register_handlers, userbot
 from src.db.models import init_db
 from src.dispatcher.sender import bot
 from src.scheduler import start_scheduler
@@ -19,16 +19,22 @@ log = logging.getLogger(__name__)
 
 
 async def main() -> None:
+    running_loop = asyncio.get_running_loop()
+    bot.dispatcher.loop = running_loop
+    userbot.dispatcher.loop = running_loop
+
     Path("sessions").mkdir(exist_ok=True)
     await init_db()
     log.info("Database initialized")
+
+    register_handlers()
+    register_commands()
 
     await bot.start()
     await userbot.start()
     log.info("Clients started")
 
     await load_watched_channels()
-    register_commands()
     start_scheduler()
     log.info("Scheduler started")
 

@@ -19,6 +19,8 @@ from src.dispatcher.sender import bot
 
 log = logging.getLogger(__name__)
 
+_pending: dict[int, dict] = {}
+
 
 def _is_rss(url: str) -> bool:
     return url.startswith("http://") or url.startswith("https://")
@@ -27,48 +29,32 @@ def _is_rss(url: str) -> bool:
 def register_commands() -> None:
     admin = filters.user(settings.telegram_admin_id) & filters.private
 
-    @bot.on_message(filters.private)
-    async def cmd_debug_all(_, message: Message) -> None:
-        log.info("DEBUG incoming: user_id=%s text=%r", message.from_user.id if message.from_user else None, message.text)
+    @bot.on_message(filters.command("cancel") & admin)
+    async def cmd_cancel(_, message: Message) -> None:
+        uid = message.from_user.id
+        if uid in _pending:
+            del _pending[uid]
+            await message.reply("Cancelled.")
+        else:
+            await message.reply("Nothing to cancel.")
 
     @bot.on_message(filters.command("add_source") & admin)
     async def cmd_add_source(_, message: Message) -> None:
-        parts = message.text.split(maxsplit=3)
-        if len(parts) < 4:
-            await message.reply("Usage: /add_source <name> <url or @channel> <category>")
-            return
-
-        name, url, category = parts[1], parts[2], parts[3].lower()
-        source_type = "rss" if _is_rss(url) else "telegram"
-
-        if await source_exists(url):
-            await message.reply(f"Source <code>{url}</code> already exists.")
-            return
-
-        source_id = await add_source(source_type, name, url, category)
-        if source_type == "telegram":
-            await load_watched_channels()
-
-        log.info("Source added: [%s] %s (%s) -> category=%s", source_type, name, url, category)
-        await message.reply(
-            f"✅ Added [{source_type}] <b>{name}</b> — <code>{url}</code>\n"
-            f"Category: <b>{category}</b> | ID: <code>{source_id}</code>"
-        )
+        _pending[message.from_user.id] = {"action": "add_source", "step": 0, "data": {}}
+        await message.reply("Source name:")
 
     @bot.on_message(filters.command("remove_source") & admin)
     async def cmd_remove_source(_, message: Message) -> None:
-        parts = message.text.split()
-        if len(parts) < 2 or not parts[1].isdigit():
-            await message.reply("Usage: /remove_source <id>")
+        sources = await get_active_sources()
+        if not sources:
+            await message.reply("No sources configured.")
             return
-
-        removed = await remove_source(int(parts[1]))
-        if removed:
-            await load_watched_channels()
-            log.info("Source removed: id=%s", parts[1])
-            await message.reply("✅ Source removed.")
-        else:
-            await message.reply("Source not found.")
+        lines = [
+            f"<code>{r['id']}</code> [{r['type']}] <b>{r['name']}</b> [{r['category']}] — {r['url']}"
+            for r in sources
+        ]
+        _pending[message.from_user.id] = {"action": "remove_source", "step": 0, "data": {}}
+        await message.reply("\n".join(lines) + "\n\nEnter ID to remove:")
 
     @bot.on_message(filters.command("list_sources") & admin)
     async def cmd_list_sources(_, message: Message) -> None:
@@ -84,25 +70,18 @@ def register_commands() -> None:
 
     @bot.on_message(filters.command("add_category") & admin)
     async def cmd_add_category(_, message: Message) -> None:
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 3:
-            await message.reply("Usage: /add_category <name> <emoji>")
-            return
-        name, emoji = parts[1].lower(), parts[2]
-        await add_category(name, emoji)
-        log.info("Category added: %s %s", emoji, name)
-        await message.reply(f"✅ Category <b>{emoji} {name}</b> added.")
+        _pending[message.from_user.id] = {"action": "add_category", "step": 0, "data": {}}
+        await message.reply("Category name:")
 
     @bot.on_message(filters.command("remove_category") & admin)
     async def cmd_remove_category(_, message: Message) -> None:
-        parts = message.text.split()
-        if len(parts) < 2:
-            await message.reply("Usage: /remove_category <name>")
+        cats = await get_categories()
+        if not cats:
+            await message.reply("No categories configured.")
             return
-        removed = await remove_category(parts[1].lower())
-        if removed:
-            log.info("Category removed: %s", parts[1])
-        await message.reply("✅ Category removed." if removed else "Category not found.")
+        lines = [f"{r['emoji']} <b>{r['name']}</b>" for r in cats]
+        _pending[message.from_user.id] = {"action": "remove_category", "step": 0, "data": {}}
+        await message.reply("\n".join(lines) + "\n\nCategory name to remove:")
 
     @bot.on_message(filters.command("list_categories") & admin)
     async def cmd_list_categories(_, message: Message) -> None:
@@ -126,15 +105,13 @@ def register_commands() -> None:
         if len(parts) < 2:
             await message.reply("Usage: /schedule HH:MM")
             return
-
         time_str = parts[1]
         try:
             h, m = map(int, time_str.split(":"))
             assert 0 <= h < 24 and 0 <= m < 60
         except (ValueError, AssertionError):
-            await message.reply("Invalid time format. Use HH:MM (e.g. 20:00)")
+            await message.reply("Invalid format. Use HH:MM (e.g. 20:00)")
             return
-
         from src.scheduler import reschedule_digest
         reschedule_digest(time_str)
         log.info("Digest rescheduled to %s (%s)", time_str, settings.digest_timezone)
@@ -152,7 +129,6 @@ def register_commands() -> None:
                 "FROM items WHERE processed_at >= datetime('now', '-24 hours')"
             ) as cur:
                 row = await cur.fetchone()
-
         await message.reply(
             f"📊 <b>Last 24h</b>\n"
             f"Total processed: <b>{row['total']}</b>\n"
@@ -164,13 +140,92 @@ def register_commands() -> None:
     async def cmd_start(_, message: Message) -> None:
         await message.reply(
             "<b>TelegramSentinel</b>\n\n"
-            "/add_source &lt;name&gt; &lt;url | @channel&gt; &lt;category&gt;\n"
-            "/remove_source &lt;id&gt;\n"
+            "/add_source — add RSS or Telegram channel\n"
+            "/remove_source — remove source\n"
             "/list_sources\n\n"
-            "/add_category &lt;name&gt; &lt;emoji&gt;\n"
-            "/remove_category &lt;name&gt;\n"
+            "/add_category — add category\n"
+            "/remove_category — remove category\n"
             "/list_categories\n\n"
             "/schedule &lt;HH:MM&gt;\n"
             "/digest — send now\n"
-            "/stats"
+            "/stats\n"
+            "/cancel — cancel current input"
         )
+
+    @bot.on_message(filters.private & admin)
+    async def handle_conversation(_, message: Message) -> None:
+        if not message.text or message.text.startswith("/"):
+            return
+        uid = message.from_user.id
+        if uid not in _pending:
+            return
+
+        state = _pending[uid]
+        text = message.text.strip()
+        action = state["action"]
+        step = state["step"]
+        data = state["data"]
+
+        if action == "add_category":
+            if step == 0:
+                data["name"] = text.lower()
+                state["step"] = 1
+                await message.reply("Emoji:")
+            elif step == 1:
+                data["emoji"] = text
+                await add_category(data["name"], data["emoji"])
+                del _pending[uid]
+                log.info("Category added: %s %s", data["emoji"], data["name"])
+                await message.reply(f"✅ Category <b>{data['emoji']} {data['name']}</b> added.")
+
+        elif action == "add_source":
+            if step == 0:
+                data["name"] = text
+                state["step"] = 1
+                await message.reply("URL or @channel:")
+            elif step == 1:
+                data["url"] = text
+                state["step"] = 2
+                cats = await get_categories()
+                if cats:
+                    names = ", ".join(r["name"] for r in cats)
+                    await message.reply(f"Category ({names}):")
+                else:
+                    await message.reply("Category:")
+            elif step == 2:
+                data["category"] = text.lower()
+                url = data["url"]
+                source_type = "rss" if _is_rss(url) else "telegram"
+                if await source_exists(url):
+                    del _pending[uid]
+                    await message.reply(f"Source <code>{url}</code> already exists.")
+                    return
+                source_id = await add_source(source_type, data["name"], url, data["category"])
+                if source_type == "telegram":
+                    await load_watched_channels()
+                del _pending[uid]
+                log.info("Source added: [%s] %s (%s) -> category=%s", source_type, data["name"], url, data["category"])
+                await message.reply(
+                    f"✅ Added [{source_type}] <b>{data['name']}</b> — <code>{url}</code>\n"
+                    f"Category: <b>{data['category']}</b> | ID: <code>{source_id}</code>"
+                )
+
+        elif action == "remove_source":
+            if not text.isdigit():
+                await message.reply("Enter a numeric ID:")
+                return
+            removed = await remove_source(int(text))
+            del _pending[uid]
+            if removed:
+                await load_watched_channels()
+                log.info("Source removed: id=%s", text)
+                await message.reply("✅ Source removed.")
+            else:
+                await message.reply("Source not found.")
+
+        elif action == "remove_category":
+            removed = await remove_category(text.lower())
+            del _pending[uid]
+            if removed:
+                log.info("Category removed: %s", text)
+            await message.reply("✅ Category removed." if removed else "Category not found.")

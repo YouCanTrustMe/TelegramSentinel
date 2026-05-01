@@ -57,11 +57,11 @@ def _split_into_messages(lines: list[str]) -> list[str]:
     return messages
 
 
-async def send_digest() -> None:
+async def send_digest() -> bool:
     items = await get_unsent_items()
     if not items:
         log.info("Digest triggered: no unsent items")
-        return
+        return False
 
     categories = await get_categories()
     cat_meta = {row["name"]: {"emoji": row["emoji"], "high": [], "low": []} for row in categories}
@@ -91,3 +91,4 @@ async def send_digest() -> None:
         "Digest sent: %d total | %d high | %d low | %d message(s)",
         len(items), high_count, low_count, len(messages),
     )
+    return True

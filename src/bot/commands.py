@@ -1,9 +1,12 @@
+import asyncio
 import logging
 
+import feedparser
 from pyrogram import filters
 from pyrogram.types import Message
 
-from src.collectors.telegram_collector import load_watched_channels
+from src.collectors.folder_manager import add_to_folder, remove_from_folder
+from src.collectors.telegram_collector import load_watched_channels, userbot
 from src.config import settings
 from src.db.models import (
     add_category,
@@ -41,7 +44,7 @@ def register_commands() -> None:
     @bot.on_message(filters.command("add_source") & admin)
     async def cmd_add_source(_, message: Message) -> None:
         _pending[message.from_user.id] = {"action": "add_source", "step": 0, "data": {}}
-        await message.reply("Source name:")
+        await message.reply("URL or @channel:")
 
     @bot.on_message(filters.command("remove_source") & admin)
     async def cmd_remove_source(_, message: Message) -> None:
@@ -62,10 +65,19 @@ def register_commands() -> None:
         if not sources:
             await message.reply("No sources configured.")
             return
-        lines = [
-            f"<code>{r['id']}</code> [{r['type']}] <b>{r['name']}</b> [{r['category']}] — {r['url']}"
-            for r in sources
-        ]
+        lines = []
+        for r in sources:
+            status = ""
+            if r["type"] == "telegram":
+                username = r["url"].lstrip("@")
+                try:
+                    await userbot.get_chat(username)
+                    status = " ✅"
+                except Exception:
+                    status = " ❌"
+            lines.append(
+                f"<code>{r['id']}</code> [{r['type']}] <b>{r['name']}</b> [{r['category']}] — {r['url']}{status}"
+            )
         await message.reply("\n".join(lines))
 
     @bot.on_message(filters.command("add_category") & admin)
@@ -96,8 +108,8 @@ def register_commands() -> None:
     async def cmd_digest(_, message: Message) -> None:
         log.info("Manual digest triggered by user")
         await message.reply("⏳ Building digest...")
-        await send_digest()
-        await message.reply("✅ Digest sent.")
+        sent = await send_digest()
+        await message.reply("✅ Digest sent." if sent else "ℹ️ No new items.")
 
     @bot.on_message(filters.command("schedule") & admin)
     async def cmd_schedule(_, message: Message) -> None:
@@ -180,28 +192,43 @@ def register_commands() -> None:
 
         elif action == "add_source":
             if step == 0:
-                data["name"] = text
-                state["step"] = 1
-                await message.reply("URL or @channel:")
-            elif step == 1:
-                data["url"] = text
-                state["step"] = 2
-                cats = await get_categories()
-                if cats:
-                    names = ", ".join(r["name"] for r in cats)
-                    await message.reply(f"Category ({names}):")
-                else:
-                    await message.reply("Category:")
-            elif step == 2:
-                data["category"] = text.lower()
-                url = data["url"]
+                url = text
                 source_type = "rss" if _is_rss(url) else "telegram"
                 if await source_exists(url):
                     del _pending[uid]
                     await message.reply(f"Source <code>{url}</code> already exists.")
                     return
+                if source_type == "telegram":
+                    try:
+                        chat = await userbot.get_chat(url.lstrip("@"))
+                        name = chat.title
+                    except Exception as exc:
+                        del _pending[uid]
+                        await message.reply(f"Could not fetch channel info: {exc}")
+                        return
+                else:
+                    feed = await asyncio.to_thread(feedparser.parse, url)
+                    name = feed.feed.get("title") or url
+                data["url"] = url
+                data["name"] = name
+                data["type"] = source_type
+                state["step"] = 1
+                cats = await get_categories()
+                cats_hint = f" ({', '.join(r['name'] for r in cats)})" if cats else ""
+                await message.reply(f"Name: <b>{name}</b>\nCategory{cats_hint}:")
+            elif step == 1:
+                data["category"] = text.lower()
+                url = data["url"]
+                source_type = data["type"]
                 source_id = await add_source(source_type, data["name"], url, data["category"])
                 if source_type == "telegram":
+                    username = url.lstrip("@")
+                    try:
+                        await userbot.join_chat(username)
+                        log.info("Userbot joined @%s", username)
+                    except Exception as exc:
+                        log.warning("Could not join @%s: %s", username, exc)
+                    await add_to_folder(username)
                     await load_watched_channels()
                 del _pending[uid]
                 log.info("Source added: [%s] %s (%s) -> category=%s", source_type, data["name"], url, data["category"])
@@ -214,9 +241,19 @@ def register_commands() -> None:
             if not text.isdigit():
                 await message.reply("Enter a numeric ID:")
                 return
+            sources = await get_active_sources()
+            source = next((s for s in sources if s["id"] == int(text)), None)
             removed = await remove_source(int(text))
             del _pending[uid]
             if removed:
+                if source and source["type"] == "telegram":
+                    username = source["url"].lstrip("@")
+                    await remove_from_folder(username)
+                    try:
+                        await userbot.leave_chat(username)
+                        log.info("Userbot left @%s", username)
+                    except Exception as exc:
+                        log.warning("Could not leave @%s: %s", username, exc)
                 await load_watched_channels()
                 log.info("Source removed: id=%s", text)
                 await message.reply("✅ Source removed.")

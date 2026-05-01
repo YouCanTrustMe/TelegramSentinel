@@ -105,6 +105,12 @@ async def mark_sent(item_ids: list[int]) -> None:
         await db.commit()
 
 
+async def category_exists(name: str) -> bool:
+    async with get_db() as db:
+        async with db.execute("SELECT 1 FROM categories WHERE name = ?", (name,)) as cur:
+            return await cur.fetchone() is not None
+
+
 async def get_categories() -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(

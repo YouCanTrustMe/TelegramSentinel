@@ -1,9 +1,10 @@
 import asyncio
 import logging
+from html import escape
 
 import feedparser
 from pyrogram import filters
-from pyrogram.types import Message
+from pyrogram.types import Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
 
 from src.collectors.folder_manager import add_to_folder, remove_from_folder
 from src.collectors.telegram_collector import load_watched_channels, userbot
@@ -11,6 +12,7 @@ from src.config import settings
 from src.db.models import (
     add_category,
     add_source,
+    category_exists,
     get_active_sources,
     get_categories,
     remove_category,
@@ -119,13 +121,20 @@ def register_commands() -> None:
             return
         time_str = parts[1]
         try:
-            h, m = map(int, time_str.split(":"))
+            parts_time = time_str.split(":")
+            assert len(parts_time) == 2
+            h, m = int(parts_time[0]), int(parts_time[1])
             assert 0 <= h < 24 and 0 <= m < 60
         except (ValueError, AssertionError):
             await message.reply("Invalid format. Use HH:MM (e.g. 20:00)")
             return
         from src.scheduler import reschedule_digest
-        reschedule_digest(time_str)
+        try:
+            reschedule_digest(time_str)
+        except Exception as exc:
+            log.error("Failed to reschedule digest: %s", exc)
+            await message.reply(f"❌ Failed to reschedule: {exc}")
+            return
         log.info("Digest rescheduled to %s (%s)", time_str, settings.digest_timezone)
         await message.reply(f"✅ Digest scheduled at <b>{time_str}</b> ({settings.digest_timezone})")
 
@@ -184,7 +193,7 @@ def register_commands() -> None:
                 state["step"] = 1
                 await message.reply("Emoji:")
             elif step == 1:
-                data["emoji"] = text
+                data["emoji"] = escape(text[:8])
                 await add_category(data["name"], data["emoji"])
                 del _pending[uid]
                 log.info("Category added: %s %s", data["emoji"], data["name"])
@@ -214,13 +223,24 @@ def register_commands() -> None:
                 data["type"] = source_type
                 state["step"] = 1
                 cats = await get_categories()
-                cats_hint = f" ({', '.join(r['name'] for r in cats)})" if cats else ""
-                await message.reply(f"Name: <b>{name}</b>\nCategory{cats_hint}:")
+                if cats:
+                    keyboard = ReplyKeyboardMarkup(
+                        [[KeyboardButton(r["name"])] for r in cats],
+                        one_time_keyboard=True,
+                        resize_keyboard=True,
+                    )
+                    await message.reply(f"Name: <b>{name}</b>\nCategory:", reply_markup=keyboard)
+                else:
+                    await message.reply(f"Name: <b>{name}</b>\nCategory:")
             elif step == 1:
                 data["category"] = text.lower()
                 url = data["url"]
                 source_type = data["type"]
+                if not await category_exists(data["category"]):
+                    await add_category(data["category"], "📌")
+                    log.info("Auto-created category: 📌 %s", data["category"])
                 source_id = await add_source(source_type, data["name"], url, data["category"])
+                join_warning = ""
                 if source_type == "telegram":
                     username = url.lstrip("@")
                     try:
@@ -228,13 +248,15 @@ def register_commands() -> None:
                         log.info("Userbot joined @%s", username)
                     except Exception as exc:
                         log.warning("Could not join @%s: %s", username, exc)
+                        join_warning = f"\n⚠️ Userbot failed to join: {exc}"
                     await add_to_folder(username)
                     await load_watched_channels()
                 del _pending[uid]
                 log.info("Source added: [%s] %s (%s) -> category=%s", source_type, data["name"], url, data["category"])
                 await message.reply(
                     f"✅ Added [{source_type}] <b>{data['name']}</b> — <code>{url}</code>\n"
-                    f"Category: <b>{data['category']}</b> | ID: <code>{source_id}</code>"
+                    f"Category: <b>{data['category']}</b> | ID: <code>{source_id}</code>{join_warning}",
+                    reply_markup=ReplyKeyboardRemove(),
                 )
 
         elif action == "remove_source":

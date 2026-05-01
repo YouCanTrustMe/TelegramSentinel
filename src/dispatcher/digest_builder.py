@@ -77,8 +77,17 @@ async def send_digest() -> bool:
     lines = _build_digest_text(cat_meta, date_str)
     messages = _split_into_messages(lines)
 
+    failed = False
     for msg in messages:
-        await send_message(msg)
+        try:
+            await send_message(msg)
+        except Exception as exc:
+            log.error("Failed to send digest message: %s", exc)
+            failed = True
+            break
+
+    if failed:
+        return False
 
     sent_ids = [item["id"] for item in items]
     await mark_sent(sent_ids)

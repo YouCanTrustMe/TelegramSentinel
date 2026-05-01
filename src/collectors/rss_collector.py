@@ -63,5 +63,8 @@ async def run_rss_collector() -> None:
         sources = await get_active_sources(type_="rss")
         tasks = [fetch_feed(r["id"], r["name"], r["url"], r["category"]) for r in sources]
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for source, result in zip(sources, results):
+                if isinstance(result, Exception):
+                    log.error("RSS feed '%s' failed: %s", source["name"], result)
         await asyncio.sleep(POLL_INTERVAL)

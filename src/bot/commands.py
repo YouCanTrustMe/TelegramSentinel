@@ -19,8 +19,11 @@ from src.db.models import (
     add_category,
     add_source,
     category_exists,
+    delete_sources_by_category,
     get_active_sources,
     get_categories,
+    get_sources_by_category,
+    move_sources_to_category,
     remove_category,
     remove_source,
     source_exists,
@@ -92,6 +95,7 @@ def _cat_edit_keyboard(cat_name: str) -> InlineKeyboardMarkup:
 
 def _source_view_keyboard(source_id: int, cat_name: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Reassign category", callback_data=f"src_reassign:{source_id}")],
         [InlineKeyboardButton("🗑 Remove source", callback_data=f"src_del:{source_id}")],
         [InlineKeyboardButton("◀ Back", callback_data=f"cat_view:{cat_name}")],
     ])
@@ -140,8 +144,6 @@ def register_commands() -> None:
     admin_msg = filters.user(settings.telegram_admin_id) & filters.private
     admin_cb = filters.user(settings.telegram_admin_id)
 
-    # ─── Misc ─────────────────────────────────────────────────────────────
-
     @bot.on_message(filters.command("cancel") & admin_msg)
     async def cmd_cancel(_, message: Message) -> None:
         uid = message.from_user.id
@@ -159,8 +161,6 @@ def register_commands() -> None:
     @bot.on_callback_query(filters.regex(r"^noop$") & admin_cb)
     async def cb_noop(_, query: CallbackQuery) -> None:
         await query.answer()
-
-    # ─── Categories (/categories) ──────────────────────────────────────────
 
     @bot.on_message(filters.command("categories") & admin_msg)
     async def cmd_categories(_, message: Message) -> None:
@@ -209,9 +209,28 @@ def register_commands() -> None:
     @bot.on_callback_query(filters.regex(r"^cat_del:") & admin_cb)
     async def cb_cat_del(_, query: CallbackQuery) -> None:
         cat_name = query.data.split(":", 1)[1]
+        sources = await get_sources_by_category(cat_name)
+        if not sources:
+            await query.message.edit_text(
+                f"Delete category <b>{cat_name}</b>?",
+                reply_markup=_confirm_keyboard(f"cat_del_ok:{cat_name}", f"cat_view:{cat_name}"),
+            )
+            return
+
+        cats = await get_categories()
+        other_cats = [c for c in cats if c["name"] != cat_name]
+        src_count = len(sources)
+        buttons = []
+        for c in other_cats:
+            buttons.append([InlineKeyboardButton(
+                f"Move to {c['emoji']} {c['name']}",
+                callback_data=f"cat_del_move:{cat_name}:{c['name']}",
+            )])
+        buttons.append([InlineKeyboardButton(f"🗑 Delete all {src_count} source(s) too", callback_data=f"cat_del_all:{cat_name}")])
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"cat_view:{cat_name}")])
         await query.message.edit_text(
-            f"Delete category <b>{cat_name}</b>? Sources in this category will lose their category assignment.",
-            reply_markup=_confirm_keyboard(f"cat_del_ok:{cat_name}", f"cat_view:{cat_name}"),
+            f"<b>{cat_name}</b> has <b>{src_count}</b> source(s). What to do with them?",
+            reply_markup=InlineKeyboardMarkup(buttons),
         )
 
     @bot.on_callback_query(filters.regex(r"^cat_del_ok:") & admin_cb)
@@ -228,6 +247,35 @@ def register_commands() -> None:
             ))
             return
         await query.message.edit_text("✅ Category removed.\n\nCategories:", reply_markup=_categories_keyboard(cats))
+
+    @bot.on_callback_query(filters.regex(r"^cat_del_move:") & admin_cb)
+    async def cb_cat_del_move(_, query: CallbackQuery) -> None:
+        _, from_cat, to_cat = query.data.split(":", 2)
+        await move_sources_to_category(from_cat, to_cat)
+        await remove_category(from_cat)
+        await rebuild_digest_jobs()
+        log.info("Category %s deleted, sources moved to %s", from_cat, to_cat)
+        cats = await get_categories()
+        text = f"✅ Sources moved to <b>{to_cat}</b>, category <b>{from_cat}</b> deleted.\n\nCategories:"
+        if not cats:
+            await query.message.edit_text(text.replace("\n\nCategories:", ""))
+        else:
+            await query.message.edit_text(text, reply_markup=_categories_keyboard(cats))
+
+    @bot.on_callback_query(filters.regex(r"^cat_del_all:") & admin_cb)
+    async def cb_cat_del_all(_, query: CallbackQuery) -> None:
+        cat_name = query.data.split(":", 1)[1]
+        await delete_sources_by_category(cat_name)
+        await remove_category(cat_name)
+        await rebuild_digest_jobs()
+        log.info("Category %s deleted with all sources", cat_name)
+        cats = await get_categories()
+        if not cats:
+            await query.message.edit_text("✅ Category and all sources deleted.", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
+            ))
+            return
+        await query.message.edit_text("✅ Category and all sources deleted.\n\nCategories:", reply_markup=_categories_keyboard(cats))
 
     @bot.on_callback_query(filters.regex(r"^cat_edit:") & admin_cb)
     async def cb_cat_edit(_, query: CallbackQuery) -> None:
@@ -267,8 +315,6 @@ def register_commands() -> None:
                 f"New digest time for <b>{cat_name}</b> (HH:MM):\nCurrent: <b>{current}</b>",
                 reply_markup=_edit_time_kb(cat_name),
             )
-
-    # ─── Sources (/sources) ────────────────────────────────────────────────
 
     @bot.on_message(filters.command("sources") & admin_msg)
     async def cmd_sources(_, message: Message) -> None:
@@ -333,6 +379,44 @@ def register_commands() -> None:
         )
         await query.message.edit_text(text, reply_markup=_source_view_keyboard(src_id, s["category"]))
 
+    @bot.on_callback_query(filters.regex(r"^src_reassign:") & admin_cb)
+    async def cb_src_reassign(_, query: CallbackQuery) -> None:
+        src_id = int(query.data.split(":", 1)[1])
+        cats = await get_categories()
+        if not cats:
+            await query.answer("No categories available.", show_alert=True)
+            return
+        buttons = [
+            [InlineKeyboardButton(f"{c['emoji']} {c['name']}", callback_data=f"src_reassign_to:{src_id}:{c['name']}")]
+            for c in cats
+        ]
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"src_view:{src_id}")])
+        await query.message.edit_text("Move to category:", reply_markup=InlineKeyboardMarkup(buttons))
+
+    @bot.on_callback_query(filters.regex(r"^src_reassign_to:") & admin_cb)
+    async def cb_src_reassign_to(_, query: CallbackQuery) -> None:
+        _, src_id_str, cat_name = query.data.split(":", 2)
+        src_id = int(src_id_str)
+        async with __import__("aiosqlite").connect(settings.database_path) as db:
+            await db.execute("UPDATE sources SET category = ? WHERE id = ?", (cat_name, src_id))
+            await db.execute("UPDATE items SET category = ? WHERE source_id = ? AND sent = 0", (cat_name, src_id))
+            await db.commit()
+        log.info("Source id=%s reassigned to category=%s", src_id, cat_name)
+        sources = await get_active_sources()
+        s = next((x for x in sources if x["id"] == src_id), None)
+        if s:
+            icon = "📡" if s["type"] == "telegram" else "🔗"
+            type_label = "tg" if s["type"] == "telegram" else "rss"
+            text = (
+                f"{icon} <b>{s['name']}</b>\n"
+                f"Type: <code>{type_label}</code>\n"
+                f"URL: <code>{s['url']}</code>\n"
+                f"Category: <b>{s['category']}</b>"
+            )
+            await query.message.edit_text(f"✅ Reassigned.\n\n{text}", reply_markup=_source_view_keyboard(src_id, cat_name))
+        else:
+            await query.message.edit_text("✅ Reassigned.")
+
     @bot.on_callback_query(filters.regex(r"^src_del:") & admin_cb)
     async def cb_src_del(_, query: CallbackQuery) -> None:
         src_id = int(query.data.split(":", 1)[1])
@@ -388,8 +472,6 @@ def register_commands() -> None:
         prompt = f"Adding source to <b>{cat_name}</b>.\n\nURL or @channel:" if cat_name else "URL or @channel:"
         await query.message.edit_text(prompt, reply_markup=_back_kb(back))
 
-    # ─── Digest & Stats ───────────────────────────────────────────────────
-
     @bot.on_message(filters.command("digest") & admin_msg)
     async def cmd_digest(_, message: Message) -> None:
         log.info("Manual digest triggered by user")
@@ -436,8 +518,6 @@ def register_commands() -> None:
             "/stats — statistics\n"
             "/cancel — cancel current input"
         )
-
-    # ─── Conversation handler ─────────────────────────────────────────────
 
     @bot.on_callback_query(filters.regex(r"^add_src_cat:") & admin_cb)
     async def cb_add_src_cat(_, query: CallbackQuery) -> None:

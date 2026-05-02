@@ -167,6 +167,33 @@ async def update_category(
         return True
 
 
+async def get_sources_by_category(cat_name: str) -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT * FROM sources WHERE category = ? AND is_active = 1", (cat_name,)
+        ) as cur:
+            return await cur.fetchall()
+
+
+async def move_sources_to_category(from_cat: str, to_cat: str) -> None:
+    async with get_db() as db:
+        await db.execute("UPDATE sources SET category = ? WHERE category = ?", (to_cat, from_cat))
+        await db.execute("UPDATE items SET category = ? WHERE category = ?", (to_cat, from_cat))
+        await db.commit()
+
+
+async def delete_sources_by_category(cat_name: str) -> None:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT id FROM sources WHERE category = ?", (cat_name,)
+        ) as cur:
+            source_ids = [r[0] for r in await cur.fetchall()]
+        for sid in source_ids:
+            await db.execute("DELETE FROM items WHERE source_id = ?", (sid,))
+        await db.execute("DELETE FROM sources WHERE category = ?", (cat_name,))
+        await db.commit()
+
+
 async def remove_category(name: str) -> bool:
     async with get_db() as db:
         cur = await db.execute("DELETE FROM categories WHERE name = ?", (name,))

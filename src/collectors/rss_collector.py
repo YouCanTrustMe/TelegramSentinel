@@ -44,13 +44,9 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str) -> int:
             published_at=published_at,
             summary=result.summary,
             category=category,
-            importance=result.importance,
             processed_at=datetime.now(timezone.utc).isoformat(),
         )
-        log.info(
-            "Saved item from '%s' | category=%s importance=%s | %s",
-            name, category, result.importance, (entry_url or message_id)[:80],
-        )
+        log.info("Saved item from '%s' | category=%s | %s", name, category, (entry_url or message_id)[:80])
         saved += 1
 
     log.info("RSS '%s': %d new items", name, saved)

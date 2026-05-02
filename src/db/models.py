@@ -15,10 +15,10 @@ async def get_db():
 
 async def init_db() -> None:
     Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
-    migration = Path(__file__).parent / "migrations" / "001_initial.sql"
-    sql = migration.read_text()
+    migrations_dir = Path(__file__).parent / "migrations"
     async with aiosqlite.connect(settings.database_path) as db:
-        await db.executescript(sql)
+        for migration in sorted(migrations_dir.glob("*.sql")):
+            await db.executescript(migration.read_text())
         await db.commit()
 
 
@@ -40,6 +40,7 @@ async def add_source(type_: str, name: str, url: str, category: str) -> int:
 
 async def remove_source(source_id: int) -> bool:
     async with get_db() as db:
+        await db.execute("DELETE FROM items WHERE source_id = ?", (source_id,))
         cur = await db.execute("DELETE FROM sources WHERE id = ?", (source_id,))
         await db.commit()
         return cur.rowcount > 0
@@ -72,17 +73,16 @@ async def save_item(
     published_at: str | None,
     summary: str | None,
     category: str,
-    importance: str,
     processed_at: str,
 ) -> int:
     async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO items
                (source_id, message_id, raw_text, original_url, published_at,
-                summary, category, importance, processed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                summary, category, processed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (source_id, message_id, raw_text, original_url, published_at,
-             summary, category, importance, processed_at),
+             summary, category, processed_at),
         )
         await db.commit()
         return cur.lastrowid
@@ -91,7 +91,11 @@ async def save_item(
 async def get_unsent_items() -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(
-            "SELECT * FROM items WHERE sent = 0 ORDER BY category, importance DESC, published_at ASC"
+            """SELECT items.*, sources.name AS source_name
+               FROM items
+               LEFT JOIN sources ON items.source_id = sources.id
+               WHERE items.sent = 0
+               ORDER BY category, source_id, published_at ASC"""
         ) as cur:
             return await cur.fetchall()
 

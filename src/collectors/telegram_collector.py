@@ -54,30 +54,11 @@ async def _process_message(username: str, source: dict, message: Message) -> boo
         published_at=published_at,
         summary=result.summary,
         category=source["category"],
-        importance=result.importance,
         processed_at=datetime.now(timezone.utc).isoformat(),
     )
-    log.info(
-        "Saved item from @%s | category=%s importance=%s | %s",
-        username, source["category"], result.importance, original_url,
-    )
+    log.info("Saved item from @%s | category=%s | %s", username, source["category"], original_url)
     return True
 
-
-async def backfill_channels(limit: int = 50) -> None:
-    """Fetch recent history from all watched channels to recover messages missed during downtime."""
-    if not _watched:
-        return
-    log.info("Backfilling last %d messages from %d channel(s)", limit, len(_watched))
-    for username, source in _watched.items():
-        saved = 0
-        try:
-            async for message in userbot.get_chat_history(username, limit=limit):
-                if await _process_message(username, source, message):
-                    saved += 1
-        except Exception as exc:
-            log.warning("Backfill failed for @%s: %s", username, exc)
-        log.info("Backfill @%s: %d new item(s) saved", username, saved)
 
 
 def register_handlers() -> None:

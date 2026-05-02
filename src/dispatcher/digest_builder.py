@@ -1,4 +1,5 @@
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from html import escape
 
@@ -10,34 +11,36 @@ log = logging.getLogger(__name__)
 _TELEGRAM_LIMIT = 4000
 
 
-def _format_high(item) -> str:
+def _format_item(item) -> str:
     url = item["original_url"] or ""
-    link = f' <a href="{url}">→</a>' if url else ""
-    return f"• {escape(item['summary'] or '')}{link}"
+    summary = escape(item["summary"] or (item["raw_text"] or "")[:60].split("\n")[0])
+    hour = ""
+    if item["published_at"]:
+        try:
+            hour = f"{datetime.fromisoformat(item['published_at']).hour}h "
+        except Exception:
+            pass
+    text = f"{hour}{summary}"
+    return f'<a href="{url}">{text}</a>' if url else text
 
 
-def _format_low(item) -> str:
-    url = item["original_url"] or ""
-    title = escape((item["raw_text"] or "")[:80].split("\n")[0])
-    return f'• <a href="{url}">{title}</a>' if url else f"• {title}"
-
-
-def _build_digest_text(sections: dict[str, dict], date_str: str) -> list[str]:
+def _build_digest_text(cat_meta: dict, date_str: str) -> list[str]:
     lines = [f"<b>📋 Digest — {date_str}</b>"]
 
-    for cat_name, data in sections.items():
-        emoji = data["emoji"]
-        high = data["high"]
-        low = data["low"]
-
-        if not high and not low:
+    for cat_name, data in cat_meta.items():
+        sources = data["sources"]
+        if not any(sources.values()):
             continue
 
-        lines.append(f"\n<b>{emoji} {cat_name.capitalize()}</b>")
-        for item in high:
-            lines.append(_format_high(item))
-        for item in low:
-            lines.append(_format_low(item))
+        lines.append(f"\n<b>{data['emoji']} {cat_name.capitalize()}</b>")
+
+        for source_name, source_items in sources.items():
+            if not source_items:
+                continue
+            block_lines = [escape(source_name)]
+            for item in source_items:
+                block_lines.append(_format_item(item))
+            lines.append("<blockquote>" + "\n".join(block_lines) + "</blockquote>")
 
     return lines
 
@@ -64,14 +67,17 @@ async def send_digest() -> bool:
         return False
 
     categories = await get_categories()
-    cat_meta = {row["name"]: {"emoji": row["emoji"], "high": [], "low": []} for row in categories}
+    cat_meta = {
+        row["name"]: {"emoji": row["emoji"], "sources": defaultdict(list)}
+        for row in categories
+    }
 
     for item in items:
         cat = item["category"] or "other"
         if cat not in cat_meta:
-            cat_meta[cat] = {"emoji": "📌", "high": [], "low": []}
-        bucket = "high" if item["importance"] == "high" else "low"
-        cat_meta[cat][bucket].append(item)
+            cat_meta[cat] = {"emoji": "📌", "sources": defaultdict(list)}
+        source_name = item["source_name"] or "Unknown"
+        cat_meta[cat]["sources"][source_name].append(item)
 
     date_str = datetime.now(timezone.utc).strftime("%d %B %Y")
     lines = _build_digest_text(cat_meta, date_str)
@@ -92,12 +98,6 @@ async def send_digest() -> bool:
     sent_ids = [item["id"] for item in items]
     await mark_sent(sent_ids)
 
-    high_count = sum(len(d["high"]) for d in cat_meta.values())
-    low_count = sum(len(d["low"]) for d in cat_meta.values())
-    await log_digest(total=len(items), high=high_count, low=low_count)
-
-    log.info(
-        "Digest sent: %d total | %d high | %d low | %d message(s)",
-        len(items), high_count, low_count, len(messages),
-    )
+    await log_digest(total=len(items), high=0, low=0)
+    log.info("Digest sent: %d total | %d message(s)", len(items), len(messages))
     return True

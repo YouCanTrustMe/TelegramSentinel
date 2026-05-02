@@ -17,18 +17,14 @@ _rate_lock = asyncio.Lock()
 _last_call_time: float = 0.0
 _MIN_INTERVAL = 60.0 / 14  # stay under 15 RPM free tier
 
-_SYSTEM_PROMPT = """You are a news importance classifier and summarizer.
+_SYSTEM_PROMPT = """You are a news summarizer.
 
 Your task:
-1. Classify the news as "high" or "low" importance.
-2. Write a one-sentence summary in Ukrainian (max 150 characters).
-
-High importance criteria:
-- Contains specific facts, numbers, decisions, or events
-- Not an opinion, advertisement, or repost without new information
+1. Rate the news 1-5: 5=breaking/facts/decisions, 1=ads/opinions/reposts.
+2. Write a summary in Ukrainian, max 7-8 words. Use your own words if needed.
 
 Respond ONLY with valid JSON:
-{"importance": "high" | "low", "summary": "<Ukrainian summary>"}"""
+{"score": 1-5, "summary": "<Ukrainian max 8 words>"}"""
 
 _model = genai.GenerativeModel(
     model_name=settings.gemini_model,
@@ -38,7 +34,6 @@ _model = genai.GenerativeModel(
 
 @dataclass
 class ClassificationResult:
-    importance: str
     summary: str
 
 
@@ -50,7 +45,7 @@ async def classify(text: str) -> ClassificationResult:
             await asyncio.sleep(_MIN_INTERVAL - elapsed)
         _last_call_time = time.monotonic()
 
-    for attempt in range(4):
+    for attempt in range(3):
         try:
             response = await _model.generate_content_async(
                 text[:4000],
@@ -60,19 +55,18 @@ async def classify(text: str) -> ClassificationResult:
                 ),
             )
             data = json.loads(response.text)
-            result = ClassificationResult(
-                importance=data.get("importance", "low"),
-                summary=data.get("summary", ""),
-            )
-            log.debug("Classified: importance=%s", result.importance)
+            score = max(1, min(5, int(data.get("score", 1))))
+            stars = "★" * score + "☆" * (5 - score)
+            result = ClassificationResult(summary=f"{stars} {data.get('summary', '')}")
+            log.debug("Classified: %s", result.summary)
             return result
         except ResourceExhausted:
-            wait = 5 * 2 ** attempt  # 5s, 10s, 20s, 40s
-            log.warning("Gemini rate limited, retrying in %ds (attempt %d/4)", wait, attempt + 1)
+            wait = 180
+            log.warning("Gemini quota hit, waiting %ds (attempt %d/3)", wait, attempt + 1)
             await asyncio.sleep(wait)
         except Exception as exc:
-            log.warning("Classification failed, using fallback: %s", exc)
-            return ClassificationResult(importance="low", summary="")
+            log.warning("Classification error, using fallback: %s", exc)
+            return ClassificationResult(summary="")
 
-    log.warning("Classification failed after 4 retries, using fallback")
-    return ClassificationResult(importance="low", summary="")
+    log.warning("Classification failed after 3 retries, using fallback")
+    return ClassificationResult(summary="")

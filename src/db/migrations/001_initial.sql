@@ -23,7 +23,6 @@ CREATE TABLE IF NOT EXISTS items (
     raw_text TEXT NOT NULL,
     summary TEXT,
     category TEXT,
-    importance TEXT CHECK(importance IN ('high', 'low')),
     published_at TEXT,
     processed_at TEXT,
     sent INTEGER NOT NULL DEFAULT 0
@@ -38,5 +37,4 @@ CREATE TABLE IF NOT EXISTS digest_log (
     status TEXT NOT NULL DEFAULT 'ok'
 );
 
-CREATE INDEX IF NOT EXISTS idx_items_importance ON items(importance, sent);
 CREATE INDEX IF NOT EXISTS idx_items_processed_at ON items(processed_at);

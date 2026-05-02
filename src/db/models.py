@@ -13,40 +13,31 @@ async def get_db():
         yield db
 
 
-async def _detect_applied_migrations(db, migrations_dir) -> None:
-    """Bootstrap: infer which migrations are already applied from the current schema."""
+async def _schema_has_migration(db, migration) -> bool:
     import re
-    for migration in sorted(migrations_dir.glob("*.sql")):
-        sql = migration.read_text()
-        applied = True
-        for stmt in re.split(r";\s*", sql):
-            stmt_up = stmt.strip().upper()
-            if not stmt_up:
-                continue
-            m = re.search(r"CREATE TABLE\s+IF NOT EXISTS\s+(\w+)", stmt_up)
-            if m:
-                table = m.group(1).lower()
-                async with db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
-                ) as cur:
-                    if not await cur.fetchone():
-                        applied = False
-                        break
-                continue
-            m = re.search(r"ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)", stmt_up)
-            if m:
-                table, col = m.group(1).lower(), m.group(2).lower()
-                async with db.execute(
-                    f"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name='{col}'"
-                ) as cur:
-                    if (await cur.fetchone())[0] == 0:
-                        applied = False
-                        break
-        if applied:
-            await db.execute(
-                "INSERT OR IGNORE INTO _migrations (name) VALUES (?)", (migration.name,)
-            )
-    await db.commit()
+    sql = migration.read_text()
+    for stmt in re.split(r";\s*", sql):
+        stmt_up = stmt.strip().upper()
+        if not stmt_up:
+            continue
+        m = re.search(r"CREATE TABLE\s+IF NOT EXISTS\s+(\w+)", stmt_up)
+        if m:
+            async with db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (m.group(1).lower(),),
+            ) as cur:
+                if not await cur.fetchone():
+                    return False
+            continue
+        m = re.search(r"ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)", stmt_up)
+        if m:
+            table, col = m.group(1).lower(), m.group(2).lower()
+            async with db.execute(
+                f"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name=?", (col,)
+            ) as cur:
+                if (await cur.fetchone())[0] == 0:
+                    return False
+    return True
 
 
 async def init_db() -> None:
@@ -57,14 +48,15 @@ async def init_db() -> None:
             "CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY)"
         )
         await db.commit()
-        async with db.execute("SELECT COUNT(*) FROM _migrations") as cur:
-            if (await cur.fetchone())[0] == 0:
-                await _detect_applied_migrations(db, migrations_dir)
         for migration in sorted(migrations_dir.glob("*.sql")):
             name = migration.name
             async with db.execute("SELECT 1 FROM _migrations WHERE name = ?", (name,)) as cur:
                 if await cur.fetchone():
                     continue
+            if await _schema_has_migration(db, migration):
+                await db.execute("INSERT INTO _migrations (name) VALUES (?)", (name,))
+                await db.commit()
+                continue
             await db.executescript(migration.read_text())
             await db.execute("INSERT INTO _migrations (name) VALUES (?)", (name,))
             await db.commit()

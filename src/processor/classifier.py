@@ -4,18 +4,17 @@ import logging
 import time
 from dataclasses import dataclass
 
-import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
+from groq import AsyncGroq, RateLimitError
 
 from src.config import settings
 
 log = logging.getLogger(__name__)
 
-genai.configure(api_key=settings.gemini_api_key)
+_client = AsyncGroq(api_key=settings.groq_api_key)
 
 _rate_lock = asyncio.Lock()
 _last_call_time: float = 0.0
-_MIN_INTERVAL = 60.0 / 14  # stay under 15 RPM free tier
+_MIN_INTERVAL = 60.0 / 25  # stay under 30 RPM free tier
 
 _SYSTEM_PROMPT = """You are a news summarizer.
 
@@ -25,11 +24,6 @@ Your task:
 
 Respond ONLY with valid JSON:
 {"score": 1-5, "summary": "<Ukrainian max 8 words>"}"""
-
-_model = genai.GenerativeModel(
-    model_name=settings.gemini_model,
-    system_instruction=_SYSTEM_PROMPT,
-)
 
 
 @dataclass
@@ -45,28 +39,31 @@ async def classify(text: str) -> ClassificationResult:
             await asyncio.sleep(_MIN_INTERVAL - elapsed)
         _last_call_time = time.monotonic()
 
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            response = await _model.generate_content_async(
-                text[:4000],
-                generation_config=genai.GenerationConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1,
-                ),
+            response = await _client.chat.completions.create(
+                model=settings.groq_model,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": text[:4000]},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
             )
-            data = json.loads(response.text)
+            data = json.loads(response.choices[0].message.content)
             score = max(1, min(5, int(data.get("score", 1))))
             stars = "★" * score + "☆" * (5 - score)
             result = ClassificationResult(summary=f"{stars} {data.get('summary', '')}")
             log.debug("Classified: %s", result.summary)
             return result
-        except ResourceExhausted:
-            wait = 180
-            log.warning("Gemini quota hit, waiting %ds (attempt %d/3)", wait, attempt + 1)
-            await asyncio.sleep(wait)
+        except RateLimitError:
+            if attempt == 0:
+                log.warning("Groq rate limit hit, waiting 30s")
+                await asyncio.sleep(30)
+            else:
+                log.warning("Groq rate limit hit again, using fallback")
         except Exception as exc:
             log.warning("Classification error, using fallback: %s", exc)
-            return ClassificationResult(summary="")
+            break
 
-    log.warning("Classification failed after 3 retries, using fallback")
     return ClassificationResult(summary="")

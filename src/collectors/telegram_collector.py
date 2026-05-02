@@ -18,16 +18,22 @@ userbot = Client(
     phone_number=settings.telegram_phone,
 )
 
-_watched: dict[str, dict] = {}
+_watched: dict[int, dict] = {}  # chat_id -> source meta
 
 
 async def load_watched_channels() -> None:
     sources = await get_active_sources(type_="telegram")
     _watched.clear()
     for row in sources:
-        username = row["url"].lstrip("@").lower()
-        _watched[username] = {"id": row["id"], "name": row["name"], "category": row["category"]}
-    log.info("Watching %d Telegram channel(s): %s", len(_watched), list(_watched.keys()))
+        username = row["url"].lstrip("@")
+        try:
+            chat = await userbot.get_chat(username)
+            chat_id = chat.id
+            _watched[chat_id] = {"id": row["id"], "name": row["name"], "category": row["category"], "username": username.lower()}
+            log.info("Watching channel @%s (id=%d)", username, chat_id)
+        except Exception as exc:
+            log.error("Could not resolve channel @%s: %s", username, exc)
+    log.info("Watching %d Telegram channel(s)", len(_watched))
 
 
 async def _process_message(username: str, source: dict, message: Message) -> bool:
@@ -64,10 +70,12 @@ async def _process_message(username: str, source: dict, message: Message) -> boo
 def register_handlers() -> None:
     @userbot.on_message(filters.channel)
     async def on_channel_message(client: Client, message: Message) -> None:
-        username = (message.chat.username or "").lower()
-        source = _watched.get(username)
+        chat_id = message.chat.id
+        log.info("Channel update: chat_id=%d username=%s msg_id=%s", chat_id, message.chat.username, message.id)
+        source = _watched.get(chat_id)
         if not source:
             return
+        username = source["username"]
         try:
             await _process_message(username, source, message)
         except Exception as exc:

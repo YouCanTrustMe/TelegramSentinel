@@ -1,5 +1,7 @@
 import asyncio
+import html
 import logging
+import re
 from datetime import datetime, timezone
 
 import feedparser
@@ -9,6 +11,12 @@ from src.processor.classifier import classify
 from src.processor.deduplicator import is_duplicate, make_message_id
 
 log = logging.getLogger(__name__)
+
+
+def _strip_html(text: str) -> str:
+    text = html.unescape(text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 POLL_INTERVAL = 900
 
@@ -26,8 +34,10 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str) -> int:
             log.debug("Skipping duplicate: %s", message_id)
             continue
 
-        raw_text = entry.get("summary") or entry.get("title", "")
-        if not raw_text.strip():
+        title = entry.get("title", "")
+        summary_html = entry.get("summary", "")
+        raw_text = _strip_html(summary_html) or _strip_html(title)
+        if not raw_text:
             continue
 
         published_at = None

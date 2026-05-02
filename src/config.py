@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     telegram_supergroup_id: int
     telegram_admin_id: int
 
-    gemini_api_key: str
-    gemini_model: str = "gemini-2.0-flash"
+    groq_api_key: str
+    groq_model: str = "llama-3.3-70b-versatile"
 
     digest_time: str = "20:00"
     digest_timezone: str = "Europe/Berlin"

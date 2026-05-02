@@ -5,7 +5,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.db.models import get_categories, get_unsent_items, log_digest, mark_sent
+from src.db.models import get_blocked_words, get_categories, get_unsent_items, log_digest, mark_sent
 from src.dispatcher.sender import send_message
 from src.processor.classifier import group_by_topic
 
@@ -129,6 +129,24 @@ async def send_digest(categories: list[str] | None = None) -> bool:
     if not items:
         log.info("Digest triggered: no unsent items | filter=%s", categories)
         return False
+
+    blocked_words = await get_blocked_words()
+    if blocked_words:
+        blocked_lower = [b["word"].lower() for b in blocked_words]
+        filtered, blocked_ids = [], []
+        for item in items:
+            text_to_check = ((item["summary"] or "") + " " + (item["raw_text"] or "")).lower()
+            if any(w in text_to_check for w in blocked_lower):
+                blocked_ids.append(item["id"])
+            else:
+                filtered.append(item)
+        if blocked_ids:
+            await mark_sent(blocked_ids)
+            log.info("Blocked %d item(s) by keyword filter", len(blocked_ids))
+        items = filtered
+        if not items:
+            log.info("Digest triggered: all items filtered by blocked words | filter=%s", categories)
+            return False
 
     all_categories = await get_categories()
     cat_meta = {

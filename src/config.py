@@ -15,7 +15,6 @@ class Settings(BaseSettings):
     groq_api_key: str
     groq_model: str = "llama-3.3-70b-versatile"
 
-    digest_time: str = "20:00"
     digest_timezone: str = "Europe/Berlin"
 
     database_path: str = "data/sentinel.db"

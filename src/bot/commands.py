@@ -24,17 +24,29 @@ from src.db.models import (
     remove_category,
     remove_source,
     source_exists,
+    update_category,
 )
 from src.dispatcher.digest_builder import send_digest
 from src.dispatcher.sender import bot
+from src.scheduler import rebuild_digest_jobs
 
 log = logging.getLogger(__name__)
 
 _pending: dict[int, dict] = {}
 
+_DEFAULT_DIGEST_TIME = "21:00"
+
 
 def _is_rss(url: str) -> bool:
     return url.startswith("http://") or url.startswith("https://")
+
+
+def _is_valid_time(t: str) -> bool:
+    try:
+        h, m = map(int, t.split(":"))
+        return 0 <= h < 24 and 0 <= m < 60
+    except (ValueError, AttributeError):
+        return False
 
 
 def _cancel_kb() -> InlineKeyboardMarkup:
@@ -46,9 +58,12 @@ def _back_kb(back_data: str) -> InlineKeyboardMarkup:
 
 
 def _categories_keyboard(cats) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(f"{r['emoji']} {r['name']}", callback_data=f"cat_view:{r['name']}")] for r in cats]
-    )
+    buttons = [
+        [InlineKeyboardButton(f"{r['emoji']} {r['name']} · {r['digest_time']}", callback_data=f"cat_view:{r['name']}")]
+        for r in cats
+    ]
+    buttons.append([InlineKeyboardButton("➕ Add category", callback_data="cat_add")])
+    return InlineKeyboardMarkup(buttons)
 
 
 def _category_view_keyboard(cat_name: str, sources) -> InlineKeyboardMarkup:
@@ -59,10 +74,20 @@ def _category_view_keyboard(cat_name: str, sources) -> InlineKeyboardMarkup:
         buttons.append([InlineKeyboardButton(f"{icon} [{type_label}] {s['name']}", callback_data=f"src_view:{s['id']}")])
     buttons.append([
         InlineKeyboardButton("➕ Add source", callback_data=f"src_add:{cat_name}"),
+        InlineKeyboardButton("✏️ Edit", callback_data=f"cat_edit:{cat_name}"),
         InlineKeyboardButton("🗑 Delete", callback_data=f"cat_del:{cat_name}"),
     ])
     buttons.append([InlineKeyboardButton("◀ Back", callback_data="cat_list")])
     return InlineKeyboardMarkup(buttons)
+
+
+def _cat_edit_keyboard(cat_name: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Rename", callback_data=f"cat_edit_field:{cat_name}:name")],
+        [InlineKeyboardButton("🎨 Change emoji", callback_data=f"cat_edit_field:{cat_name}:emoji")],
+        [InlineKeyboardButton("🕐 Change digest time", callback_data=f"cat_edit_field:{cat_name}:time")],
+        [InlineKeyboardButton("◀ Back", callback_data=f"cat_view:{cat_name}")],
+    ])
 
 
 def _source_view_keyboard(source_id: int, cat_name: str) -> InlineKeyboardMarkup:
@@ -77,6 +102,38 @@ def _confirm_keyboard(yes_data: str, no_data: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton("✅ Yes", callback_data=yes_data),
         InlineKeyboardButton("❌ No", callback_data=no_data),
     ]])
+
+
+def _time_step_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"⏭ Default ({_DEFAULT_DIGEST_TIME})", callback_data="cat_add_time_default")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_flow")],
+    ])
+
+
+def _edit_time_kb(back_cat: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"cat_edit:{back_cat}")],
+    ])
+
+
+async def _cat_view_text(cat_name: str) -> tuple[str, list]:
+    cats = await get_categories()
+    sources = [s for s in await get_active_sources() if s["category"] == cat_name]
+    cat = next((c for c in cats if c["name"] == cat_name), None)
+    emoji = cat["emoji"] if cat else "📌"
+    digest_time = cat["digest_time"] if cat else _DEFAULT_DIGEST_TIME
+
+    if not sources:
+        text = f"<b>{emoji} {cat_name}</b>  ·  ⏰ {digest_time}\n\nNo sources yet."
+    else:
+        lines = [f"<b>{emoji} {cat_name}</b>  ·  ⏰ {digest_time}\n"]
+        for s in sources:
+            icon = "📡" if s["type"] == "telegram" else "🔗"
+            type_label = "tg" if s["type"] == "telegram" else "rss"
+            lines.append(f"{icon} [{type_label}] <b>{s['name']}</b> — <code>{s['url']}</code>")
+        text = "\n".join(lines)
+    return text, sources
 
 
 def register_commands() -> None:
@@ -103,13 +160,15 @@ def register_commands() -> None:
     async def cb_noop(_, query: CallbackQuery) -> None:
         await query.answer()
 
-    # ─── Categories ───────────────────────────────────────────────────────
+    # ─── Categories (/categories) ──────────────────────────────────────────
 
-    @bot.on_message(filters.command("list_categories") & admin_msg)
-    async def cmd_list_categories(_, message: Message) -> None:
+    @bot.on_message(filters.command("categories") & admin_msg)
+    async def cmd_categories(_, message: Message) -> None:
         cats = await get_categories()
         if not cats:
-            await message.reply("No categories configured.")
+            await message.reply("No categories yet.", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
+            ))
             return
         await message.reply("Categories:", reply_markup=_categories_keyboard(cats))
 
@@ -118,7 +177,9 @@ def register_commands() -> None:
         _pending.pop(query.from_user.id, None)
         cats = await get_categories()
         if not cats:
-            await query.message.edit_text("No categories configured.")
+            await query.message.edit_text("No categories yet.", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
+            ))
             return
         await query.message.edit_text("Categories:", reply_markup=_categories_keyboard(cats))
 
@@ -126,28 +187,30 @@ def register_commands() -> None:
     async def cb_cat_view(_, query: CallbackQuery) -> None:
         _pending.pop(query.from_user.id, None)
         cat_name = query.data.split(":", 1)[1]
-        cats = await get_categories()
-        sources = [s for s in await get_active_sources() if s["category"] == cat_name]
-        cat = next((c for c in cats if c["name"] == cat_name), None)
-        emoji = cat["emoji"] if cat else "📌"
-
-        if not sources:
-            text = f"<b>{emoji} {cat_name}</b>\n\nNo sources yet."
-        else:
-            lines = [f"<b>{emoji} {cat_name}</b>\n"]
-            for s in sources:
-                icon = "📡" if s["type"] == "telegram" else "🔗"
-                type_label = "tg" if s["type"] == "telegram" else "rss"
-                lines.append(f"{icon} [{type_label}] <b>{s['name']}</b> — <code>{s['url']}</code>")
-            text = "\n".join(lines)
-
+        text, sources = await _cat_view_text(cat_name)
         await query.message.edit_text(text, reply_markup=_category_view_keyboard(cat_name, sources))
+
+    @bot.on_callback_query(filters.regex(r"^cat_add$") & admin_cb)
+    async def cb_cat_add(_, query: CallbackQuery) -> None:
+        uid = query.from_user.id
+        _pending[uid] = {"action": "add_category", "step": 0, "data": {}}
+        await query.message.edit_text("Category name:", reply_markup=_cancel_kb())
+
+    @bot.on_callback_query(filters.regex(r"^cat_add_time_default$") & admin_cb)
+    async def cb_cat_add_time_default(_, query: CallbackQuery) -> None:
+        uid = query.from_user.id
+        if uid not in _pending or _pending[uid].get("action") != "add_category":
+            await query.answer("Session expired.", show_alert=True)
+            return
+        data = _pending[uid]["data"]
+        data["digest_time"] = _DEFAULT_DIGEST_TIME
+        await _finalize_add_category(uid, data, query.message, reply=False)
 
     @bot.on_callback_query(filters.regex(r"^cat_del:") & admin_cb)
     async def cb_cat_del(_, query: CallbackQuery) -> None:
         cat_name = query.data.split(":", 1)[1]
         await query.message.edit_text(
-            f"Delete category <b>{cat_name}</b>?",
+            f"Delete category <b>{cat_name}</b>? Sources in this category will lose their category assignment.",
             reply_markup=_confirm_keyboard(f"cat_del_ok:{cat_name}", f"cat_view:{cat_name}"),
         )
 
@@ -157,25 +220,76 @@ def register_commands() -> None:
         removed = await remove_category(cat_name)
         if removed:
             log.info("Category removed: %s", cat_name)
+            await rebuild_digest_jobs()
         cats = await get_categories()
         if not cats:
-            await query.message.edit_text("✅ Category removed. No categories left.")
+            await query.message.edit_text("✅ Category removed. No categories left.", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
+            ))
             return
         await query.message.edit_text("✅ Category removed.\n\nCategories:", reply_markup=_categories_keyboard(cats))
 
-    @bot.on_message(filters.command("add_category") & admin_msg)
-    async def cmd_add_category(_, message: Message) -> None:
-        _pending[message.from_user.id] = {"action": "add_category", "step": 0, "data": {}}
-        await message.reply("Category name:", reply_markup=_cancel_kb())
+    @bot.on_callback_query(filters.regex(r"^cat_edit:") & admin_cb)
+    async def cb_cat_edit(_, query: CallbackQuery) -> None:
+        _pending.pop(query.from_user.id, None)
+        cat_name = query.data.split(":", 1)[1]
+        cats = await get_categories()
+        cat = next((c for c in cats if c["name"] == cat_name), None)
+        emoji = cat["emoji"] if cat else "📌"
+        digest_time = cat["digest_time"] if cat else _DEFAULT_DIGEST_TIME
+        await query.message.edit_text(
+            f"✏️ Edit <b>{emoji} {cat_name}</b>  ·  ⏰ {digest_time}",
+            reply_markup=_cat_edit_keyboard(cat_name),
+        )
 
-    # ─── Sources ──────────────────────────────────────────────────────────
+    @bot.on_callback_query(filters.regex(r"^cat_edit_field:") & admin_cb)
+    async def cb_cat_edit_field(_, query: CallbackQuery) -> None:
+        parts = query.data.split(":", 2)
+        cat_name, field = parts[1], parts[2]
+        uid = query.from_user.id
+        _pending[uid] = {"action": "edit_category", "step": 0, "data": {"cat_name": cat_name, "field": field}}
 
-    @bot.on_message((filters.command("list_sources") | filters.command("remove_source")) & admin_msg)
-    async def cmd_list_sources(_, message: Message) -> None:
+        if field == "name":
+            await query.message.edit_text(
+                f"New name for <b>{cat_name}</b>:",
+                reply_markup=_back_kb(f"cat_edit:{cat_name}"),
+            )
+        elif field == "emoji":
+            await query.message.edit_text(
+                f"New emoji for <b>{cat_name}</b>:",
+                reply_markup=_back_kb(f"cat_edit:{cat_name}"),
+            )
+        elif field == "time":
+            cats = await get_categories()
+            cat = next((c for c in cats if c["name"] == cat_name), None)
+            current = cat["digest_time"] if cat else _DEFAULT_DIGEST_TIME
+            await query.message.edit_text(
+                f"New digest time for <b>{cat_name}</b> (HH:MM):\nCurrent: <b>{current}</b>",
+                reply_markup=_edit_time_kb(cat_name),
+            )
+
+    # ─── Sources (/sources) ────────────────────────────────────────────────
+
+    @bot.on_message(filters.command("sources") & admin_msg)
+    async def cmd_sources(_, message: Message) -> None:
+        await _send_sources_list(message, reply=True)
+
+    @bot.on_callback_query(filters.regex(r"^src_list$") & admin_cb)
+    async def cb_src_list(_, query: CallbackQuery) -> None:
+        _pending.pop(query.from_user.id, None)
+        await _send_sources_list(query.message, reply=False)
+
+    async def _send_sources_list(target, reply: bool) -> None:
         sources = await get_active_sources()
         if not sources:
-            await message.reply("No sources configured.")
+            text = "No sources configured."
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("➕ Add source", callback_data="src_add:")]])
+            if reply:
+                await target.reply(text, reply_markup=kb)
+            else:
+                await target.edit_text(text, reply_markup=kb)
             return
+
         cats = await get_categories()
         cat_meta = {c["name"]: c for c in cats}
         by_cat: dict[str, list] = {}
@@ -194,7 +308,12 @@ def register_commands() -> None:
                 type_label = "tg" if s["type"] == "telegram" else "rss"
                 buttons.append([InlineKeyboardButton(f"{icon} [{type_label}] {s['name']}", callback_data=f"src_view:{s['id']}")])
 
-        await message.reply("Sources:", reply_markup=InlineKeyboardMarkup(buttons))
+        buttons.append([InlineKeyboardButton("➕ Add source", callback_data="src_add:")])
+        kb = InlineKeyboardMarkup(buttons)
+        if reply:
+            await target.reply("Sources:", reply_markup=kb)
+        else:
+            await target.edit_text("Sources:", reply_markup=kb)
 
     @bot.on_callback_query(filters.regex(r"^src_view:") & admin_cb)
     async def cb_src_view(_, query: CallbackQuery) -> None:
@@ -248,69 +367,36 @@ def register_commands() -> None:
             log.info("Source removed: id=%s", src_id)
 
         if cat_name:
-            cats = await get_categories()
-            remaining = [x for x in await get_active_sources() if x["category"] == cat_name]
-            cat = next((c for c in cats if c["name"] == cat_name), None)
-            emoji = cat["emoji"] if cat else "📌"
-            if not remaining:
-                text = f"✅ Source removed.\n\n<b>{emoji} {cat_name}</b>\n\nNo sources left."
-            else:
-                lines = [f"✅ Source removed.\n\n<b>{emoji} {cat_name}</b>\n"]
-                for x in remaining:
-                    icon = "📡" if x["type"] == "telegram" else "🔗"
-                    type_label = "tg" if x["type"] == "telegram" else "rss"
-                    lines.append(f"{icon} [{type_label}] <b>{x['name']}</b> — <code>{x['url']}</code>")
-                text = "\n".join(lines)
-            await query.message.edit_text(text, reply_markup=_category_view_keyboard(cat_name, remaining))
+            text, remaining = await _cat_view_text(cat_name)
+            prefix = "✅ Source removed.\n\n"
+            await query.message.edit_text(
+                prefix + text,
+                reply_markup=_category_view_keyboard(cat_name, remaining),
+            )
         else:
             await query.message.edit_text("✅ Source removed.")
 
     @bot.on_callback_query(filters.regex(r"^src_add:") & admin_cb)
     async def cb_src_add(_, query: CallbackQuery) -> None:
-        cat_name = query.data.split(":", 1)[1]
+        cat_name = query.data.split(":", 1)[1]  # may be empty string
         uid = query.from_user.id
-        _pending[uid] = {"action": "add_source", "step": 0, "data": {"preset_category": cat_name}}
-        await query.message.edit_text(
-            f"Adding source to <b>{cat_name}</b>.\n\nURL or @channel:",
-            reply_markup=_back_kb(f"cat_view:{cat_name}"),
-        )
+        data: dict = {}
+        if cat_name:
+            data["preset_category"] = cat_name
+        _pending[uid] = {"action": "add_source", "step": 0, "data": data}
+        back = f"cat_view:{cat_name}" if cat_name else "src_list"
+        prompt = f"Adding source to <b>{cat_name}</b>.\n\nURL or @channel:" if cat_name else "URL or @channel:"
+        await query.message.edit_text(prompt, reply_markup=_back_kb(back))
 
-    @bot.on_message(filters.command("add_source") & admin_msg)
-    async def cmd_add_source(_, message: Message) -> None:
-        _pending[message.from_user.id] = {"action": "add_source", "step": 0, "data": {}}
-        await message.reply("URL or @channel:", reply_markup=_cancel_kb())
-
-    # ─── Digest & Schedule ────────────────────────────────────────────────
+    # ─── Digest & Stats ───────────────────────────────────────────────────
 
     @bot.on_message(filters.command("digest") & admin_msg)
     async def cmd_digest(_, message: Message) -> None:
         log.info("Manual digest triggered by user")
-        await message.reply("⏳ Building digest...")
+        status_msg = await message.reply("⏳ Building digest...")
         sent = await send_digest()
+        await status_msg.delete()
         await message.reply("✅ Digest sent." if sent else "ℹ️ No new items.")
-
-    @bot.on_message(filters.command("schedule") & admin_msg)
-    async def cmd_schedule(_, message: Message) -> None:
-        parts = message.text.split()
-        if len(parts) < 2:
-            await message.reply("Usage: /schedule HH:MM")
-            return
-        time_str = parts[1]
-        try:
-            h, m = map(int, time_str.split(":"))
-            assert 0 <= h < 24 and 0 <= m < 60
-        except (ValueError, AssertionError):
-            await message.reply("Invalid format. Use HH:MM (e.g. 20:00)")
-            return
-        from src.scheduler import reschedule_digest
-        try:
-            reschedule_digest(time_str)
-        except Exception as exc:
-            log.error("Failed to reschedule digest: %s", exc)
-            await message.reply(f"❌ Failed to reschedule: {exc}")
-            return
-        log.info("Digest rescheduled to %s (%s)", time_str, settings.digest_timezone)
-        await message.reply(f"✅ Digest scheduled at <b>{time_str}</b> ({settings.digest_timezone})")
 
     @bot.on_message(filters.command("stats") & admin_msg)
     async def cmd_stats(_, message: Message) -> None:
@@ -333,7 +419,7 @@ def register_commands() -> None:
             ) as cur:
                 by_source = await cur.fetchall()
 
-        lines = [f"📊 <b>Stats</b>", f"Processed 24h: <b>{total}</b> · Unsent: <b>{unsent}</b>"]
+        lines = ["📊 <b>Stats</b>", f"Processed 24h: <b>{total}</b> · Unsent: <b>{unsent}</b>"]
         if by_source:
             lines.append("")
             for r in by_source:
@@ -344,13 +430,10 @@ def register_commands() -> None:
     async def cmd_start(_, message: Message) -> None:
         await message.reply(
             "<b>TelegramSentinel</b>\n\n"
-            "/list_categories — browse &amp; manage categories\n"
-            "/add_category — add category\n\n"
-            "/list_sources — view &amp; manage sources\n"
-            "/add_source — add RSS or Telegram channel\n\n"
-            "/schedule &lt;HH:MM&gt; — set digest time\n"
-            "/digest — send now\n"
-            "/stats\n"
+            "/categories — manage categories &amp; sources\n"
+            "/sources — all sources overview\n\n"
+            "/digest — send digest now\n"
+            "/stats — statistics\n"
             "/cancel — cancel current input"
         )
 
@@ -361,11 +444,25 @@ def register_commands() -> None:
         cat = query.data.split(":", 1)[1]
         uid = query.from_user.id
         if uid not in _pending or _pending[uid].get("action") != "add_source":
-            await query.answer("Session expired. Use /add_source again.", show_alert=True)
+            await query.answer("Session expired. Use /sources again.", show_alert=True)
             return
         data = _pending[uid]["data"]
         await query.message.edit_text(f"Name: <b>{data['name']}</b>\nCategory: <b>{cat}</b>")
         await _finalize_add_source(uid, cat, data, query.message, reply=False)
+
+    async def _finalize_add_category(uid: int, data: dict, message, reply: bool = True) -> None:
+        name = data["name"]
+        emoji = data["emoji"]
+        digest_time = data.get("digest_time", _DEFAULT_DIGEST_TIME)
+        await add_category(name, emoji, digest_time)
+        del _pending[uid]
+        await rebuild_digest_jobs()
+        log.info("Category added: %s %s digest_time=%s", emoji, name, digest_time)
+        text = f"✅ Category <b>{emoji} {name}</b> added.  ⏰ {digest_time}"
+        if reply:
+            await message.reply(text)
+        else:
+            await message.edit_text(text)
 
     async def _finalize_add_source(uid: int, cat: str, data: dict, message, reply: bool = True) -> None:
         source_type = data["type"]
@@ -375,7 +472,7 @@ def register_commands() -> None:
         if not await category_exists(cat):
             await add_category(cat, "📌")
             log.info("Auto-created category: 📌 %s", cat)
-        source_id = await add_source(source_type, name, url, cat)
+        await add_source(source_type, name, url, cat)
         join_warning = ""
         if source_type == "telegram":
             username = url.lstrip("@")
@@ -419,10 +516,20 @@ def register_commands() -> None:
                 await message.reply("Emoji:", reply_markup=_cancel_kb())
             elif step == 1:
                 data["emoji"] = escape(text[:8])
-                await add_category(data["name"], data["emoji"])
-                del _pending[uid]
-                log.info("Category added: %s %s", data["emoji"], data["name"])
-                await message.reply(f"✅ Category <b>{data['emoji']} {data['name']}</b> added.")
+                state["step"] = 2
+                await message.reply(
+                    f"Digest time (HH:MM) or skip for default ({_DEFAULT_DIGEST_TIME}):",
+                    reply_markup=_time_step_kb(),
+                )
+            elif step == 2:
+                if not _is_valid_time(text):
+                    await message.reply(
+                        "Invalid format. Use HH:MM (e.g. 16:00):",
+                        reply_markup=_time_step_kb(),
+                    )
+                    return
+                data["digest_time"] = text
+                await _finalize_add_category(uid, data, message)
 
         elif action == "add_source":
             if step == 0:
@@ -464,3 +571,56 @@ def register_commands() -> None:
 
             elif step == 1:
                 await _finalize_add_source(uid, text, data, message)
+
+        elif action == "edit_category":
+            field = data["field"]
+            cat_name = data["cat_name"]
+
+            if field == "name":
+                new_name = text.lower()
+                ok = await update_category(cat_name, new_name=new_name)
+                del _pending[uid]
+                if ok:
+                    await rebuild_digest_jobs()
+                    log.info("Category renamed: %s -> %s", cat_name, new_name)
+                    text_out, sources = await _cat_view_text(new_name)
+                    await message.reply(
+                        f"✅ Renamed to <b>{new_name}</b>.\n\n" + text_out,
+                        reply_markup=_category_view_keyboard(new_name, sources),
+                    )
+                else:
+                    await message.reply("Category not found.")
+
+            elif field == "emoji":
+                new_emoji = escape(text[:8])
+                ok = await update_category(cat_name, new_emoji=new_emoji)
+                del _pending[uid]
+                if ok:
+                    log.info("Category emoji updated: %s -> %s", cat_name, new_emoji)
+                    text_out, sources = await _cat_view_text(cat_name)
+                    await message.reply(
+                        f"✅ Emoji updated.\n\n" + text_out,
+                        reply_markup=_category_view_keyboard(cat_name, sources),
+                    )
+                else:
+                    await message.reply("Category not found.")
+
+            elif field == "time":
+                if not _is_valid_time(text):
+                    await message.reply(
+                        "Invalid format. Use HH:MM (e.g. 16:00):",
+                        reply_markup=_edit_time_kb(cat_name),
+                    )
+                    return
+                ok = await update_category(cat_name, new_digest_time=text)
+                del _pending[uid]
+                if ok:
+                    await rebuild_digest_jobs()
+                    log.info("Category digest_time updated: %s -> %s", cat_name, text)
+                    text_out, sources = await _cat_view_text(cat_name)
+                    await message.reply(
+                        f"✅ Digest time set to <b>{text}</b>.\n\n" + text_out,
+                        reply_markup=_category_view_keyboard(cat_name, sources),
+                    )
+                else:
+                    await message.reply("Category not found.")

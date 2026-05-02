@@ -34,7 +34,7 @@ async def main() -> None:
     log.info("Clients started")
 
     await load_watched_channels()
-    start_scheduler()
+    await start_scheduler()
     log.info("Scheduler started")
 
     asyncio.create_task(run_rss_collector())

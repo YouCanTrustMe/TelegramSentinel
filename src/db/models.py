@@ -88,8 +88,17 @@ async def save_item(
         return cur.lastrowid
 
 
-async def get_unsent_items() -> list[aiosqlite.Row]:
+async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlite.Row]:
     async with get_db() as db:
+        if categories:
+            placeholders = ",".join("?" * len(categories))
+            query = f"""SELECT items.*, sources.name AS source_name
+               FROM items
+               LEFT JOIN sources ON items.source_id = sources.id
+               WHERE items.sent = 0 AND items.category IN ({placeholders})
+               ORDER BY category, source_id, published_at ASC"""
+            async with db.execute(query, categories) as cur:
+                return await cur.fetchall()
         async with db.execute(
             """SELECT items.*, sources.name AS source_name
                FROM items
@@ -123,13 +132,39 @@ async def get_categories() -> list[aiosqlite.Row]:
             return await cur.fetchall()
 
 
-async def add_category(name: str, emoji: str) -> int:
+async def add_category(name: str, emoji: str, digest_time: str = "21:00") -> int:
     async with get_db() as db:
         cur = await db.execute(
-            "INSERT INTO categories (name, emoji) VALUES (?, ?)", (name, emoji)
+            "INSERT INTO categories (name, emoji, digest_time) VALUES (?, ?, ?)",
+            (name, emoji, digest_time),
         )
         await db.commit()
         return cur.lastrowid
+
+
+async def update_category(
+    old_name: str,
+    new_name: str | None = None,
+    new_emoji: str | None = None,
+    new_digest_time: str | None = None,
+) -> bool:
+    async with get_db() as db:
+        async with db.execute("SELECT * FROM categories WHERE name = ?", (old_name,)) as cur:
+            cat = await cur.fetchone()
+        if not cat:
+            return False
+        name = new_name if new_name is not None else cat["name"]
+        emoji = new_emoji if new_emoji is not None else cat["emoji"]
+        digest_time = new_digest_time if new_digest_time is not None else cat["digest_time"]
+        await db.execute(
+            "UPDATE categories SET name = ?, emoji = ?, digest_time = ? WHERE name = ?",
+            (name, emoji, digest_time, old_name),
+        )
+        if name != old_name:
+            await db.execute("UPDATE sources SET category = ? WHERE category = ?", (name, old_name))
+            await db.execute("UPDATE items SET category = ? WHERE category = ?", (name, old_name))
+        await db.commit()
+        return True
 
 
 async def remove_category(name: str) -> bool:

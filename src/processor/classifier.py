@@ -20,10 +20,27 @@ _SYSTEM_PROMPT = """You are a news summarizer.
 
 Your task:
 1. Rate the news 1-5: 5=breaking/facts/decisions, 1=ads/opinions/reposts.
-2. Write a summary in Ukrainian, max 7-8 words. Use your own words if needed.
+2. Write a summary in Ukrainian, up to 15 words. Be concise — fewer words is better if the meaning is preserved. Never abbreviate or shorten proper nouns (person names, place names, organization names, brand names).
 
 Respond ONLY with valid JSON:
-{"score": 1-5, "summary": "<Ukrainian max 8 words>"}"""
+{"score": 1-5, "summary": "<Ukrainian, up to 15 words>"}"""
+
+_BATCH_SYSTEM_PROMPT = """You are a news summarizer for a Ukrainian digest.
+
+You will receive multiple news items from the same source, numbered starting from 0.
+Your tasks:
+1. Group items that cover the same event or topic (follow-ups and updates count as same topic).
+2. For each group write ONE Ukrainian summary:
+   - Single item: up to 15 words
+   - Multiple items merged: up to 30 words combining the key facts
+3. Rate the group 1-5: 5=breaking facts/decisions, 1=ads/opinions/reposts.
+4. Never abbreviate or shorten proper nouns (person names, place names, organization names, brand names).
+5. Stars: 5=★★★★★ 4=★★★★☆ 3=★★★☆☆ 2=★★☆☆☆ 1=★☆☆☆☆
+
+Every item must appear in exactly one group.
+
+Respond ONLY with valid JSON:
+{"groups": [{"ids": [0], "score": 3, "summary": "Коротке резюме"}, {"ids": [1, 2], "score": 4, "summary": "Об'єднане резюме"}]}"""
 
 
 @dataclass
@@ -31,13 +48,17 @@ class ClassificationResult:
     summary: str
 
 
-async def classify(text: str) -> ClassificationResult:
+async def _acquire_rate_slot() -> None:
     global _last_call_time
     async with _rate_lock:
         elapsed = time.monotonic() - _last_call_time
         if elapsed < _MIN_INTERVAL:
             await asyncio.sleep(_MIN_INTERVAL - elapsed)
         _last_call_time = time.monotonic()
+
+
+async def classify(text: str) -> ClassificationResult:
+    await _acquire_rate_slot()
 
     for attempt in range(2):
         try:
@@ -67,3 +88,50 @@ async def classify(text: str) -> ClassificationResult:
             break
 
     return ClassificationResult(summary="")
+
+
+async def group_by_topic(items: list[dict]) -> list[dict]:
+    """
+    items: list of {"id": int, "text": str}
+    Returns: list of {"ids": [int, ...], "score": int, "summary": str}
+    Falls back to one group per item on error.
+    """
+    await _acquire_rate_slot()
+
+    numbered = "\n".join(f"{item['id']}: {item['text'][:600]}" for item in items)
+
+    for attempt in range(2):
+        try:
+            response = await _client.chat.completions.create(
+                model=settings.groq_model,
+                messages=[
+                    {"role": "system", "content": _BATCH_SYSTEM_PROMPT},
+                    {"role": "user", "content": numbered},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+            )
+            data = json.loads(response.choices[0].message.content)
+            groups = data.get("groups", [])
+            result = []
+            for g in groups:
+                score = max(1, min(5, int(g.get("score", 3))))
+                stars = "★" * score + "☆" * (5 - score)
+                result.append({
+                    "ids": [int(i) for i in g["ids"]],
+                    "score": score,
+                    "summary": f"{stars} {g.get('summary', '')}",
+                })
+            log.debug("Grouped %d items into %d groups", len(items), len(result))
+            return result
+        except RateLimitError:
+            if attempt == 0:
+                log.warning("Groq rate limit hit during batch grouping, waiting 30s")
+                await asyncio.sleep(30)
+            else:
+                log.warning("Groq rate limit hit again during batch grouping, falling back")
+        except Exception as exc:
+            log.warning("Batch grouping error, falling back to individual items: %s", exc)
+            break
+
+    return [{"ids": [item["id"]], "score": 3, "summary": ""} for item in items]

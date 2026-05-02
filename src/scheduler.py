@@ -1,27 +1,62 @@
+import logging
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from src.config import settings
+from src.db.models import get_categories
 from src.dispatcher.digest_builder import send_digest
 
-_scheduler = AsyncIOScheduler(timezone=settings.digest_timezone)
-_JOB_ID = "daily_digest"
+log = logging.getLogger(__name__)
+
+_DEFAULT_DIGEST_TIME = "21:00"
+_scheduler: AsyncIOScheduler | None = None
 
 
-def start_scheduler() -> None:
-    h, m = map(int, settings.digest_time.split(":"))
-    _scheduler.add_job(
-        send_digest,
-        CronTrigger(hour=h, minute=m, timezone=settings.digest_timezone),
-        id=_JOB_ID,
-        replace_existing=True,
-    )
+async def start_scheduler() -> None:
+    global _scheduler
+    _scheduler = AsyncIOScheduler(timezone=settings.digest_timezone)
+    await _rebuild_jobs()
     _scheduler.start()
 
 
-def reschedule_digest(time_str: str) -> None:
-    h, m = map(int, time_str.split(":"))
-    _scheduler.reschedule_job(
-        _JOB_ID,
-        trigger=CronTrigger(hour=h, minute=m, timezone=settings.digest_timezone),
+async def rebuild_digest_jobs() -> None:
+    if _scheduler is None:
+        return
+    await _rebuild_jobs()
+
+
+async def _rebuild_jobs() -> None:
+    for job in _scheduler.get_jobs():
+        if job.id.startswith("digest_"):
+            _scheduler.remove_job(job.id)
+
+    # Global catch-all job at default time — sends all unsent items from all categories
+    h, m = map(int, _DEFAULT_DIGEST_TIME.split(":"))
+    _scheduler.add_job(
+        send_digest,
+        CronTrigger(hour=h, minute=m, timezone=settings.digest_timezone),
+        id=f"digest_{_DEFAULT_DIGEST_TIME}",
+        replace_existing=True,
     )
+
+    # Extra jobs for categories with a custom (non-default) digest time
+    categories = await get_categories()
+    custom: dict[str, list[str]] = {}
+    for cat in categories:
+        t = cat["digest_time"]
+        if t != _DEFAULT_DIGEST_TIME:
+            custom.setdefault(t, []).append(cat["name"])
+
+    for time_str, cat_names in custom.items():
+        h, m = map(int, time_str.split(":"))
+        _scheduler.add_job(
+            send_digest,
+            CronTrigger(hour=h, minute=m, timezone=settings.digest_timezone),
+            id=f"digest_{time_str}",
+            replace_existing=True,
+            kwargs={"categories": cat_names},
+        )
+
+    job_ids = [j.id for j in _scheduler.get_jobs()]
+    log.info("Digest jobs: %s", job_ids)

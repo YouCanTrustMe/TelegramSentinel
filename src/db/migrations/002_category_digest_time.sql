@@ -1,0 +1,1 @@
+ALTER TABLE categories ADD COLUMN digest_time TEXT NOT NULL DEFAULT '21:00';

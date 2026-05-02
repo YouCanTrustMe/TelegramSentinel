@@ -6,7 +6,7 @@ from pyrogram import idle
 
 from src.bot.commands import register_commands
 from src.collectors.rss_collector import run_rss_collector
-from src.collectors.telegram_collector import load_watched_channels, register_handlers, userbot
+from src.collectors.telegram_collector import load_watched_channels, run_telegram_collector, userbot
 from src.db.models import init_db
 from src.dispatcher.sender import bot
 from src.scheduler import start_scheduler
@@ -27,7 +27,6 @@ async def main() -> None:
     await init_db()
     log.info("Database initialized")
 
-    register_handlers()
     register_commands()
 
     await bot.start()
@@ -39,7 +38,8 @@ async def main() -> None:
     log.info("Scheduler started")
 
     asyncio.create_task(run_rss_collector())
-    log.info("RSS collector running")
+    asyncio.create_task(run_telegram_collector())
+    log.info("Collectors running")
 
     log.info("TelegramSentinel is running")
     await idle()

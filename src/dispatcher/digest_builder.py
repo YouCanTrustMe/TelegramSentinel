@@ -17,7 +17,7 @@ def _format_item(item) -> str:
     hour = ""
     if item["published_at"]:
         try:
-            hour = f"{datetime.fromisoformat(item['published_at']).hour}h "
+            hour = f"{datetime.fromisoformat(item['published_at']).hour}⌚ "
         except Exception:
             pass
     text = f"{hour}{summary}"
@@ -34,13 +34,17 @@ def _build_digest_text(cat_meta: dict, date_str: str) -> list[str]:
 
         lines.append(f"\n<b>{data['emoji']} {cat_name.capitalize()}</b>")
 
+        block_lines = []
         for source_name, source_items in sources.items():
             if not source_items:
                 continue
-            block_lines = [escape(source_name)]
+            if block_lines:
+                block_lines.append("")
+            block_lines.append(f"<b>{escape(source_name)}</b>")
             for item in source_items:
                 block_lines.append(_format_item(item))
-            lines.append("<blockquote>" + "\n".join(block_lines) + "</blockquote>")
+        if block_lines:
+            lines.append("<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>")
 
     return lines
 

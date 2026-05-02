@@ -1,7 +1,8 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 
-from pyrogram import Client, filters
+from pyrogram import Client
 from pyrogram.types import Message
 
 from src.config import settings
@@ -11,6 +12,8 @@ from src.processor.deduplicator import is_duplicate, make_message_id
 
 log = logging.getLogger(__name__)
 
+POLL_INTERVAL = 300  # seconds between channel polls
+
 userbot = Client(
     "sessions/sentinel_userbot",
     api_id=settings.telegram_api_id,
@@ -18,33 +21,14 @@ userbot = Client(
     phone_number=settings.telegram_phone,
 )
 
-_watched: dict[int, dict] = {}  # chat_id -> source meta
-
-
-async def load_watched_channels() -> None:
-    sources = await get_active_sources(type_="telegram")
-    _watched.clear()
-    for row in sources:
-        username = row["url"].lstrip("@")
-        try:
-            chat = await userbot.get_chat(username)
-            chat_id = chat.id
-            _watched[chat_id] = {"id": row["id"], "name": row["name"], "category": row["category"], "username": username.lower()}
-            log.info("Watching channel @%s (id=%d)", username, chat_id)
-        except Exception as exc:
-            log.error("Could not resolve channel @%s: %s", username, exc)
-    log.info("Watching %d Telegram channel(s)", len(_watched))
-
 
 async def _process_message(username: str, source: dict, message: Message) -> bool:
-    """Process a single channel message: dedup, classify, save. Returns True if saved."""
     raw_text = message.text or message.caption or ""
     if not raw_text.strip():
         return False
 
     message_id = make_message_id("telegram", f"@{username}", str(message.id))
     if await is_duplicate(message_id):
-        log.debug("Skipping duplicate: %s", message_id)
         return False
 
     original_url = f"https://t.me/{username}/{message.id}"
@@ -66,17 +50,34 @@ async def _process_message(username: str, source: dict, message: Message) -> boo
     return True
 
 
+async def _poll_channel(username: str, source: dict) -> int:
+    saved = 0
+    try:
+        async for message in userbot.get_chat_history(f"@{username}", limit=20):
+            if await _process_message(username, source, message):
+                saved += 1
+    except Exception as exc:
+        log.error("Failed to poll @%s: %s", username, exc)
+    return saved
 
-def register_handlers() -> None:
-    @userbot.on_message(filters.channel)
-    async def on_channel_message(client: Client, message: Message) -> None:
-        chat_id = message.chat.id
-        log.info("Channel update: chat_id=%d username=%s msg_id=%s", chat_id, message.chat.username, message.id)
-        source = _watched.get(chat_id)
-        if not source:
-            return
-        username = source["username"]
-        try:
-            await _process_message(username, source, message)
-        except Exception as exc:
-            log.error("Error processing message from @%s msg_id=%s: %s", username, message.id, exc)
+
+async def run_telegram_collector() -> None:
+    log.info("Telegram collector started (interval=%ds)", POLL_INTERVAL)
+    while True:
+        sources = await get_active_sources(type_="telegram")
+        for row in sources:
+            username = row["url"].lstrip("@").lower()
+            source = {"id": row["id"], "name": row["name"], "category": row["category"]}
+            saved = await _poll_channel(username, source)
+            if saved:
+                log.info("Telegram poll @%s: %d new items", username, saved)
+            else:
+                log.debug("Telegram poll @%s: 0 new items", username)
+        await asyncio.sleep(POLL_INTERVAL)
+
+
+# kept for add_source/remove_source flows in commands.py
+async def load_watched_channels() -> None:
+    sources = await get_active_sources(type_="telegram")
+    names = [row["url"].lstrip("@") for row in sources]
+    log.info("Telegram sources: %s", names)

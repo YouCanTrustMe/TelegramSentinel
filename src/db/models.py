@@ -17,9 +17,18 @@ async def init_db() -> None:
     Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
     migrations_dir = Path(__file__).parent / "migrations"
     async with aiosqlite.connect(settings.database_path) as db:
-        for migration in sorted(migrations_dir.glob("*.sql")):
-            await db.executescript(migration.read_text())
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY)"
+        )
         await db.commit()
+        for migration in sorted(migrations_dir.glob("*.sql")):
+            name = migration.name
+            async with db.execute("SELECT 1 FROM _migrations WHERE name = ?", (name,)) as cur:
+                if await cur.fetchone():
+                    continue
+            await db.executescript(migration.read_text())
+            await db.execute("INSERT INTO _migrations (name) VALUES (?)", (name,))
+            await db.commit()
 
 
 async def source_exists(url: str) -> bool:

@@ -324,7 +324,9 @@ def register_commands() -> None:
             async with db.execute("SELECT COUNT(*) as unsent FROM items WHERE sent = 0") as cur:
                 unsent = (await cur.fetchone())["unsent"]
             async with db.execute(
-                """SELECT sources.name, COUNT(*) as cnt
+                """SELECT sources.name,
+                          COUNT(*) as cnt,
+                          SUM(CASE WHEN items.sent = 0 THEN 1 ELSE 0 END) as unsent_cnt
                    FROM items JOIN sources ON items.source_id = sources.id
                    WHERE items.processed_at >= datetime('now', '-24 hours')
                    GROUP BY sources.id ORDER BY cnt DESC"""
@@ -335,7 +337,7 @@ def register_commands() -> None:
         if by_source:
             lines.append("")
             for r in by_source:
-                lines.append(f"• {r['name']}: <b>{r['cnt']}</b>")
+                lines.append(f"• {r['name']}: <b>{r['cnt']}</b> · unsent <b>{r['unsent_cnt']}</b>")
         await message.reply("\n".join(lines))
 
     @bot.on_message(filters.command("start") & admin_msg)

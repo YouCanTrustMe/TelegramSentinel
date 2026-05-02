@@ -320,14 +320,23 @@ def register_commands() -> None:
             async with db.execute(
                 "SELECT COUNT(*) as total FROM items WHERE processed_at >= datetime('now', '-24 hours')"
             ) as cur:
-                row = await cur.fetchone()
+                total = (await cur.fetchone())["total"]
             async with db.execute("SELECT COUNT(*) as unsent FROM items WHERE sent = 0") as cur:
-                unsent = await cur.fetchone()
-        await message.reply(
-            f"📊 <b>Stats</b>\n"
-            f"Processed last 24h: <b>{row['total']}</b>\n"
-            f"Unsent items: <b>{unsent['unsent']}</b>"
-        )
+                unsent = (await cur.fetchone())["unsent"]
+            async with db.execute(
+                """SELECT sources.name, COUNT(*) as cnt
+                   FROM items JOIN sources ON items.source_id = sources.id
+                   WHERE items.processed_at >= datetime('now', '-24 hours')
+                   GROUP BY sources.id ORDER BY cnt DESC"""
+            ) as cur:
+                by_source = await cur.fetchall()
+
+        lines = [f"📊 <b>Stats</b>", f"Processed 24h: <b>{total}</b> · Unsent: <b>{unsent}</b>"]
+        if by_source:
+            lines.append("")
+            for r in by_source:
+                lines.append(f"• {r['name']}: <b>{r['cnt']}</b>")
+        await message.reply("\n".join(lines))
 
     @bot.on_message(filters.command("start") & admin_msg)
     async def cmd_start(_, message: Message) -> None:

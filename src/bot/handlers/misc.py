@@ -2,16 +2,31 @@ import logging
 from html import escape
 from pathlib import Path
 
-import aiosqlite
 from pyrogram import filters as pf
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from src.bot.state import _pending
 from src.config import settings
-from src.db.models import get_categories
+from src.db.models import get_categories, get_db
 from src.dispatcher.digest_builder import send_digest
+from src.dispatcher.sender import send_document
 
 log = logging.getLogger(__name__)
+
+
+def _tail_lines(path: Path, n: int, block_size: int = 4096) -> list[str]:
+    with path.open("rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        data = b""
+        pos = size
+        while pos > 0 and data.count(b"\n") <= n:
+            read = min(block_size, pos)
+            pos -= read
+            f.seek(pos)
+            data = f.read(read) + data
+    text = data.decode("utf-8", errors="replace")
+    return text.splitlines()[-n:]
 
 
 def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
@@ -44,8 +59,7 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_message(pf.command("stats") & admin_msg)
     async def cmd_stats(_, message: Message) -> None:
-        async with aiosqlite.connect(settings.database_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with get_db() as db:
             async with db.execute(
                 "SELECT COUNT(*) as total FROM items WHERE processed_at >= datetime('now', '-24 hours')"
             ) as cur:
@@ -88,20 +102,23 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
         if not log_file.exists():
             await message.reply("No log file yet.")
             return
-        lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
-        tail = lines[-20:] if len(lines) > 20 else lines
+        tail = _tail_lines(log_file, 20)
         text = "<pre>" + escape("\n".join(tail)) + "</pre>"
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download full log", callback_data="logs_download")]])
         await message.reply(text, reply_markup=kb)
 
     @bot.on_callback_query(pf.regex(r"^logs_download$") & admin_cb)
-    async def cb_logs_download(client, query: CallbackQuery) -> None:
+    async def cb_logs_download(_, query: CallbackQuery) -> None:
         log_file = Path(settings.database_path).parent / "logs" / "sentinel.log"
         if not log_file.exists():
             await query.answer("Log file not found.", show_alert=True)
             return
         await query.answer()
-        await client.send_document(query.message.chat.id, str(log_file))
+        try:
+            await send_document(query.message.chat.id, str(log_file), filename="sentinel.log")
+        except Exception as exc:
+            log.exception("Log download failed: %s", exc)
+            await query.message.reply(f"Failed to send log file: {exc}")
 
     @bot.on_message(pf.command("start") & admin_msg)
     async def cmd_start(_, message: Message) -> None:

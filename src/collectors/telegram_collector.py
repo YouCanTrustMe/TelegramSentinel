@@ -64,20 +64,16 @@ async def _poll_channel(username: str, source: dict) -> int:
 async def run_telegram_collector() -> None:
     log.info("Telegram collector started (interval=%ds)", POLL_INTERVAL)
     while True:
-        sources = await get_active_sources(type_="telegram")
-        for row in sources:
-            username = row["url"].lstrip("@").lower()
-            source = {"id": row["id"], "name": row["name"], "category": row["category"]}
-            saved = await _poll_channel(username, source)
-            if saved:
-                log.info("Telegram poll @%s: %d new items", username, saved)
-            else:
-                log.debug("Telegram poll @%s: 0 new items", username)
+        try:
+            sources = await get_active_sources(type_="telegram")
+            for row in sources:
+                username = row["url"].lstrip("@").lower()
+                source = {"id": row["id"], "name": row["name"], "category": row["category"]}
+                saved = await _poll_channel(username, source)
+                if saved:
+                    log.info("Telegram poll @%s: %d new items", username, saved)
+                else:
+                    log.debug("Telegram poll @%s: 0 new items", username)
+        except Exception as exc:
+            log.exception("Telegram collector iteration failed: %s", exc)
         await asyncio.sleep(POLL_INTERVAL)
-
-
-# kept for add_source/remove_source flows in commands.py
-async def load_watched_channels() -> None:
-    sources = await get_active_sources(type_="telegram")
-    names = [row["url"].lstrip("@") for row in sources]
-    log.info("Telegram sources: %s", names)

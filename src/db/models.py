@@ -13,10 +13,32 @@ async def get_db():
         yield db
 
 
+def _split_sql_statements(sql: str) -> list[str]:
+    out: list[str] = []
+    cur: list[str] = []
+    quote: str | None = None
+    for ch in sql:
+        if quote:
+            cur.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            cur.append(ch)
+        elif ch == ";":
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        out.append("".join(cur))
+    return out
+
+
 async def _schema_has_migration(db, migration) -> bool:
     import re
     sql = migration.read_text()
-    for stmt in re.split(r";\s*", sql):
+    for stmt in _split_sql_statements(sql):
         stmt_up = stmt.strip().upper()
         if not stmt_up:
             continue
@@ -36,6 +58,15 @@ async def _schema_has_migration(db, migration) -> bool:
                 f"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name=?", (col,)
             ) as cur:
                 if (await cur.fetchone())[0] == 0:
+                    return False
+            continue
+        m = re.search(r"ALTER TABLE\s+(\w+)\s+DROP COLUMN\s+(\w+)", stmt_up)
+        if m:
+            table, col = m.group(1).lower(), m.group(2).lower()
+            async with db.execute(
+                f"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name=?", (col,)
+            ) as cur:
+                if (await cur.fetchone())[0] != 0:
                     return False
     return True
 
@@ -70,10 +101,9 @@ async def source_exists(url: str) -> bool:
 
 async def add_source(type_: str, name: str, url: str, category: str, status: str = "active") -> int:
     async with get_db() as db:
-        is_active = 1 if status == "active" else 0
         cur = await db.execute(
-            "INSERT INTO sources (type, name, url, category, is_active, status) VALUES (?, ?, ?, ?, ?, ?)",
-            (type_, name, url, category, is_active, status),
+            "INSERT INTO sources (type, name, url, category, status) VALUES (?, ?, ?, ?, ?)",
+            (type_, name, url, category, status),
         )
         await db.commit()
         return cur.lastrowid
@@ -93,7 +123,7 @@ async def get_pending_sources(category: str | None = None) -> list[aiosqlite.Row
 async def activate_source(source_id: int) -> bool:
     async with get_db() as db:
         cur = await db.execute(
-            "UPDATE sources SET is_active = 1, status = 'active' WHERE id = ?", (source_id,)
+            "UPDATE sources SET status = 'active' WHERE id = ?", (source_id,)
         )
         await db.commit()
         return cur.rowcount > 0
@@ -107,14 +137,20 @@ async def remove_source(source_id: int) -> bool:
         return cur.rowcount > 0
 
 
+async def get_source(source_id: int) -> aiosqlite.Row | None:
+    async with get_db() as db:
+        async with db.execute("SELECT * FROM sources WHERE id = ?", (source_id,)) as cur:
+            return await cur.fetchone()
+
+
 async def get_active_sources(type_: str | None = None) -> list[aiosqlite.Row]:
     async with get_db() as db:
         if type_:
             async with db.execute(
-                "SELECT * FROM sources WHERE is_active = 1 AND type = ?", (type_,)
+                "SELECT * FROM sources WHERE status = 'active' AND type = ?", (type_,)
             ) as cur:
                 return await cur.fetchall()
-        async with db.execute("SELECT * FROM sources WHERE is_active = 1") as cur:
+        async with db.execute("SELECT * FROM sources WHERE status = 'active'") as cur:
             return await cur.fetchall()
 
 
@@ -231,9 +267,19 @@ async def update_category(
 async def get_sources_by_category(cat_name: str) -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(
-            "SELECT * FROM sources WHERE category = ? AND is_active = 1", (cat_name,)
+            "SELECT * FROM sources WHERE category = ? AND status = 'active'", (cat_name,)
         ) as cur:
             return await cur.fetchall()
+
+
+async def reassign_source_category(source_id: int, new_cat: str) -> None:
+    async with get_db() as db:
+        await db.execute("UPDATE sources SET category = ? WHERE id = ?", (new_cat, source_id))
+        await db.execute(
+            "UPDATE items SET category = ? WHERE source_id = ? AND sent = 0",
+            (new_cat, source_id),
+        )
+        await db.commit()
 
 
 async def move_sources_to_category(from_cat: str, to_cat: str) -> None:
@@ -245,12 +291,10 @@ async def move_sources_to_category(from_cat: str, to_cat: str) -> None:
 
 async def delete_sources_by_category(cat_name: str) -> None:
     async with get_db() as db:
-        async with db.execute(
-            "SELECT id FROM sources WHERE category = ?", (cat_name,)
-        ) as cur:
-            source_ids = [r[0] for r in await cur.fetchall()]
-        for sid in source_ids:
-            await db.execute("DELETE FROM items WHERE source_id = ?", (sid,))
+        await db.execute(
+            "DELETE FROM items WHERE source_id IN (SELECT id FROM sources WHERE category = ?)",
+            (cat_name,),
+        )
         await db.execute("DELETE FROM sources WHERE category = ?", (cat_name,))
         await db.commit()
 
@@ -262,11 +306,11 @@ async def remove_category(name: str) -> bool:
         return cur.rowcount > 0
 
 
-async def log_digest(total: int, high: int, low: int, status: str = "ok") -> None:
+async def log_digest(total: int, status: str = "ok") -> None:
     async with get_db() as db:
         await db.execute(
-            "INSERT INTO digest_log (items_total, items_high, items_low, status) VALUES (?, ?, ?, ?)",
-            (total, high, low, status),
+            "INSERT INTO digest_log (items_total, status) VALUES (?, ?)",
+            (total, status),
         )
         await db.commit()
 

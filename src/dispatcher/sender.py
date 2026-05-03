@@ -32,3 +32,18 @@ async def send_message(text: str) -> None:
                 log.error("Bot API sendMessage failed: %s %s", resp.status, body)
                 raise RuntimeError(f"sendMessage failed: {resp.status}")
     log.debug("Message sent to supergroup (%d chars)", len(text))
+
+
+async def send_document(chat_id: int, file_path: str, filename: str | None = None) -> None:
+    url = f"{_BOT_API}/sendDocument"
+    with open(file_path, "rb") as f:
+        data = aiohttp.FormData()
+        data.add_field("chat_id", str(chat_id))
+        data.add_field("document", f, filename=filename or file_path.rsplit("/", 1)[-1])
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=data) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    log.error("Bot API sendDocument failed: %s %s", resp.status, body)
+                    raise RuntimeError(f"sendDocument failed: {resp.status}")
+    log.debug("Document sent: %s -> chat=%s", file_path, chat_id)

@@ -14,7 +14,7 @@ _client = AsyncGroq(api_key=settings.groq_api_key)
 
 _rate_lock = asyncio.Lock()
 _last_call_time: float = 0.0
-_MIN_INTERVAL = 60.0 / 25  # stay under 30 RPM free tier
+_MIN_INTERVAL = 60.0 / 29  # stay just under 30 RPM free tier
 
 _SYSTEM_PROMPT = """You are a news summarizer.
 

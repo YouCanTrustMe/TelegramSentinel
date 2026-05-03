@@ -1,6 +1,5 @@
 import logging
 
-import aiosqlite
 from pyrogram import filters as pf
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 
@@ -13,13 +12,14 @@ from src.bot.keyboards import (
 )
 from src.bot.state import _pending
 from src.collectors.folder_manager import add_to_folder, remove_from_folder
-from src.collectors.telegram_collector import load_watched_channels, userbot
-from src.config import settings
+from src.collectors.telegram_collector import userbot
 from src.db.models import (
     add_category,
     add_source,
     category_exists,
     get_categories,
+    get_source,
+    reassign_source_category,
     remove_source,
 )
 
@@ -49,8 +49,6 @@ async def _finalize_add_source(uid: int, cat: str, data: dict, message, reply: b
             extra = "\n⏳ Could not join — saved as pending"
 
     await add_source(source_type, name, url, cat, status=status)
-    if status == "active" and source_type == "telegram":
-        await load_watched_channels()
 
     del _pending[uid]
     log.info("Source added: [%s] %s (%s) -> category=%s status=%s", source_type, name, url, cat, status)
@@ -70,18 +68,19 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
     @bot.on_callback_query(pf.regex(r"^src_view:") & admin_cb)
     async def cb_src_view(_, query: CallbackQuery) -> None:
         src_id = int(query.data.split(":", 1)[1])
-        sources = await get_active_sources()
-        s = next((x for x in sources if x["id"] == src_id), None)
+        s = await get_source(src_id)
         if not s:
             await query.answer("Source not found.", show_alert=True)
             return
-        icon = "📡" if s["type"] == "telegram" else "🔗"
+        pending = s["status"] == "pending"
+        icon = "⏳" if pending else ("📡" if s["type"] == "telegram" else "🔗")
         type_label = "tg" if s["type"] == "telegram" else "rss"
+        status_line = "\nStatus: <b>pending</b>" if pending else ""
         text = (
             f"{icon} <b>{s['name']}</b>\n"
             f"Type: <code>{type_label}</code>\n"
             f"URL: <code>{s['url']}</code>\n"
-            f"Category: <b>{s['category']}</b>"
+            f"Category: <b>{s['category']}</b>{status_line}"
         )
         await query.message.edit_text(text, reply_markup=_source_view_keyboard(src_id, s["category"]))
 
@@ -103,15 +102,12 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
     async def cb_src_reassign_to(_, query: CallbackQuery) -> None:
         _, src_id_str, cat_name = query.data.split(":", 2)
         src_id = int(src_id_str)
-        async with aiosqlite.connect(settings.database_path) as db:
-            await db.execute("UPDATE sources SET category = ? WHERE id = ?", (cat_name, src_id))
-            await db.execute("UPDATE items SET category = ? WHERE source_id = ? AND sent = 0", (cat_name, src_id))
-            await db.commit()
+        await reassign_source_category(src_id, cat_name)
         log.info("Source id=%s reassigned to category=%s", src_id, cat_name)
-        sources = await get_active_sources()
-        s = next((x for x in sources if x["id"] == src_id), None)
+        s = await get_source(src_id)
         if s:
-            icon = "📡" if s["type"] == "telegram" else "🔗"
+            pending = s["status"] == "pending"
+            icon = "⏳" if pending else ("📡" if s["type"] == "telegram" else "🔗")
             type_label = "tg" if s["type"] == "telegram" else "rss"
             text = (
                 f"{icon} <b>{s['name']}</b>\n"
@@ -126,8 +122,7 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
     @bot.on_callback_query(pf.regex(r"^src_del:") & admin_cb)
     async def cb_src_del(_, query: CallbackQuery) -> None:
         src_id = int(query.data.split(":", 1)[1])
-        sources = await get_active_sources()
-        s = next((x for x in sources if x["id"] == src_id), None)
+        s = await get_source(src_id)
         name = s["name"] if s else str(src_id)
         cat = s["category"] if s else ""
         await query.message.edit_text(
@@ -138,8 +133,7 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
     @bot.on_callback_query(pf.regex(r"^src_del_ok:") & admin_cb)
     async def cb_src_del_ok(_, query: CallbackQuery) -> None:
         src_id = int(query.data.split(":", 1)[1])
-        sources = await get_active_sources()
-        s = next((x for x in sources if x["id"] == src_id), None)
+        s = await get_source(src_id)
         cat_name = s["category"] if s else None
 
         if s and s["type"] == "telegram":
@@ -152,7 +146,6 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
                 log.warning("Could not leave @%s: %s", username, exc)
 
         removed = await remove_source(src_id)
-        await load_watched_channels()
         if removed:
             log.info("Source removed: id=%s", src_id)
 

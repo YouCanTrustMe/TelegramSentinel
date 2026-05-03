@@ -1,4 +1,5 @@
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from html import escape
@@ -19,15 +20,15 @@ def _get_tz() -> ZoneInfo:
     return ZoneInfo(settings.digest_timezone)
 
 
-def _format_item(item) -> str:
-    url = item.get("original_url") or "" if hasattr(item, "get") else (item["original_url"] or "")
-    summary_text = (item.get("summary") if hasattr(item, "get") else item["summary"]) or ""
+def _format_item(item: dict) -> str:
+    url = item["original_url"] or ""
+    summary_text = item["summary"] or ""
     if not summary_text:
-        raw = (item.get("raw_text") if hasattr(item, "get") else item["raw_text"]) or ""
+        raw = item["raw_text"] or ""
         summary_text = raw[:60].split("\n")[0]
     summary = escape(summary_text)
     hour = ""
-    pub = (item.get("published_at") if hasattr(item, "get") else item["published_at"])
+    pub = item["published_at"]
     if pub:
         try:
             dt = datetime.fromisoformat(pub)
@@ -38,7 +39,7 @@ def _format_item(item) -> str:
         except Exception:
             pass
     text = f"{hour}{summary}"
-    return f'<a href="{url}">{text}</a>' if url else text
+    return f'<a href="{escape(url, quote=True)}">{text}</a>' if url else text
 
 
 async def _merge_source_items(items: list) -> list[dict]:
@@ -129,11 +130,14 @@ async def send_digest(categories: list[str] | None = None) -> bool:
 
     blocked_words = await get_blocked_words()
     if blocked_words:
-        blocked_lower = [b["word"].lower() for b in blocked_words]
+        blocked_patterns = [
+            re.compile(rf"(?<!\w){re.escape(b['word'].lower())}(?!\w)", re.UNICODE)
+            for b in blocked_words
+        ]
         filtered, blocked_ids = [], []
         for item in items:
             text_to_check = ((item["summary"] or "") + " " + (item["raw_text"] or "")).lower()
-            if any(w in text_to_check for w in blocked_lower):
+            if any(p.search(text_to_check) for p in blocked_patterns):
                 blocked_ids.append(item["id"])
             else:
                 filtered.append(item)
@@ -178,17 +182,26 @@ async def send_digest(categories: list[str] | None = None) -> bool:
     messages = _split_into_messages(lines)
 
     sent_ids = [item["id"] for item in items]
-    failed = False
+    sent_count = 0
+    failed_count = 0
     for msg in messages:
         try:
             await send_message(msg)
+            sent_count += 1
         except Exception as exc:
-            log.error("Failed to send digest message: %s", exc)
-            failed = True
+            failed_count = len(messages) - sent_count
+            log.error(
+                "Digest send failed at message %d/%d (%d message(s) lost, %d items marked anyway): %s",
+                sent_count + 1, len(messages), failed_count, len(sent_ids), exc,
+            )
             break
 
     await mark_sent(sent_ids)
 
-    await log_digest(total=len(items), high=0, low=0)
-    log.info("Digest sent: %d items | %d message(s) | filter=%s", len(items), len(messages), categories)
-    return True
+    status = "ok" if failed_count == 0 else "partial"
+    await log_digest(total=len(items), status=status)
+    log.info(
+        "Digest done: %d items | %d/%d message(s) sent | filter=%s | status=%s",
+        len(items), sent_count, len(messages), categories, status,
+    )
+    return failed_count == 0

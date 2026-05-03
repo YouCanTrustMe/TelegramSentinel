@@ -95,20 +95,19 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
         await message.reply(text, reply_markup=kb)
 
     @bot.on_callback_query(pf.regex(r"^logs_download$") & admin_cb)
-    async def cb_logs_download(_, query: CallbackQuery) -> None:
+    async def cb_logs_download(client, query: CallbackQuery) -> None:
         log_file = Path(settings.database_path).parent / "logs" / "sentinel.log"
         if not log_file.exists():
             await query.answer("Log file not found.", show_alert=True)
             return
         await query.answer()
-        await query.message.reply_document(str(log_file))
+        await client.send_document(query.message.chat.id, str(log_file))
 
     @bot.on_message(pf.command("start") & admin_msg)
     async def cmd_start(_, message: Message) -> None:
         await message.reply(
             "<b>TelegramSentinel</b>\n\n"
             "/categories — manage categories &amp; sources\n"
-            "/sources — all sources overview\n"
             "/blocked — blocked words filter\n\n"
             "/digest — send digest now\n"
             "/stats — statistics\n"

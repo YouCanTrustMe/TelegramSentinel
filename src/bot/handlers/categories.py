@@ -54,7 +54,7 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
                 [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
             ))
             return
-        await message.reply("Categories:", reply_markup=_categories_keyboard(cats))
+        await message.reply("Categories:", reply_markup=await _categories_keyboard(cats))
 
     @bot.on_callback_query(pf.regex(r"^cat_list$") & admin_cb)
     async def cb_cat_list(_, query: CallbackQuery) -> None:
@@ -65,7 +65,7 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
                 [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
             ))
             return
-        await query.message.edit_text("Categories:", reply_markup=_categories_keyboard(cats))
+        await query.message.edit_text("Categories:", reply_markup=await _categories_keyboard(cats))
 
     @bot.on_callback_query(pf.regex(r"^cat_view:") & admin_cb)
     async def cb_cat_view(_, query: CallbackQuery) -> None:
@@ -130,7 +130,7 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
                 [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
             ))
             return
-        await query.message.edit_text("✅ Category removed.\n\nCategories:", reply_markup=_categories_keyboard(cats))
+        await query.message.edit_text("✅ Category removed.\n\nCategories:", reply_markup=await _categories_keyboard(cats))
 
     @bot.on_callback_query(pf.regex(r"^cat_del_move:") & admin_cb)
     async def cb_cat_del_move(_, query: CallbackQuery) -> None:
@@ -144,7 +144,7 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
         if not cats:
             await query.message.edit_text(text.replace("\n\nCategories:", ""))
         else:
-            await query.message.edit_text(text, reply_markup=_categories_keyboard(cats))
+            await query.message.edit_text(text, reply_markup=await _categories_keyboard(cats))
 
     @bot.on_callback_query(pf.regex(r"^cat_del_all:") & admin_cb)
     async def cb_cat_del_all(_, query: CallbackQuery) -> None:
@@ -159,7 +159,7 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
                 [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
             ))
             return
-        await query.message.edit_text("✅ Category and all sources deleted.\n\nCategories:", reply_markup=_categories_keyboard(cats))
+        await query.message.edit_text("✅ Category and all sources deleted.\n\nCategories:", reply_markup=await _categories_keyboard(cats))
 
     @bot.on_callback_query(pf.regex(r"^cat_edit:") & admin_cb)
     async def cb_cat_edit(_, query: CallbackQuery) -> None:

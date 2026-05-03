@@ -29,16 +29,22 @@ def _back_kb(back_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("◀ Back", callback_data=back_data)]])
 
 
-def _categories_keyboard(cats) -> InlineKeyboardMarkup:
-    buttons = [
-        [InlineKeyboardButton(f"{r['emoji']} {r['name']} · {r['digest_time']}", callback_data=f"cat_view:{r['name']}")]
-        for r in cats
-    ]
+async def _categories_keyboard(cats) -> InlineKeyboardMarkup:
+    all_sources = await get_active_sources()
+    pending = await get_pending_sources()
+    src_count: dict[str, int] = {}
+    for s in list(all_sources) + list(pending):
+        src_count[s["category"]] = src_count.get(s["category"], 0) + 1
+    buttons = []
+    for r in cats:
+        count = src_count.get(r["name"], 0)
+        label = f"{r['emoji']} {r['name']}  ({count})" if count else f"{r['emoji']} {r['name']}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"cat_view:{r['name']}")])
     buttons.append([InlineKeyboardButton("➕ Add category", callback_data="cat_add")])
     return InlineKeyboardMarkup(buttons)
 
 
-def _category_view_keyboard(cat_name: str, sources, origin: str = "cat_list") -> InlineKeyboardMarkup:
+def _category_view_keyboard(cat_name: str, sources) -> InlineKeyboardMarkup:
     buttons = []
     for s in sources:
         pending = s["status"] == "pending"
@@ -50,7 +56,7 @@ def _category_view_keyboard(cat_name: str, sources, origin: str = "cat_list") ->
         InlineKeyboardButton("✏️ Edit", callback_data=f"cat_edit:{cat_name}"),
         InlineKeyboardButton("🗑 Delete", callback_data=f"cat_del:{cat_name}"),
     ])
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data=origin)])
+    buttons.append([InlineKeyboardButton("◀ Back", callback_data="cat_list")])
     return InlineKeyboardMarkup(buttons)
 
 

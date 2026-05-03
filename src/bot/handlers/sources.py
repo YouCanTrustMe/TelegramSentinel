@@ -2,7 +2,7 @@ import logging
 
 import aiosqlite
 from pyrogram import filters as pf
-from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 
 from src.bot.keyboards import (
     _back_kb,
@@ -19,9 +19,7 @@ from src.db.models import (
     add_category,
     add_source,
     category_exists,
-    get_active_sources,
     get_categories,
-    get_pending_sources,
     remove_source,
 )
 
@@ -67,59 +65,7 @@ async def _finalize_add_source(uid: int, cat: str, data: dict, message, reply: b
         await message.reply(text)
 
 
-async def _send_sources_list(target, reply: bool) -> None:
-    cats = await get_categories()
-    if not cats:
-        text = "No categories yet."
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("➕ Add source", callback_data="src_add:")]])
-        if reply:
-            await target.reply(text, reply_markup=kb)
-        else:
-            await target.edit_text(text, reply_markup=kb)
-        return
-
-    all_sources = await get_active_sources()
-    pending_sources = await get_pending_sources()
-    src_count: dict[str, int] = {}
-    for s in list(all_sources) + list(pending_sources):
-        src_count[s["category"]] = src_count.get(s["category"], 0) + 1
-
-    rows, row = [], []
-    for c in cats:
-        count = src_count.get(c["name"], 0)
-        label = f"{c['emoji']} {c['name']}  ({count})" if count else f"{c['emoji']} {c['name']}"
-        row.append(InlineKeyboardButton(label, callback_data=f"src_cat_view:{c['name']}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("➕ Add source", callback_data="src_add:")])
-    buttons = rows
-    kb = InlineKeyboardMarkup(buttons)
-    if reply:
-        await target.reply("Sources:", reply_markup=kb)
-    else:
-        await target.edit_text("Sources:", reply_markup=kb)
-
-
 def register_source_handlers(bot, admin_msg, admin_cb) -> None:
-
-    @bot.on_message(pf.command("sources") & admin_msg)
-    async def cmd_sources(_, message: Message) -> None:
-        await _send_sources_list(message, reply=True)
-
-    @bot.on_callback_query(pf.regex(r"^src_list$") & admin_cb)
-    async def cb_src_list(_, query: CallbackQuery) -> None:
-        _pending.pop(query.from_user.id, None)
-        await _send_sources_list(query.message, reply=False)
-
-    @bot.on_callback_query(pf.regex(r"^src_cat_view:") & admin_cb)
-    async def cb_src_cat_view(_, query: CallbackQuery) -> None:
-        _pending.pop(query.from_user.id, None)
-        cat_name = query.data.split(":", 1)[1]
-        text, sources = await _cat_view_text(cat_name)
-        await query.message.edit_text(text, reply_markup=_category_view_keyboard(cat_name, sources, origin="src_list"))
 
     @bot.on_callback_query(pf.regex(r"^src_view:") & admin_cb)
     async def cb_src_view(_, query: CallbackQuery) -> None:
@@ -214,7 +160,7 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
             text, remaining = await _cat_view_text(cat_name)
             await query.message.edit_text(
                 "✅ Source removed.\n\n" + text,
-                reply_markup=_category_view_keyboard(cat_name, remaining, origin="src_list"),
+                reply_markup=_category_view_keyboard(cat_name, remaining),
             )
         else:
             await query.message.edit_text("✅ Source removed.")
@@ -227,7 +173,7 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
         if cat_name:
             data["preset_category"] = cat_name
         _pending[uid] = {"action": "add_source", "step": 0, "data": data}
-        back = f"cat_view:{cat_name}" if cat_name else "src_list"
+        back = f"cat_view:{cat_name}" if cat_name else "cat_list"
         prompt = f"Adding source to <b>{cat_name}</b>.\n\nURL or @channel:" if cat_name else "URL or @channel:"
         await query.message.edit_text(prompt, reply_markup=_back_kb(back))
 

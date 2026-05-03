@@ -4,7 +4,7 @@ from html import escape
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.bot.state import _DEFAULT_DIGEST_TIME
-from src.db.models import get_active_sources, get_categories
+from src.db.models import get_active_sources, get_categories, get_pending_sources
 
 log = logging.getLogger(__name__)
 
@@ -38,10 +38,11 @@ def _categories_keyboard(cats) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def _category_view_keyboard(cat_name: str, sources) -> InlineKeyboardMarkup:
+def _category_view_keyboard(cat_name: str, sources, origin: str = "cat_list") -> InlineKeyboardMarkup:
     buttons = []
     for s in sources:
-        icon = "📡" if s["type"] == "telegram" else "🔗"
+        pending = s["status"] == "pending"
+        icon = "⏳" if pending else ("📡" if s["type"] == "telegram" else "🔗")
         type_label = "tg" if s["type"] == "telegram" else "rss"
         buttons.append([InlineKeyboardButton(f"{icon} [{type_label}] {s['name']}", callback_data=f"src_view:{s['id']}")])
     buttons.append([
@@ -49,7 +50,7 @@ def _category_view_keyboard(cat_name: str, sources) -> InlineKeyboardMarkup:
         InlineKeyboardButton("✏️ Edit", callback_data=f"cat_edit:{cat_name}"),
         InlineKeyboardButton("🗑 Delete", callback_data=f"cat_del:{cat_name}"),
     ])
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data="cat_list")])
+    buttons.append([InlineKeyboardButton("◀ Back", callback_data=origin)])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -103,18 +104,16 @@ def _blocked_keyboard(words) -> InlineKeyboardMarkup:
 
 async def _cat_view_text(cat_name: str) -> tuple[str, list]:
     cats = await get_categories()
-    sources = [s for s in await get_active_sources() if s["category"] == cat_name]
+    active = [s for s in await get_active_sources() if s["category"] == cat_name]
+    pending = list(await get_pending_sources(cat_name))
     cat = next((c for c in cats if c["name"] == cat_name), None)
     emoji = cat["emoji"] if cat else "📌"
     digest_time = cat["digest_time"] if cat else _DEFAULT_DIGEST_TIME
-
-    if not sources:
+    all_sources = active + pending
+    count = len(all_sources)
+    if not all_sources:
         text = f"<b>{emoji} {cat_name}</b>  ·  ⏰ {digest_time}\n\nNo sources yet."
     else:
-        lines = [f"<b>{emoji} {cat_name}</b>  ·  ⏰ {digest_time}\n"]
-        for s in sources:
-            icon = "📡" if s["type"] == "telegram" else "🔗"
-            type_label = "tg" if s["type"] == "telegram" else "rss"
-            lines.append(f"{icon} [{type_label}] <b>{s['name']}</b> — <code>{s['url']}</code>")
-        text = "\n".join(lines)
-    return text, sources
+        label = "source" if count == 1 else "sources"
+        text = f"<b>{emoji} {cat_name}</b>  ·  ⏰ {digest_time}  ·  {count} {label}"
+    return text, all_sources

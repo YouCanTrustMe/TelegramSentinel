@@ -21,6 +21,7 @@ from src.db.models import (
     category_exists,
     get_active_sources,
     get_categories,
+    get_pending_sources,
     remove_source,
 )
 
@@ -35,23 +36,30 @@ async def _finalize_add_source(uid: int, cat: str, data: dict, message, reply: b
     if not await category_exists(cat):
         await add_category(cat, "📌")
         log.info("Auto-created category: 📌 %s", cat)
-    await add_source(source_type, name, url, cat)
-    join_warning = ""
+
+    status = "active"
+    extra = ""
     if source_type == "telegram":
-        username = url.lstrip("@")
+        raw = url.lstrip("@")
         try:
-            await userbot.join_chat(username)
-            log.info("Userbot joined @%s", username)
+            await userbot.join_chat(raw)
+            log.info("Userbot joined %s", url)
+            await add_to_folder(raw)
         except Exception as exc:
-            log.warning("Could not join @%s: %s", username, exc)
-            join_warning = f"\n⚠️ Userbot failed to join: {exc}"
-        await add_to_folder(username)
+            log.warning("Could not join %s: %s", url, exc)
+            status = "pending"
+            extra = "\n⏳ Could not join — saved as pending"
+
+    await add_source(source_type, name, url, cat, status=status)
+    if status == "active" and source_type == "telegram":
         await load_watched_channels()
+
     del _pending[uid]
-    log.info("Source added: [%s] %s (%s) -> category=%s", source_type, name, url, cat)
+    log.info("Source added: [%s] %s (%s) -> category=%s status=%s", source_type, name, url, cat, status)
+    prefix = "⏳" if status == "pending" else "✅"
     text = (
-        f"✅ Added [{source_type}] <b>{name}</b> — <code>{url}</code>\n"
-        f"Category: <b>{cat}</b>{join_warning}"
+        f"{prefix} Added [{source_type}] <b>{name}</b> — <code>{url}</code>\n"
+        f"Category: <b>{cat}</b>{extra}"
     )
     if reply:
         await message.reply(text, reply_markup=ReplyKeyboardRemove())
@@ -71,16 +79,23 @@ async def _send_sources_list(target, reply: bool) -> None:
         return
 
     all_sources = await get_active_sources()
+    pending_sources = await get_pending_sources()
     src_count: dict[str, int] = {}
-    for s in all_sources:
+    for s in list(all_sources) + list(pending_sources):
         src_count[s["category"]] = src_count.get(s["category"], 0) + 1
 
-    buttons = []
+    rows, row = [], []
     for c in cats:
         count = src_count.get(c["name"], 0)
         label = f"{c['emoji']} {c['name']}  ({count})" if count else f"{c['emoji']} {c['name']}"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"cat_view:{c['name']}")])
-    buttons.append([InlineKeyboardButton("➕ Add source", callback_data="src_add:")])
+        row.append(InlineKeyboardButton(label, callback_data=f"src_cat_view:{c['name']}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("➕ Add source", callback_data="src_add:")])
+    buttons = rows
     kb = InlineKeyboardMarkup(buttons)
     if reply:
         await target.reply("Sources:", reply_markup=kb)
@@ -98,6 +113,13 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
     async def cb_src_list(_, query: CallbackQuery) -> None:
         _pending.pop(query.from_user.id, None)
         await _send_sources_list(query.message, reply=False)
+
+    @bot.on_callback_query(pf.regex(r"^src_cat_view:") & admin_cb)
+    async def cb_src_cat_view(_, query: CallbackQuery) -> None:
+        _pending.pop(query.from_user.id, None)
+        cat_name = query.data.split(":", 1)[1]
+        text, sources = await _cat_view_text(cat_name)
+        await query.message.edit_text(text, reply_markup=_category_view_keyboard(cat_name, sources, origin="src_list"))
 
     @bot.on_callback_query(pf.regex(r"^src_view:") & admin_cb)
     async def cb_src_view(_, query: CallbackQuery) -> None:
@@ -192,7 +214,7 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
             text, remaining = await _cat_view_text(cat_name)
             await query.message.edit_text(
                 "✅ Source removed.\n\n" + text,
-                reply_markup=_category_view_keyboard(cat_name, remaining),
+                reply_markup=_category_view_keyboard(cat_name, remaining, origin="src_list"),
             )
         else:
             await query.message.edit_text("✅ Source removed.")

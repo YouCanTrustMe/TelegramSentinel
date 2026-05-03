@@ -91,19 +91,28 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
         elif action == "add_source":
             if step == 0:
                 url = text
-                source_type = "rss" if _is_rss(url) else "telegram"
+                if "t.me/" in url:
+                    path = url.split("t.me/")[1].split("?")[0].rstrip("/")
+                    url = url if path.startswith("+") else f"@{path}"
+                    source_type = "telegram"
+                else:
+                    source_type = "rss" if _is_rss(url) else "telegram"
                 if await source_exists(url):
                     del _pending[uid]
                     await message.reply(f"Source <code>{url}</code> already exists.")
                     return
                 if source_type == "telegram":
+                    is_invite = "/+" in url or url.lstrip("@").startswith("+")
                     try:
                         chat = await userbot.get_chat(url.lstrip("@"))
                         name = chat.title
                     except Exception as exc:
-                        del _pending[uid]
-                        await message.reply(f"Could not fetch channel info: {exc}")
-                        return
+                        if is_invite:
+                            name = url
+                        else:
+                            del _pending[uid]
+                            await message.reply(f"Could not fetch channel info: {exc}")
+                            return
                 else:
                     feed = await asyncio.to_thread(feedparser.parse, url)
                     if feed.bozo and not feed.entries:

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 from pyrogram import idle
@@ -15,6 +16,18 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
+_log_dir = Path("data/logs")
+_log_dir.mkdir(parents=True, exist_ok=True)
+_file_handler = TimedRotatingFileHandler(
+    _log_dir / "sentinel.log",
+    when="midnight",
+    backupCount=7,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+logging.getLogger().addHandler(_file_handler)
+
 log = logging.getLogger(__name__)
 
 

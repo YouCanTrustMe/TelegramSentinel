@@ -12,6 +12,7 @@ from src.processor.classifier import group_by_topic
 log = logging.getLogger(__name__)
 
 _TELEGRAM_LIMIT = 4000
+_MAX_ITEMS_PER_SOURCE = 20
 
 
 def _get_tz() -> ZoneInfo:
@@ -94,16 +95,12 @@ def _build_digest_text(cat_meta: dict, date_str: str) -> list[str]:
 
         lines.append(f"\n<b>{data['emoji']} {cat_name.capitalize()}</b>")
 
-        block_lines = []
         for source_name, source_items in sources.items():
             if not source_items:
                 continue
-            if block_lines:
-                block_lines.append("")
-            block_lines.append(f"<b>{escape(source_name)}</b>")
+            block_lines = [f"<b>{escape(source_name)}</b>"]
             for item in source_items:
                 block_lines.append(_format_item(item))
-        if block_lines:
             lines.append("<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>")
 
     return lines
@@ -161,17 +158,26 @@ async def send_digest(categories: list[str] | None = None) -> bool:
         source_name = item["source_name"] or "Unknown"
         cat_meta[cat]["sources"][source_name].append(item)
 
-    # Merge same-topic items within each source
     for cat_name, data in cat_meta.items():
         sources = data["sources"]
         for source_name in list(sources.keys()):
             if len(sources[source_name]) > 1:
                 sources[source_name] = await _merge_source_items(sources[source_name])
 
+    for data in cat_meta.values():
+        for source_name, source_items in data["sources"].items():
+            if len(source_items) > _MAX_ITEMS_PER_SOURCE:
+                log.info(
+                    "Source '%s': capped at %d (had %d merged items)",
+                    source_name, _MAX_ITEMS_PER_SOURCE, len(source_items),
+                )
+                data["sources"][source_name] = source_items[:_MAX_ITEMS_PER_SOURCE]
+
     date_str = datetime.now(_get_tz()).strftime("%d %B %Y")
     lines = _build_digest_text(cat_meta, date_str)
     messages = _split_into_messages(lines)
 
+    sent_ids = [item["id"] for item in items]
     failed = False
     for msg in messages:
         try:
@@ -181,10 +187,6 @@ async def send_digest(categories: list[str] | None = None) -> bool:
             failed = True
             break
 
-    if failed:
-        return False
-
-    sent_ids = [item["id"] for item in items]
     await mark_sent(sent_ids)
 
     await log_digest(total=len(items), high=0, low=0)

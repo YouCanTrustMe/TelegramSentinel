@@ -1,9 +1,10 @@
 import logging
 from html import escape
+from pathlib import Path
 
 import aiosqlite
 from pyrogram import filters as pf
-from pyrogram.types import CallbackQuery, Message
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from src.bot.state import _pending
 from src.config import settings
@@ -52,7 +53,7 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
             async with db.execute("SELECT COUNT(*) as unsent FROM items WHERE sent = 0") as cur:
                 unsent = (await cur.fetchone())["unsent"]
             async with db.execute(
-                """SELECT sources.name, sources.category,
+                """SELECT sources.name, sources.category, sources.type,
                           COUNT(*) as cnt,
                           SUM(CASE WHEN items.sent = 0 THEN 1 ELSE 0 END) as unsent_cnt
                    FROM items JOIN sources ON items.source_id = sources.id
@@ -75,10 +76,32 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
                 emoji = cat_emoji.get(cat_name, "📌")
                 lines.append(f"\n{emoji} <b>{cat_name}</b>")
                 for r in sources:
+                    type_label = "tg" if r["type"] == "telegram" else "rss"
                     unsent_part = f"  ({r['unsent_cnt']}⏳)" if r["unsent_cnt"] else ""
-                    lines.append(f"  {escape(r['name'])} · {r['cnt']}{unsent_part}")
+                    lines.append(f"  [{type_label}] {escape(r['name'])} · {r['cnt']}{unsent_part}")
 
         await message.reply("\n".join(lines))
+
+    @bot.on_message(pf.command("logs") & admin_msg)
+    async def cmd_logs(_, message: Message) -> None:
+        log_file = Path(settings.database_path).parent / "logs" / "sentinel.log"
+        if not log_file.exists():
+            await message.reply("No log file yet.")
+            return
+        lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        tail = lines[-20:] if len(lines) > 20 else lines
+        text = "<pre>" + escape("\n".join(tail)) + "</pre>"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download full log", callback_data="logs_download")]])
+        await message.reply(text, reply_markup=kb)
+
+    @bot.on_callback_query(pf.regex(r"^logs_download$") & admin_cb)
+    async def cb_logs_download(_, query: CallbackQuery) -> None:
+        log_file = Path(settings.database_path).parent / "logs" / "sentinel.log"
+        if not log_file.exists():
+            await query.answer("Log file not found.", show_alert=True)
+            return
+        await query.answer()
+        await query.message.reply_document(str(log_file))
 
     @bot.on_message(pf.command("start") & admin_msg)
     async def cmd_start(_, message: Message) -> None:
@@ -89,5 +112,6 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
             "/blocked — blocked words filter\n\n"
             "/digest — send digest now\n"
             "/stats — statistics\n"
+            "/logs — recent log entries\n"
             "/cancel — cancel current input"
         )

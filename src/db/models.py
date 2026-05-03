@@ -68,14 +68,35 @@ async def source_exists(url: str) -> bool:
             return await cur.fetchone() is not None
 
 
-async def add_source(type_: str, name: str, url: str, category: str) -> int:
+async def add_source(type_: str, name: str, url: str, category: str, status: str = "active") -> int:
     async with get_db() as db:
+        is_active = 1 if status == "active" else 0
         cur = await db.execute(
-            "INSERT INTO sources (type, name, url, category) VALUES (?, ?, ?, ?)",
-            (type_, name, url, category),
+            "INSERT INTO sources (type, name, url, category, is_active, status) VALUES (?, ?, ?, ?, ?, ?)",
+            (type_, name, url, category, is_active, status),
         )
         await db.commit()
         return cur.lastrowid
+
+
+async def get_pending_sources(category: str | None = None) -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        if category:
+            async with db.execute(
+                "SELECT * FROM sources WHERE status = 'pending' AND category = ?", (category,)
+            ) as cur:
+                return await cur.fetchall()
+        async with db.execute("SELECT * FROM sources WHERE status = 'pending'") as cur:
+            return await cur.fetchall()
+
+
+async def activate_source(source_id: int) -> bool:
+    async with get_db() as db:
+        cur = await db.execute(
+            "UPDATE sources SET is_active = 1, status = 'active' WHERE id = ?", (source_id,)
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 
 async def remove_source(source_id: int) -> bool:

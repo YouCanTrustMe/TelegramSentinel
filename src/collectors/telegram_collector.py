@@ -23,18 +23,19 @@ userbot = Client(
 
 
 async def _process_message(username: str, source: dict, message: Message) -> bool:
-    raw_text = message.text or message.caption or ""
-    media_placeholder: str | None = None
-    if not raw_text.strip():
-        if message.photo:
-            media_placeholder = "[Photo]"
-        elif message.video:
-            media_placeholder = "[Video]"
-        elif message.animation:
-            media_placeholder = "[GIF]"
-        else:
-            return False
-        raw_text = media_placeholder
+    caption = message.text or message.caption or ""
+    if message.photo:
+        media_prefix = "[Photo] "
+    elif message.video:
+        media_prefix = "[Video] "
+    elif message.animation:
+        media_prefix = "[GIF] "
+    else:
+        media_prefix = ""
+
+    raw_text = (media_prefix + caption).strip()
+    if not raw_text:
+        return False
 
     message_id = make_message_id("telegram", f"@{username}", str(message.id))
     if await is_duplicate(message_id):
@@ -43,8 +44,8 @@ async def _process_message(username: str, source: dict, message: Message) -> boo
     original_url = f"https://t.me/{username}/{message.id}"
     published_at = message.date.replace(tzinfo=timezone.utc).isoformat() if message.date else None
 
-    if media_placeholder:
-        summary = media_placeholder
+    if raw_text in ("[Photo]", "[Video]", "[GIF]"):
+        summary = raw_text
     else:
         result = await classify(raw_text)
         summary = result.summary

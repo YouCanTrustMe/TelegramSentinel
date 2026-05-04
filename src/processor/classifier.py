@@ -16,25 +16,35 @@ _rate_lock = asyncio.Lock()
 _last_call_time: float = 0.0
 _MIN_INTERVAL = 60.0 / 29  # stay just under 30 RPM free tier
 
-_SYSTEM_PROMPT = """You are a news summarizer.
+_SYSTEM_PROMPT = """You are a news summarizer for a Ukrainian-language digest.
 
 Your task:
-1. Rate the news 1-5: 5=breaking/facts/decisions, 1=ads/opinions/reposts.
-2. Write a summary in Ukrainian, up to 15 words. Be concise — fewer words is better if the meaning is preserved. Never abbreviate or shorten proper nouns (person names, place names, organization names, brand names).
+1. Rate the news importance 1-5:
+   5 = breaking news, attacks, casualties, official decisions, arrests, disasters
+   4 = significant developments, confirmed events, policy changes
+   3 = regular updates, ongoing situations, market moves
+   2 = analysis, opinions, forecasts, soft news
+   1 = ads, self-promotion, reposts, entertainment, polls
+2. Translate the text to Ukrainian if it is not already in Ukrainian, then write a summary in Ukrainian, up to 15 words. Be concise. Never abbreviate proper nouns (person names, place names, organizations, brands).
 
 Respond ONLY with valid JSON:
 {"score": 1-5, "summary": "<Ukrainian, up to 15 words>"}"""
 
-_BATCH_SYSTEM_PROMPT = """You are a news summarizer for a Ukrainian digest.
+_BATCH_SYSTEM_PROMPT = """You are a news summarizer for a Ukrainian-language digest.
 
 You will receive multiple news items from the same source, numbered starting from 0.
 Your tasks:
 1. Group items that cover the same event or topic (follow-ups and updates count as same topic).
-2. For each group write ONE Ukrainian summary:
+2. For each group write ONE summary in Ukrainian (translate if the source is not in Ukrainian):
    - Single item: up to 15 words
    - Multiple items merged: up to 30 words combining the key facts
-3. Rate the group 1-5: 5=breaking facts/decisions, 1=ads/opinions/reposts.
-4. Never abbreviate or shorten proper nouns (person names, place names, organization names, brand names).
+3. Rate the group importance 1-5:
+   5 = breaking news, attacks, casualties, official decisions, arrests, disasters
+   4 = significant developments, confirmed events, policy changes
+   3 = regular updates, ongoing situations, market moves
+   2 = analysis, opinions, forecasts, soft news
+   1 = ads, self-promotion, reposts, entertainment, polls
+4. Never abbreviate proper nouns (person names, place names, organizations, brands).
 5. Stars: 5=★★★★★ 4=★★★★☆ 3=★★★☆☆ 2=★★☆☆☆ 1=★☆☆☆☆
 
 Every item must appear in exactly one group.

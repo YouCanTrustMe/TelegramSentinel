@@ -120,6 +120,32 @@ async def get_pending_sources(category: str | None = None) -> list[aiosqlite.Row
             return await cur.fetchall()
 
 
+async def rename_source(source_id: int, new_name: str) -> bool:
+    async with get_db() as db:
+        cur = await db.execute(
+            "UPDATE sources SET name = ? WHERE id = ?", (new_name, source_id)
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_app_setting(key: str) -> str | None:
+    async with get_db() as db:
+        async with db.execute("SELECT value FROM app_settings WHERE key = ?", (key,)) as cur:
+            row = await cur.fetchone()
+            return row["value"] if row else None
+
+
+async def set_app_setting(key: str, value: str) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        await db.commit()
+
+
 async def activate_source(source_id: int) -> bool:
     async with get_db() as db:
         cur = await db.execute(

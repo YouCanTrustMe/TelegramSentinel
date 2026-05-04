@@ -17,7 +17,7 @@ bot = Client(
 _BOT_API = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 
 
-async def send_message(text: str) -> None:
+async def send_message(text: str) -> int:
     url = f"{_BOT_API}/sendMessage"
     payload = {
         "chat_id": settings.telegram_supergroup_id,
@@ -31,7 +31,41 @@ async def send_message(text: str) -> None:
                 body = await resp.text()
                 log.error("Bot API sendMessage failed: %s %s", resp.status, body)
                 raise RuntimeError(f"sendMessage failed: {resp.status}")
-    log.debug("Message sent to supergroup (%d chars)", len(text))
+            data = await resp.json()
+    message_id: int = data["result"]["message_id"]
+    log.debug("Message sent to supergroup (%d chars) | message_id=%d", len(text), message_id)
+    return message_id
+
+
+async def pin_message(message_id: int) -> None:
+    url = f"{_BOT_API}/pinChatMessage"
+    payload = {
+        "chat_id": settings.telegram_supergroup_id,
+        "message_id": message_id,
+        "disable_notification": True,
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                log.error("Bot API pinChatMessage failed: %s %s", resp.status, body)
+                return
+    log.info("Digest pinned | message_id=%d", message_id)
+
+
+async def unpin_message(message_id: int) -> None:
+    url = f"{_BOT_API}/unpinChatMessage"
+    payload = {
+        "chat_id": settings.telegram_supergroup_id,
+        "message_id": message_id,
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                log.error("Bot API unpinChatMessage failed: %s %s", resp.status, body)
+                return
+    log.info("Digest unpinned | message_id=%d", message_id)
 
 
 async def send_document(chat_id: int, file_path: str, filename: str | None = None) -> None:

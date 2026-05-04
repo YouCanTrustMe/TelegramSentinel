@@ -1,4 +1,5 @@
 import logging
+from html import escape
 
 from pyrogram import filters as pf
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
@@ -21,6 +22,7 @@ from src.db.models import (
     get_source,
     reassign_source_category,
     remove_source,
+    rename_source,
 )
 
 log = logging.getLogger(__name__)
@@ -157,6 +159,24 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
             )
         else:
             await query.message.edit_text("✅ Source removed.")
+
+    @bot.on_callback_query(pf.regex(r"^src_rename:") & admin_cb)
+    async def cb_src_rename(_, query: CallbackQuery) -> None:
+        src_id = int(query.data.split(":", 1)[1])
+        s = await get_source(src_id)
+        if not s:
+            await query.answer("Source not found.", show_alert=True)
+            return
+        uid = query.from_user.id
+        _pending[uid] = {
+            "action": "rename_source",
+            "step": 0,
+            "data": {"source_id": src_id, "cat_name": s["category"]},
+        }
+        await query.message.edit_text(
+            f"Rename <b>{escape(s['name'])}</b>.\n\nNew name:",
+            reply_markup=_back_kb(f"src_view:{src_id}"),
+        )
 
     @bot.on_callback_query(pf.regex(r"^src_add:") & admin_cb)
     async def cb_src_add(_, query: CallbackQuery) -> None:

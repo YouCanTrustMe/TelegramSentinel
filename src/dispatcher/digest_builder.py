@@ -6,14 +6,14 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.db.models import get_blocked_words, get_categories, get_unsent_items, log_digest, mark_sent
-from src.dispatcher.sender import send_message
+from src.db.models import get_app_setting, get_blocked_words, get_categories, get_unsent_items, log_digest, mark_sent, set_app_setting
+from src.dispatcher.sender import pin_message, send_message, unpin_message
 from src.processor.classifier import group_by_topic
 
 log = logging.getLogger(__name__)
 
 _TELEGRAM_LIMIT = 4000
-_MAX_ITEMS_PER_SOURCE = 20
+_MAX_ITEMS_PER_SOURCE = 50
 
 
 def _get_tz() -> ZoneInfo:
@@ -66,6 +66,9 @@ async def _merge_source_items(items: list) -> list[dict]:
                 default=None,
             )
             summary = g["summary"] or group_items[0]["summary"] or ""
+            n = len(g["ids"])
+            if n > 1:
+                summary = f"{summary} · merged {n}"
             merged.append({
                 "summary": summary,
                 "original_url": url,
@@ -86,7 +89,16 @@ async def _merge_source_items(items: list) -> list[dict]:
         ]
 
 
-def _build_digest_text(cat_meta: dict, date_str: str) -> list[str]:
+def _source_block(source_name: str, source_items: list) -> str:
+    n = len(source_items)
+    block_lines = [f"<b>{escape(source_name)}</b>"]
+    for item in source_items:
+        block_lines.append(_format_item(item))
+    block_lines.append(f"· {n} {'item' if n == 1 else 'items'}")
+    return "<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>"
+
+
+def _build_digest_text(cat_meta: dict, date_str: str, blocked_items: list | None = None) -> list[str]:
     lines = [f"<b>📋 Digest — {date_str}</b>"]
 
     for cat_name, data in cat_meta.items():
@@ -99,10 +111,15 @@ def _build_digest_text(cat_meta: dict, date_str: str) -> list[str]:
         for source_name, source_items in sources.items():
             if not source_items:
                 continue
-            block_lines = [f"<b>{escape(source_name)}</b>"]
-            for item in source_items:
-                block_lines.append(_format_item(item))
-            lines.append("<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>")
+            lines.append(_source_block(source_name, source_items))
+
+    if blocked_items:
+        lines.append("\n<b>🚫 Filtered</b>")
+        filtered_by_source: dict[str, list] = defaultdict(list)
+        for item in blocked_items:
+            filtered_by_source[item["source_name"] or "Unknown"].append(item)
+        for source_name, source_items in filtered_by_source.items():
+            lines.append(_source_block(source_name, source_items))
 
     return lines
 
@@ -131,23 +148,26 @@ async def send_digest(categories: list[str] | None = None) -> bool:
     blocked_words = await get_blocked_words()
     if blocked_words:
         blocked_patterns = [
-            re.compile(rf"(?<!\w){re.escape(b['word'].lower())}(?!\w)", re.UNICODE)
+            re.compile(rf"(?<!\w){re.escape(b['word'].lower())}", re.UNICODE)
             for b in blocked_words
         ]
-        filtered, blocked_ids = [], []
+        filtered, blocked_items = [], []
         for item in items:
             text_to_check = ((item["summary"] or "") + " " + (item["raw_text"] or "")).lower()
             if any(p.search(text_to_check) for p in blocked_patterns):
-                blocked_ids.append(item["id"])
+                blocked_items.append(item)
             else:
                 filtered.append(item)
-        if blocked_ids:
+        if blocked_items:
+            blocked_ids = [item["id"] for item in blocked_items]
             await mark_sent(blocked_ids)
             log.info("Blocked %d item(s) by keyword filter", len(blocked_ids))
         items = filtered
-        if not items:
+        if not items and not blocked_items:
             log.info("Digest triggered: all items filtered by blocked words | filter=%s", categories)
             return False
+    else:
+        blocked_items = []
 
     all_categories = await get_categories()
     cat_meta = {
@@ -178,15 +198,18 @@ async def send_digest(categories: list[str] | None = None) -> bool:
                 data["sources"][source_name] = source_items[:_MAX_ITEMS_PER_SOURCE]
 
     date_str = datetime.now(_get_tz()).strftime("%d %B %Y")
-    lines = _build_digest_text(cat_meta, date_str)
+    lines = _build_digest_text(cat_meta, date_str, blocked_items=blocked_items)
     messages = _split_into_messages(lines)
 
     sent_ids = [item["id"] for item in items]
     sent_count = 0
     failed_count = 0
+    first_message_id: int | None = None
     for msg in messages:
         try:
-            await send_message(msg)
+            msg_id = await send_message(msg)
+            if first_message_id is None:
+                first_message_id = msg_id
             sent_count += 1
         except Exception as exc:
             failed_count = len(messages) - sent_count
@@ -198,10 +221,18 @@ async def send_digest(categories: list[str] | None = None) -> bool:
 
     await mark_sent(sent_ids)
 
+    if first_message_id and failed_count == 0:
+        prev_id = await get_app_setting("pinned_digest_message_id")
+        if prev_id:
+            await unpin_message(int(prev_id))
+        await pin_message(first_message_id)
+        await set_app_setting("pinned_digest_message_id", str(first_message_id))
+
     status = "ok" if failed_count == 0 else "partial"
-    await log_digest(total=len(items), status=status)
+    total = len(items) + len(blocked_items)
+    await log_digest(total=total, status=status)
     log.info(
-        "Digest done: %d items | %d/%d message(s) sent | filter=%s | status=%s",
-        len(items), sent_count, len(messages), categories, status,
+        "Digest done: %d items (%d filtered) | %d/%d message(s) sent | filter=%s | status=%s",
+        len(items), len(blocked_items), sent_count, len(messages), categories, status,
     )
     return failed_count == 0

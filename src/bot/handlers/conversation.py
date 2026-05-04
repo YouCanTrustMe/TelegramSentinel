@@ -16,6 +16,7 @@ from src.bot.keyboards import (
     _category_view_keyboard,
     _is_rss,
     _is_valid_time,
+    _source_view_keyboard,
     _time_step_kb,
     _edit_time_kb,
 )
@@ -24,6 +25,8 @@ from src.db.models import (
     add_blocked_word,
     get_blocked_words,
     get_categories,
+    get_source,
+    rename_source,
     source_exists,
     update_category,
 )
@@ -141,6 +144,35 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
 
             elif step == 1:
                 await _finalize_add_source(uid, text, data, message)
+
+        elif action == "rename_source":
+            new_name = text.strip()
+            src_id = data["source_id"]
+            cat_name = data["cat_name"]
+            ok = await rename_source(src_id, new_name)
+            del _pending[uid]
+            if ok:
+                log.info("Source renamed: id=%s -> %s", src_id, new_name)
+                s = await get_source(src_id)
+                if s:
+                    pending = s["status"] == "pending"
+                    icon = "⏳" if pending else ("📡" if s["type"] == "telegram" else "🔗")
+                    type_label = "tg" if s["type"] == "telegram" else "rss"
+                    status_line = "\nStatus: <b>pending</b>" if pending else ""
+                    src_text = (
+                        f"{icon} <b>{escape(new_name)}</b>\n"
+                        f"Type: <code>{type_label}</code>\n"
+                        f"URL: <code>{s['url']}</code>\n"
+                        f"Category: <b>{cat_name}</b>{status_line}"
+                    )
+                    await message.reply(
+                        f"✅ Renamed to <b>{escape(new_name)}</b>.\n\n{src_text}",
+                        reply_markup=_source_view_keyboard(src_id, cat_name),
+                    )
+                else:
+                    await message.reply(f"✅ Renamed to <b>{escape(new_name)}</b>.")
+            else:
+                await message.reply("Source not found.")
 
         elif action == "edit_category":
             field = data["field"]

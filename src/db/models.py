@@ -120,6 +120,12 @@ async def get_pending_sources(category: str | None = None) -> list[aiosqlite.Row
             return await cur.fetchall()
 
 
+async def set_source_pending_msg_id(source_id: int, msg_id: int | None) -> None:
+    async with get_db() as db:
+        await db.execute("UPDATE sources SET pending_msg_id = ? WHERE id = ?", (msg_id, source_id))
+        await db.commit()
+
+
 async def rename_source(source_id: int, new_name: str) -> bool:
     async with get_db() as db:
         cur = await db.execute(

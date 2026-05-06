@@ -24,6 +24,7 @@ from src.db.models import (
     remove_source,
     rename_source,
     reorder_source,
+    set_source_pending_msg_id,
 )
 
 log = logging.getLogger(__name__)
@@ -47,11 +48,27 @@ async def _finalize_add_source(uid: int, cat: str, data: dict, message, reply: b
             log.info("Userbot joined %s", url)
             await add_to_folder(raw)
         except Exception as exc:
-            log.warning("Could not join %s: %s", url, exc)
-            status = "pending"
-            extra = "\n⏳ Could not join — saved as pending"
+            exc_str = str(exc).upper()
+            if "ALREADY" in exc_str or "USER_ALREADY_PARTICIPANT" in exc_str:
+                log.info("Userbot already a member of %s — activating", url)
+                await add_to_folder(raw)
+            else:
+                log.warning("Could not join %s: %s", url, exc)
+                status = "pending"
+                extra = "\n⏳ Could not join — saved as pending"
 
-    await add_source(source_type, name, url, cat, status=status)
+    source_id = await add_source(source_type, name, url, cat, status=status)
+
+    if status == "pending":
+        try:
+            msg = await userbot.send_message(
+                "me",
+                f"⏳ Pending source: {url}\nCategory: {cat}\nWill be joined automatically when accessible.",
+            )
+            await set_source_pending_msg_id(source_id, msg.id)
+            log.info("Saved pending notice to Saved Messages for source id=%s", source_id)
+        except Exception as exc:
+            log.warning("Could not send pending notice to Saved Messages: %s", exc)
 
     del _pending[uid]
     log.info("Source added: [%s] %s (%s) -> category=%s status=%s", source_type, name, url, cat, status)

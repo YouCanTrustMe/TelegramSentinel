@@ -5,7 +5,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from src.bot.state import _DEFAULT_DIGEST_TIME
 from src.config import settings
-from src.db.models import activate_source, get_categories, get_pending_sources
+from src.db.models import activate_source, get_categories, get_pending_sources, set_source_pending_msg_id
 from src.dispatcher.digest_builder import send_digest
 
 log = logging.getLogger(__name__)
@@ -37,11 +37,25 @@ async def _check_pending_sources() -> None:
         raw = s["url"].lstrip("@")
         try:
             await userbot.join_chat(raw)
-            await add_to_folder(raw)
-            await activate_source(s["id"])
-            log.info("Pending source activated: id=%s url=%s", s["id"], s["url"])
         except Exception as exc:
-            log.debug("Pending source not yet accessible: id=%s | %s", s["id"], exc)
+            exc_str = str(exc).upper()
+            if "ALREADY" not in exc_str and "USER_ALREADY_PARTICIPANT" not in exc_str:
+                log.debug("Pending source not yet accessible: id=%s | %s", s["id"], exc)
+                continue
+            log.info("Pending source already a member: id=%s url=%s", s["id"], s["url"])
+
+        await add_to_folder(raw)
+        await activate_source(s["id"])
+        log.info("Pending source activated: id=%s url=%s", s["id"], s["url"])
+
+        pending_msg_id = s["pending_msg_id"] if "pending_msg_id" in s.keys() else None
+        if pending_msg_id:
+            try:
+                await userbot.delete_messages("me", [pending_msg_id])
+                await set_source_pending_msg_id(s["id"], None)
+                log.info("Deleted pending notice from Saved Messages for source id=%s", s["id"])
+            except Exception as exc:
+                log.warning("Could not delete pending notice from Saved Messages: %s", exc)
 
 
 def _parse_times(time_str: str) -> list[tuple[int, int]]:

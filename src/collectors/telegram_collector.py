@@ -67,7 +67,19 @@ async def _process_message(username: str, source: dict, message: Message) -> boo
 async def _poll_channel(username: str, source: dict) -> int:
     saved = 0
     try:
+        messages = []
         async for message in userbot.get_chat_history(f"@{username}", limit=20):
+            messages.append(message)
+
+        seen_group_ids: set = set()
+        for message in messages:
+            group_id = message.media_group_id
+            if group_id is not None:
+                if group_id in seen_group_ids:
+                    continue
+                seen_group_ids.add(group_id)
+                group_msgs = [m for m in messages if m.media_group_id == group_id]
+                message = next((m for m in group_msgs if (m.text or m.caption)), group_msgs[0])
             if await _process_message(username, source, message):
                 saved += 1
     except Exception as exc:

@@ -44,6 +44,18 @@ async def _check_pending_sources() -> None:
             log.debug("Pending source not yet accessible: id=%s | %s", s["id"], exc)
 
 
+def _parse_times(time_str: str) -> list[tuple[int, int]]:
+    result = []
+    for t in time_str.split(","):
+        t = t.strip()
+        try:
+            h, m = map(int, t.split(":"))
+            result.append((h, m))
+        except (ValueError, AttributeError):
+            log.warning("Invalid time in schedule string: %r", t)
+    return result
+
+
 async def _rebuild_jobs() -> None:
     for job in _scheduler.get_jobs():
         if job.id.startswith("digest_"):
@@ -56,28 +68,37 @@ async def _rebuild_jobs() -> None:
         replace_existing=True,
     )
 
-    h, m = map(int, _DEFAULT_DIGEST_TIME.split(":"))
-    _scheduler.add_job(
-        send_digest,
-        CronTrigger(hour=h, minute=m, timezone=settings.digest_timezone),
-        id=f"digest_{_DEFAULT_DIGEST_TIME}",
-        replace_existing=True,
-    )
+    default_times = _parse_times(_DEFAULT_DIGEST_TIME)
+    default_time_set = frozenset(f"{h:02d}:{m:02d}" for h, m in default_times)
+
+    for h, m in default_times:
+        time_str = f"{h:02d}:{m:02d}"
+        _scheduler.add_job(
+            send_digest,
+            CronTrigger(hour=h, minute=m, timezone=settings.digest_timezone),
+            id=f"digest_{time_str}",
+            replace_existing=True,
+        )
 
     # Extra jobs for categories with a custom (non-default) digest time
     categories = await get_categories()
     custom: dict[str, list[str]] = {}
     for cat in categories:
-        t = cat["digest_time"]
-        if t != _DEFAULT_DIGEST_TIME:
-            custom.setdefault(t, []).append(cat["name"])
+        cat_time_set = frozenset(x.strip() for x in cat["digest_time"].split(","))
+        if cat_time_set != default_time_set:
+            for time_part in cat_time_set:
+                custom.setdefault(time_part, []).append(cat["name"])
 
     for time_str, cat_names in custom.items():
-        h, m = map(int, time_str.split(":"))
+        try:
+            h, m = map(int, time_str.split(":"))
+        except ValueError:
+            log.warning("Skipping invalid custom digest time: %r", time_str)
+            continue
         _scheduler.add_job(
             send_digest,
             CronTrigger(hour=h, minute=m, timezone=settings.digest_timezone),
-            id=f"digest_{time_str}",
+            id=f"digest_{time_str}_cats",
             replace_existing=True,
             kwargs={"categories": cat_names},
         )

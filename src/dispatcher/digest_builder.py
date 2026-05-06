@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 
 _TELEGRAM_LIMIT = 4000
 _MAX_ITEMS_PER_SOURCE = 50
+_STARS_RE = re.compile(r'^([★☆]{5})\s*')
 
 
 def _get_tz() -> ZoneInfo:
@@ -26,6 +27,13 @@ def _format_item(item: dict) -> str:
     if not summary_text:
         raw = item["raw_text"] or ""
         summary_text = raw[:60].split("\n")[0]
+
+    stars = ""
+    m = _STARS_RE.match(summary_text)
+    if m:
+        stars = m.group(1) + " "
+        summary_text = summary_text[m.end():]
+
     summary = escape(summary_text)
     hour = ""
     pub = item["published_at"]
@@ -38,8 +46,10 @@ def _format_item(item: dict) -> str:
             hour = f"{dt_local.hour}⏰ "
         except Exception:
             pass
-    text = f"{hour}{summary}"
-    return f'<a href="{escape(url, quote=True)}">{text}</a>' if url else text
+    prefix = f"{stars}{hour}"
+    if url:
+        return f'{prefix}{summary} <a href="{escape(url, quote=True)}">↗</a>'
+    return f"{prefix}{summary}"
 
 
 async def _merge_source_items(items: list) -> list[dict]:
@@ -90,11 +100,10 @@ async def _merge_source_items(items: list) -> list[dict]:
 
 
 def _source_block(source_name: str, source_items: list) -> str:
-    n = len(source_items)
     block_lines = [f"<b>{escape(source_name)}</b>"]
     for item in source_items:
         block_lines.append(_format_item(item))
-    block_lines.append(f"· {n} {'item' if n == 1 else 'items'}")
+    block_lines.append("·")
     return "<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>"
 
 

@@ -23,13 +23,15 @@ def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
             reply_markup=_blocked_keyboard(words),
         )
 
-    @bot.on_callback_query(pf.regex(r"^blocked_list$") & admin_cb)
+    @bot.on_callback_query(pf.regex(r"^blocked_list(:\d+)?$") & admin_cb)
     async def cb_blocked_list(_, query: CallbackQuery) -> None:
         _pending.pop(query.from_user.id, None)
+        parts = query.data.split(":")
+        page = int(parts[1]) if len(parts) > 1 else 0
         words = await get_blocked_words()
         await query.message.edit_text(
             _BLOCKED_TITLE if words else _BLOCKED_EMPTY,
-            reply_markup=_blocked_keyboard(words),
+            reply_markup=_blocked_keyboard(words, page),
         )
 
     @bot.on_callback_query(pf.regex(r"^blocked_add$") & admin_cb)

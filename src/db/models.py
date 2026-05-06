@@ -173,10 +173,12 @@ async def get_active_sources(type_: str | None = None) -> list[aiosqlite.Row]:
     async with get_db() as db:
         if type_:
             async with db.execute(
-                "SELECT * FROM sources WHERE status = 'active' AND type = ?", (type_,)
+                "SELECT * FROM sources WHERE status = 'active' AND type = ? ORDER BY sort_order ASC, name ASC", (type_,)
             ) as cur:
                 return await cur.fetchall()
-        async with db.execute("SELECT * FROM sources WHERE status = 'active'") as cur:
+        async with db.execute(
+            "SELECT * FROM sources WHERE status = 'active' ORDER BY sort_order ASC, name ASC"
+        ) as cur:
             return await cur.fetchall()
 
 
@@ -219,7 +221,7 @@ async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlit
                FROM items
                LEFT JOIN sources ON items.source_id = sources.id
                WHERE items.sent = 0 AND items.category IN ({placeholders})
-               ORDER BY category, source_id, published_at ASC"""
+               ORDER BY category, sources.sort_order ASC, source_id, published_at ASC"""
             async with db.execute(query, categories) as cur:
                 return await cur.fetchall()
         async with db.execute(
@@ -227,7 +229,7 @@ async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlit
                FROM items
                LEFT JOIN sources ON items.source_id = sources.id
                WHERE items.sent = 0
-               ORDER BY category, source_id, published_at ASC"""
+               ORDER BY category, sources.sort_order ASC, source_id, published_at ASC"""
         ) as cur:
             return await cur.fetchall()
 
@@ -250,7 +252,7 @@ async def category_exists(name: str) -> bool:
 async def get_categories() -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(
-            "SELECT * FROM categories WHERE is_active = 1 ORDER BY name"
+            "SELECT * FROM categories WHERE is_active = 1 ORDER BY sort_order ASC, name ASC"
         ) as cur:
             return await cur.fetchall()
 
@@ -293,7 +295,7 @@ async def update_category(
 async def get_sources_by_category(cat_name: str) -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(
-            "SELECT * FROM sources WHERE category = ? AND status = 'active'", (cat_name,)
+            "SELECT * FROM sources WHERE category = ? AND status = 'active' ORDER BY sort_order ASC, name ASC", (cat_name,)
         ) as cur:
             return await cur.fetchall()
 
@@ -362,3 +364,41 @@ async def remove_blocked_word(word_id: int) -> bool:
         cur = await db.execute("DELETE FROM blocked_words WHERE id = ?", (word_id,))
         await db.commit()
         return cur.rowcount > 0
+
+
+async def reorder_category(name: str, direction: str) -> None:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT name FROM categories WHERE is_active = 1 ORDER BY sort_order ASC, name ASC"
+        ) as cur:
+            rows = await cur.fetchall()
+        names = [r["name"] for r in rows]
+        idx = next((i for i, n in enumerate(names) if n == name), None)
+        if idx is None:
+            return
+        swap_idx = idx - 1 if direction == "up" else idx + 1
+        if not (0 <= swap_idx < len(names)):
+            return
+        names[idx], names[swap_idx] = names[swap_idx], names[idx]
+        for i, n in enumerate(names):
+            await db.execute("UPDATE categories SET sort_order = ? WHERE name = ?", (i, n))
+        await db.commit()
+
+
+async def reorder_source(source_id: int, cat_name: str, direction: str) -> None:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT id FROM sources WHERE category = ? ORDER BY sort_order ASC, name ASC", (cat_name,)
+        ) as cur:
+            rows = await cur.fetchall()
+        ids = [r["id"] for r in rows]
+        idx = next((i for i, sid in enumerate(ids) if sid == source_id), None)
+        if idx is None:
+            return
+        swap_idx = idx - 1 if direction == "up" else idx + 1
+        if not (0 <= swap_idx < len(ids)):
+            return
+        ids[idx], ids[swap_idx] = ids[swap_idx], ids[idx]
+        for i, sid in enumerate(ids):
+            await db.execute("UPDATE sources SET sort_order = ? WHERE id = ?", (i, sid))
+        await db.commit()

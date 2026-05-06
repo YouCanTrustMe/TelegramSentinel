@@ -21,6 +21,7 @@ from src.db.models import (
     get_categories,
     get_sources_by_category,
     move_sources_to_category,
+    reorder_category,
     remove_category,
     update_category,
 )
@@ -56,23 +57,36 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
             return
         await message.reply("Categories:", reply_markup=await _categories_keyboard(cats))
 
-    @bot.on_callback_query(pf.regex(r"^cat_list$") & admin_cb)
+    @bot.on_callback_query(pf.regex(r"^cat_list(:\d+)?$") & admin_cb)
     async def cb_cat_list(_, query: CallbackQuery) -> None:
         _pending.pop(query.from_user.id, None)
+        parts = query.data.split(":")
+        page = int(parts[1]) if len(parts) > 1 else 0
         cats = await get_categories()
         if not cats:
             await query.message.edit_text("No categories yet.", reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
             ))
             return
-        await query.message.edit_text("Categories:", reply_markup=await _categories_keyboard(cats))
+        await query.message.edit_text("Categories:", reply_markup=await _categories_keyboard(cats, page))
 
     @bot.on_callback_query(pf.regex(r"^cat_view:") & admin_cb)
     async def cb_cat_view(_, query: CallbackQuery) -> None:
         _pending.pop(query.from_user.id, None)
-        cat_name = query.data.split(":", 1)[1]
+        parts = query.data.split(":", 2)
+        cat_name = parts[1]
+        page = int(parts[2]) if len(parts) > 2 else 0
         text, sources = await _cat_view_text(cat_name)
-        await query.message.edit_text(text, reply_markup=_category_view_keyboard(cat_name, sources))
+        await query.message.edit_text(text, reply_markup=_category_view_keyboard(cat_name, sources, page))
+
+    @bot.on_callback_query(pf.regex(r"^cat_order_(up|down):") & admin_cb)
+    async def cb_cat_order(_, query: CallbackQuery) -> None:
+        parts = query.data.split(":", 1)
+        direction = "up" if "up" in parts[0] else "down"
+        cat_name = parts[1]
+        await reorder_category(cat_name, direction)
+        cats = await get_categories()
+        await query.message.edit_text("Categories:", reply_markup=await _categories_keyboard(cats))
 
     @bot.on_callback_query(pf.regex(r"^cat_add$") & admin_cb)
     async def cb_cat_add(_, query: CallbackQuery) -> None:
@@ -196,6 +210,6 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
             cat = next((c for c in cats if c["name"] == cat_name), None)
             current = cat["digest_time"] if cat else _DEFAULT_DIGEST_TIME
             await query.message.edit_text(
-                f"New digest time for <b>{cat_name}</b> (HH:MM):\nCurrent: <b>{current}</b>",
+                f"New digest time for <b>{cat_name}</b> (HH:MM or comma-separated):\nCurrent: <b>{current}</b>",
                 reply_markup=_edit_time_kb(cat_name),
             )

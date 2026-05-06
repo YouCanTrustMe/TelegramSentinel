@@ -61,13 +61,13 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                 data["emoji"] = escape(text[:8])
                 state["step"] = 2
                 await message.reply(
-                    f"Digest time (HH:MM) or skip for default ({_DEFAULT_DIGEST_TIME}):",
+                    "Digest time (HH:MM or comma-separated, e.g. 15:00,21:00) or skip for default:",
                     reply_markup=_time_step_kb(),
                 )
             elif step == 2:
                 if not _is_valid_time(text):
                     await message.reply(
-                        "Invalid format. Use HH:MM (e.g. 16:00):",
+                        "Invalid format. Use HH:MM or comma-separated e.g. 15:00,21:00:",
                         reply_markup=_time_step_kb(),
                     )
                     return
@@ -210,7 +210,7 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
             elif field == "time":
                 if not _is_valid_time(text):
                     await message.reply(
-                        "Invalid format. Use HH:MM (e.g. 16:00):",
+                        "Invalid format. Use HH:MM or comma-separated e.g. 15:00,21:00:",
                         reply_markup=_edit_time_kb(cat_name),
                     )
                     return

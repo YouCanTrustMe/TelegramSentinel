@@ -11,7 +11,7 @@ from src.bot.keyboards import (
     _confirm_keyboard,
     _source_view_keyboard,
 )
-from src.bot.state import _pending
+from src.bot.state import _DEFAULT_DIGEST_TIME, _pending
 from src.collectors.folder_manager import add_to_folder, remove_from_folder
 from src.collectors.telegram_collector import userbot
 from src.db.models import (
@@ -23,6 +23,7 @@ from src.db.models import (
     reassign_source_category,
     remove_source,
     rename_source,
+    reorder_source,
 )
 
 log = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ async def _finalize_add_source(uid: int, cat: str, data: dict, message, reply: b
     name = data["name"]
     cat = cat.lower()
     if not await category_exists(cat):
-        await add_category(cat, "📌")
+        await add_category(cat, "📌", _DEFAULT_DIGEST_TIME)
         log.info("Auto-created category: 📌 %s", cat)
 
     status = "active"
@@ -200,3 +201,13 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
         data = _pending[uid]["data"]
         await query.message.edit_text(f"Name: <b>{data['name']}</b>\nCategory: <b>{cat}</b>")
         await _finalize_add_source(uid, cat, data, query.message, reply=False)
+
+    @bot.on_callback_query(pf.regex(r"^src_order_(up|down):") & admin_cb)
+    async def cb_src_order(_, query: CallbackQuery) -> None:
+        parts = query.data.split(":", 2)
+        direction = "up" if "up" in parts[0] else "down"
+        src_id = int(parts[1])
+        cat_name = parts[2]
+        await reorder_source(src_id, cat_name, direction)
+        text, sources = await _cat_view_text(cat_name)
+        await query.message.edit_text(text, reply_markup=_category_view_keyboard(cat_name, sources))

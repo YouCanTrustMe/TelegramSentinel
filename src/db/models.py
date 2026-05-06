@@ -161,6 +161,12 @@ async def activate_source(source_id: int) -> bool:
         return cur.rowcount > 0
 
 
+async def update_source_url(source_id: int, url: str) -> None:
+    async with get_db() as db:
+        await db.execute("UPDATE sources SET url = ? WHERE id = ?", (url, source_id))
+        await db.commit()
+
+
 async def remove_source(source_id: int) -> bool:
     async with get_db() as db:
         await db.execute("DELETE FROM items WHERE source_id = ?", (source_id,))

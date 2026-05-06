@@ -2,11 +2,11 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from pyrogram import Client
+from pyrogram import Client, raw as tg_raw
 from pyrogram.types import Message
 
 from src.config import settings
-from src.db.models import get_active_sources, save_item
+from src.db.models import get_active_sources, save_item, update_source_url
 from src.processor.classifier import classify
 from src.processor.deduplicator import is_duplicate, make_message_id
 
@@ -22,7 +22,37 @@ userbot = Client(
 )
 
 
-async def _process_message(username: str, source: dict, message: Message) -> bool:
+def _is_invite_link(url: str) -> bool:
+    return "t.me/+" in url or "telegram.me/joinchat/" in url
+
+
+def _invite_hash(url: str) -> str:
+    if "t.me/+" in url:
+        return url.split("t.me/+", 1)[1]
+    return url.split("/joinchat/", 1)[1]
+
+
+async def _resolve_invite_link(url: str, source_id: int) -> str | None:
+    try:
+        result = await userbot.invoke(
+            tg_raw.functions.messages.CheckChatInvite(hash=_invite_hash(url))
+        )
+        if isinstance(result, tg_raw.types.ChatInviteAlready):
+            chat = result.chat
+            if isinstance(chat, tg_raw.types.Channel):
+                pyrogram_id = int(f"-100{chat.id}")
+            else:
+                pyrogram_id = -chat.id
+            await update_source_url(source_id, str(pyrogram_id))
+            log.info("Resolved invite link source id=%d → chat_id=%d", source_id, pyrogram_id)
+            return str(pyrogram_id)
+        log.warning("Invite link not yet joined for source id=%d", source_id)
+    except Exception as exc:
+        log.warning("Could not resolve invite link source id=%d: %s", source_id, exc)
+    return None
+
+
+async def _process_message(chat_ref: str, source: dict, message: Message) -> bool:
     caption = message.text or message.caption or ""
     if message.photo:
         media_prefix = "[Photo] "
@@ -37,11 +67,17 @@ async def _process_message(username: str, source: dict, message: Message) -> boo
     if not raw_text:
         return False
 
-    message_id = make_message_id("telegram", f"@{username}", str(message.id))
+    message_id = make_message_id("telegram", chat_ref, str(message.id))
     if await is_duplicate(message_id):
         return False
 
-    original_url = f"https://t.me/{username}/{message.id}"
+    if chat_ref.lstrip("-").isdigit():
+        raw_channel_id = abs(int(chat_ref)) - 1000000000000
+        original_url = f"https://t.me/c/{raw_channel_id}/{message.id}"
+    else:
+        username = chat_ref.lstrip("@")
+        original_url = f"https://t.me/{username}/{message.id}"
+
     published_at = message.date.replace(tzinfo=timezone.utc).isoformat() if message.date else None
 
     if raw_text in ("[Photo]", "[Video]", "[GIF]"):
@@ -60,15 +96,20 @@ async def _process_message(username: str, source: dict, message: Message) -> boo
         category=source["category"],
         processed_at=datetime.now(timezone.utc).isoformat(),
     )
-    log.info("Saved item from @%s | category=%s | %s", username, source["category"], original_url)
+    log.info("Saved item from %s | category=%s | %s", chat_ref, source["category"], original_url)
     return True
 
 
-async def _poll_channel(username: str, source: dict) -> int:
+async def _poll_channel(chat_ref: str, source: dict) -> int:
+    if chat_ref.lstrip("-").isdigit():
+        chat_id: int | str = int(chat_ref)
+    else:
+        chat_id = chat_ref if chat_ref.startswith("@") else f"@{chat_ref}"
+
     saved = 0
     try:
         messages = []
-        async for message in userbot.get_chat_history(f"@{username}", limit=20):
+        async for message in userbot.get_chat_history(chat_id, limit=20):
             messages.append(message)
 
         seen_group_ids: set = set()
@@ -80,10 +121,10 @@ async def _poll_channel(username: str, source: dict) -> int:
                 seen_group_ids.add(group_id)
                 group_msgs = [m for m in messages if m.media_group_id == group_id]
                 message = next((m for m in group_msgs if (m.text or m.caption)), group_msgs[0])
-            if await _process_message(username, source, message):
+            if await _process_message(chat_ref, source, message):
                 saved += 1
     except Exception as exc:
-        log.error("Failed to poll @%s: %s", username, exc)
+        log.error("Failed to poll %s: %s", chat_ref, exc)
     return saved
 
 
@@ -93,13 +134,19 @@ async def run_telegram_collector() -> None:
         try:
             sources = await get_active_sources(type_="telegram")
             for row in sources:
-                username = row["url"].lstrip("@").lower()
+                chat_ref = row["url"].lower() if not row["url"].lstrip("-").isdigit() else row["url"]
                 source = {"id": row["id"], "name": row["name"], "category": row["category"]}
-                saved = await _poll_channel(username, source)
+
+                if _is_invite_link(chat_ref):
+                    chat_ref = await _resolve_invite_link(chat_ref, row["id"])
+                    if not chat_ref:
+                        continue
+
+                saved = await _poll_channel(chat_ref, source)
                 if saved:
-                    log.info("Telegram poll @%s: %d new items", username, saved)
+                    log.info("Telegram poll %s: %d new items", chat_ref, saved)
                 else:
-                    log.debug("Telegram poll @%s: 0 new items", username)
+                    log.debug("Telegram poll %s: 0 new items", chat_ref)
         except Exception as exc:
             log.exception("Telegram collector iteration failed: %s", exc)
         await asyncio.sleep(POLL_INTERVAL)

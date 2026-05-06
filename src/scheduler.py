@@ -5,7 +5,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from src.bot.state import _DEFAULT_DIGEST_TIME
 from src.config import settings
-from src.db.models import activate_source, get_categories, get_pending_sources, set_source_pending_msg_id
+from src.db.models import activate_source, get_categories, get_pending_sources, set_source_pending_msg_id, update_source_url
 from src.dispatcher.digest_builder import send_digest
 
 log = logging.getLogger(__name__)
@@ -30,19 +30,26 @@ async def _check_pending_sources() -> None:
     from src.collectors.folder_manager import add_to_folder
     from src.collectors.telegram_collector import userbot
 
+    from src.collectors.telegram_collector import _is_invite_link
+
     pending = await get_pending_sources()
     for s in pending:
         if s["type"] != "telegram":
             continue
         raw = s["url"].lstrip("@")
         try:
-            await userbot.join_chat(raw)
+            chat = await userbot.join_chat(raw)
         except Exception as exc:
             exc_str = str(exc).upper()
             if "ALREADY" not in exc_str and "USER_ALREADY_PARTICIPANT" not in exc_str:
                 log.debug("Pending source not yet accessible: id=%s | %s", s["id"], exc)
                 continue
             log.info("Pending source already a member: id=%s url=%s", s["id"], s["url"])
+            chat = None
+
+        if _is_invite_link(s["url"]) and chat is not None and hasattr(chat, "id"):
+            await update_source_url(s["id"], str(chat.id))
+            log.info("Stored resolved chat_id=%d for source id=%s", chat.id, s["id"])
 
         await add_to_folder(raw)
         await activate_source(s["id"])

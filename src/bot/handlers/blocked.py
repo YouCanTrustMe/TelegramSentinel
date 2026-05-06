@@ -3,7 +3,7 @@ import logging
 from pyrogram import filters as pf
 from pyrogram.types import CallbackQuery, Message
 
-from src.bot.keyboards import _back_kb, _blocked_keyboard
+from src.bot.keyboards import _back_kb, _blocked_keyboard, _blocked_word_keyboard
 from src.bot.state import _pending
 from src.db.models import get_blocked_words, remove_blocked_word
 
@@ -41,6 +41,19 @@ def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
         await query.message.edit_text(
             "Enter a word or phrase to block:",
             reply_markup=_back_kb("blocked_list"),
+        )
+
+    @bot.on_callback_query(pf.regex(r"^blocked_view:") & admin_cb)
+    async def cb_blocked_view(_, query: CallbackQuery) -> None:
+        word_id = int(query.data.split(":", 1)[1])
+        words = await get_blocked_words()
+        word = next((w for w in words if w["id"] == word_id), None)
+        if not word:
+            await query.answer("Word not found.", show_alert=True)
+            return
+        await query.message.edit_text(
+            f"🔴 <b>{word['word']}</b>",
+            reply_markup=_blocked_word_keyboard(word_id),
         )
 
     @bot.on_callback_query(pf.regex(r"^blocked_del:") & admin_cb)

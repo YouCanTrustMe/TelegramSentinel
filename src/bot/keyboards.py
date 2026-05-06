@@ -158,8 +158,7 @@ def _blocked_keyboard(words, page: int = 0) -> InlineKeyboardMarkup:
     buttons = []
     for w in page_words:
         buttons.append([
-            InlineKeyboardButton(f"🔴 {w['word']}", callback_data="noop"),
-            InlineKeyboardButton("🗑", callback_data=f"blocked_del:{w['id']}"),
+            InlineKeyboardButton(f"🔴 {w['word']}", callback_data=f"blocked_view:{w['id']}"),
         ])
 
     if total_pages > 1:
@@ -173,6 +172,13 @@ def _blocked_keyboard(words, page: int = 0) -> InlineKeyboardMarkup:
 
     buttons.append([InlineKeyboardButton("➕ Add word", callback_data="blocked_add")])
     return InlineKeyboardMarkup(buttons)
+
+
+def _blocked_word_keyboard(word_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑 Remove", callback_data=f"blocked_del:{word_id}")],
+        [InlineKeyboardButton("◀ Back", callback_data="blocked_list")],
+    ])
 
 
 async def _cat_view_text(cat_name: str) -> tuple[str, list]:

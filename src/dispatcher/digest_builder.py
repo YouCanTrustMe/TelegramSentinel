@@ -31,7 +31,7 @@ def _format_item(item: dict) -> str:
     stars = ""
     m = _STARS_RE.match(summary_text)
     if m:
-        stars = m.group(1) + " "
+        stars = m.group(1)
         summary_text = summary_text[m.end():]
 
     summary = escape(summary_text)
@@ -43,12 +43,14 @@ def _format_item(item: dict) -> str:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             dt_local = dt.astimezone(_get_tz())
-            hour = f"{dt_local.hour}⏰ "
+            hour = f"{dt_local.hour}⏰"
         except Exception:
             pass
-    prefix = f"{stars}{hour}"
+
+    parts = [p for p in [hour, stars] if p]
+    prefix = " · ".join(parts) + " · " if parts else ""
     if url:
-        return f'{prefix}{summary} <a href="{escape(url, quote=True)}">↗</a>'
+        return f'{prefix}{summary} <a href="{escape(url, quote=True)}">🔗</a>'
     return f"{prefix}{summary}"
 
 

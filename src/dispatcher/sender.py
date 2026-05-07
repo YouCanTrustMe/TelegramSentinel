@@ -68,6 +68,31 @@ async def unpin_message(message_id: int) -> None:
     log.info("Digest unpinned | message_id=%d", message_id)
 
 
+async def delete_message(message_id: int) -> None:
+    url = f"{_BOT_API}/deleteMessage"
+    payload = {"chat_id": settings.telegram_supergroup_id, "message_id": message_id}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                log.warning("Bot API deleteMessage failed: %s %s", resp.status, body)
+
+
+async def edit_message(message_id: int, text: str) -> None:
+    url = f"{_BOT_API}/editMessageText"
+    payload = {
+        "chat_id": settings.telegram_supergroup_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                log.warning("Bot API editMessageText failed: %s %s", resp.status, body)
+
+
 async def send_document(chat_id: int, file_path: str, filename: str | None = None) -> None:
     url = f"{_BOT_API}/sendDocument"
     with open(file_path, "rb") as f:

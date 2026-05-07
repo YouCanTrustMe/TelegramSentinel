@@ -53,9 +53,21 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
     async def cmd_digest(_, message: Message) -> None:
         log.info("Manual digest triggered by user")
         status_msg = await message.reply("⏳ Building digest...")
-        sent = await send_digest()
+
+        async def update_status(text: str) -> None:
+            try:
+                await status_msg.edit_text(text)
+            except Exception:
+                pass
+
+        result = await send_digest(status_fn=update_status)
         await status_msg.delete()
-        await message.reply("✅ Digest sent." if sent else "ℹ️ No new items.")
+        if result is None:
+            await message.reply("⏳ Digest is already building, please wait.")
+        elif result:
+            await message.reply("✅ Digest sent.")
+        else:
+            await message.reply("ℹ️ No new items.")
 
     @bot.on_message(pf.command("stats") & admin_msg)
     async def cmd_stats(_, message: Message) -> None:

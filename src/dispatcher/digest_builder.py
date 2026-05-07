@@ -2,13 +2,14 @@ import asyncio
 import logging
 import re
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_unsent_items, log_digest, mark_sent, set_app_setting
-from src.dispatcher.sender import pin_message, send_message, unpin_message
+from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
 from src.processor.classifier import group_by_topic
 
 log = logging.getLogger(__name__)
@@ -49,12 +50,13 @@ def _format_item(item: dict) -> str:
         except Exception:
             pass
 
-    blocked_by = item.get("blocked_by")
+    item_keys = item.keys()
+    blocked_by = item["blocked_by"] if "blocked_by" in item_keys else None
     suffix = f' <i>⚠ {escape(blocked_by)}</i>' if blocked_by else ""
 
     parts = [p for p in [hour, stars] if p]
     prefix = " · ".join(parts) + " · " if parts else ""
-    key_phrase = (item.get("key_phrase") or "").strip()
+    key_phrase = ((item["key_phrase"] if "key_phrase" in item_keys else "") or "").strip()
     if url and key_phrase:
         escaped_url = escape(url, quote=True)
         anchor = escape(key_phrase)
@@ -170,19 +172,43 @@ def _split_into_messages(lines: list[str]) -> list[str]:
     return messages
 
 
-async def send_digest(categories: list[str] | None = None) -> bool:
+async def send_digest(
+    categories: list[str] | None = None,
+    status_fn: Callable[[str], Awaitable[None]] | None = None,
+) -> bool | None:
     if _digest_lock.locked():
         log.warning("Digest already in progress, skipping duplicate run | filter=%s", categories)
-        return False
+        return None
     async with _digest_lock:
-        return await _send_digest_locked(categories)
+        return await _send_digest_locked(categories, status_fn)
 
 
-async def _send_digest_locked(categories: list[str] | None = None) -> bool:
+async def _send_digest_locked(
+    categories: list[str] | None = None,
+    status_fn: Callable[[str], Awaitable[None]] | None = None,
+) -> bool:
+    async def _update(text: str) -> None:
+        if status_fn:
+            try:
+                await status_fn(text)
+            except Exception:
+                pass
+        if building_msg_id:
+            try:
+                await edit_message(building_msg_id, text)
+            except Exception:
+                pass
+
     items = await get_unsent_items(categories=categories)
     if not items:
         log.info("Digest triggered: no unsent items | filter=%s", categories)
         return False
+
+    building_msg_id: int | None = None
+    try:
+        building_msg_id = await send_message("⏳ Building digest...")
+    except Exception:
+        pass
 
     blocked_words = await get_blocked_words()
     if blocked_words:
@@ -208,6 +234,11 @@ async def _send_digest_locked(categories: list[str] | None = None) -> bool:
         items = filtered
         if not items and not blocked_items:
             log.info("Digest triggered: all items filtered by blocked words | filter=%s", categories)
+            if building_msg_id:
+                try:
+                    await delete_message(building_msg_id)
+                except Exception:
+                    pass
             return False
     else:
         blocked_items = []
@@ -225,11 +256,22 @@ async def _send_digest_locked(categories: list[str] | None = None) -> bool:
         source_name = item["source_name"] or "Unknown"
         cat_meta[cat]["sources"][source_name].append(item)
 
-    for cat_name, data in cat_meta.items():
-        sources = data["sources"]
-        for source_name in list(sources.keys()):
-            if len(sources[source_name]) > 1:
-                sources[source_name] = await _merge_source_items(sources[source_name])
+    sources_to_merge = [
+        (cat_name, source_name)
+        for cat_name, data in cat_meta.items()
+        for source_name, source_items in data["sources"].items()
+        if len(source_items) > 1
+    ]
+    total = len(sources_to_merge)
+    done = 0
+    if total:
+        await _update(f"⏳ Merging topics... 0 / {total}")
+    for cat_name, source_name in sources_to_merge:
+        cat_meta[cat_name]["sources"][source_name] = await _merge_source_items(
+            cat_meta[cat_name]["sources"][source_name]
+        )
+        done += 1
+        await _update(f"⏳ Merging topics... {done} / {total}")
 
     for data in cat_meta.values():
         for source_name, source_items in data["sources"].items():
@@ -243,6 +285,14 @@ async def _send_digest_locked(categories: list[str] | None = None) -> bool:
     date_str = datetime.now(_get_tz()).strftime("%d %B %Y")
     lines = _build_digest_text(cat_meta, date_str, blocked_items=blocked_items)
     messages = _split_into_messages(lines)
+
+    await _update("⏳ Sending...")
+    if building_msg_id:
+        try:
+            await delete_message(building_msg_id)
+        except Exception:
+            pass
+        building_msg_id = None
 
     sent_ids = [item["id"] for item in items]
     sent_count = 0

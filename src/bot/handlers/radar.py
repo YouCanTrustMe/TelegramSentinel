@@ -274,7 +274,7 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
 
     # --- Text input handler for add flows ---
 
-    @bot.on_message(pf.private & admin_msg)
+    @bot.on_message(pf.private & admin_msg, group=1)
     async def handle_radar_conversation(_, message: Message) -> None:
         if not message.text or message.text.startswith("/"):
             return
@@ -310,10 +310,13 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
             )
 
         elif action == "add_radar_chat":
-            raw = text
+            raw = text.strip()
+            if "t.me/" in raw:
+                path = raw.split("t.me/")[1].split("?")[0].rstrip("/")
+                raw = f"@{path}" if not path.startswith("+") else raw
             if not (raw.startswith("@") or raw.lstrip("-").isdigit()):
                 await message.reply(
-                    "Invalid input. Send an integer chat_id or @username:",
+                    "Invalid input. Send @username, chat_id, or t.me/username link:",
                     reply_markup=_back_kb("radar_chats:0"),
                 )
                 return

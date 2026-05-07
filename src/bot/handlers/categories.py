@@ -17,6 +17,7 @@ from src.bot.keyboards import (
 from src.bot.state import _DEFAULT_DIGEST_TIME, _pending
 from src.db.models import (
     add_category,
+    bulk_set_category_prompt_extra,
     delete_sources_by_category,
     get_categories,
     get_sources_by_category,
@@ -213,3 +214,19 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
                 f"New digest time for <b>{cat_name}</b> (HH:MM or comma-separated):\nCurrent: <b>{current}</b>",
                 reply_markup=_edit_time_kb(cat_name),
             )
+
+    @bot.on_callback_query(pf.regex(r"^cat_bulk_prompt:") & admin_cb)
+    async def cb_cat_bulk_prompt(_, query: CallbackQuery) -> None:
+        cat_name = query.data.split(":", 1)[1]
+        sources = await get_sources_by_category(cat_name)
+        uid = query.from_user.id
+        _pending[uid] = {
+            "action": "bulk_prompt_category",
+            "step": 0,
+            "data": {"cat_name": cat_name},
+        }
+        await query.message.edit_text(
+            f"Set prompt instructions for all <b>{len(sources)}</b> active source(s) in <b>{cat_name}</b>.\n\n"
+            f"Send text, or send <code>clear</code> to remove prompt from all sources:",
+            reply_markup=_back_kb(f"cat_view:{cat_name}"),
+        )

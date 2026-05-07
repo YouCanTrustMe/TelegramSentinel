@@ -21,7 +21,7 @@ def _strip_html(text: str) -> str:
 POLL_INTERVAL = 900
 
 
-async def fetch_feed(source_id: int, name: str, url: str, category: str) -> int:
+async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_extra: str | None = None) -> int:
     log.info("Polling RSS source '%s' (%s)", name, url)
     feed = await asyncio.to_thread(feedparser.parse, url)
     saved = 0
@@ -44,7 +44,7 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str) -> int:
         if hasattr(entry, "published_parsed") and entry.published_parsed:
             published_at = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc).isoformat()
 
-        result = await classify(raw_text)
+        result = await classify(raw_text, prompt_extra=prompt_extra)
 
         await save_item(
             source_id=source_id,
@@ -68,7 +68,7 @@ async def run_rss_collector() -> None:
     while True:
         try:
             sources = await get_active_sources(type_="rss")
-            tasks = [fetch_feed(r["id"], r["name"], r["url"], r["category"]) for r in sources]
+            tasks = [fetch_feed(r["id"], r["name"], r["url"], r["category"], r["prompt_extra"]) for r in sources]
             if tasks:
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 for source, result in zip(sources, results):

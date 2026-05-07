@@ -23,10 +23,13 @@ from src.bot.keyboards import (
 from src.bot.state import _DEFAULT_DIGEST_TIME, _pending
 from src.db.models import (
     add_blocked_word,
+    bulk_set_category_prompt_extra,
     get_blocked_words,
     get_categories,
     get_source,
+    get_sources_by_category,
     rename_source,
+    set_source_prompt_extra,
     source_exists,
     update_category,
 )
@@ -226,3 +229,27 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                     )
                 else:
                     await message.reply("Category not found.")
+
+        elif action == "edit_source_prompt":
+            src_id = state["data"]["source_id"]
+            await set_source_prompt_extra(src_id, text)
+            del _pending[uid]
+            s = await get_source(src_id)
+            log.info("Source prompt updated: id=%s", src_id)
+            await message.reply(
+                f"✅ Prompt set for <b>{escape(s['name']) if s else str(src_id)}</b>:\n<i>{escape(text)}</i>",
+                reply_markup=_source_view_keyboard(src_id, s["category"] if s else ""),
+            )
+
+        elif action == "bulk_prompt_category":
+            cat_name = state["data"]["cat_name"]
+            value = None if text.lower() == "clear" else text
+            count = await bulk_set_category_prompt_extra(cat_name, value)
+            del _pending[uid]
+            log.info("Bulk prompt set for category=%s count=%d", cat_name, count)
+            sources = await get_sources_by_category(cat_name)
+            if value:
+                header = f"✅ Prompt set for <b>{count}</b> source(s) in <b>{cat_name}</b>:\n<i>{escape(value)}</i>"
+            else:
+                header = f"✅ Prompt cleared for <b>{count}</b> source(s) in <b>{cat_name}</b>."
+            await message.reply(header, reply_markup=_category_view_keyboard(cat_name, sources))

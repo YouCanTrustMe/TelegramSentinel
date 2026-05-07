@@ -397,6 +397,22 @@ async def reorder_category(name: str, direction: str) -> None:
         await db.commit()
 
 
+async def set_source_prompt_extra(source_id: int, text: str | None) -> None:
+    async with get_db() as db:
+        await db.execute("UPDATE sources SET prompt_extra = ? WHERE id = ?", (text, source_id))
+        await db.commit()
+
+
+async def bulk_set_category_prompt_extra(cat_name: str, text: str | None) -> int:
+    async with get_db() as db:
+        cur = await db.execute(
+            "UPDATE sources SET prompt_extra = ? WHERE category = ? AND status = 'active'",
+            (text, cat_name),
+        )
+        await db.commit()
+        return cur.rowcount
+
+
 async def get_radar_keywords() -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute("SELECT * FROM radar_keywords ORDER BY keyword") as cur:

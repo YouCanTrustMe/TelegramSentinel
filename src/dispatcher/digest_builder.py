@@ -105,7 +105,6 @@ def _source_block(source_name: str, source_items: list) -> str:
     block_lines = [f"<b>{escape(source_name)}</b>"]
     for item in source_items:
         block_lines.append(_format_item(item))
-    block_lines.append("·")
     return "<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>"
 
 

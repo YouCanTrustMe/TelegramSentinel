@@ -83,7 +83,7 @@ async def _process_message(chat_ref: str, source: dict, message: Message) -> boo
     if raw_text in ("[Photo]", "[Video]", "[GIF]"):
         summary = raw_text
     else:
-        result = await classify(raw_text)
+        result = await classify(raw_text, prompt_extra=source.get("prompt_extra"))
         summary = result.summary
 
     await save_item(

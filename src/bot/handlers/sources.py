@@ -25,6 +25,7 @@ from src.db.models import (
     rename_source,
     reorder_source,
     set_source_pending_msg_id,
+    set_source_prompt_extra,
 )
 
 log = logging.getLogger(__name__)
@@ -96,11 +97,12 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
         icon = "⏳" if pending else ("📡" if s["type"] == "telegram" else "🔗")
         type_label = "tg" if s["type"] == "telegram" else "rss"
         status_line = "\nStatus: <b>pending</b>" if pending else ""
+        prompt_line = f"\nPrompt: <i>{escape(s['prompt_extra'])}</i>" if s["prompt_extra"] else ""
         text = (
             f"{icon} <b>{s['name']}</b>\n"
             f"Type: <code>{type_label}</code>\n"
             f"URL: <code>{s['url']}</code>\n"
-            f"Category: <b>{s['category']}</b>{status_line}"
+            f"Category: <b>{s['category']}</b>{status_line}{prompt_line}"
         )
         await query.message.edit_text(text, reply_markup=_source_view_keyboard(src_id, s["category"]))
 
@@ -218,6 +220,58 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
         data = _pending[uid]["data"]
         await query.message.edit_text(f"Name: <b>{data['name']}</b>\nCategory: <b>{cat}</b>")
         await _finalize_add_source(uid, cat, data, query.message, reply=False)
+
+    @bot.on_callback_query(pf.regex(r"^src_prompt:") & admin_cb)
+    async def cb_src_prompt(_, query: CallbackQuery) -> None:
+        src_id = int(query.data.split(":", 1)[1])
+        s = await get_source(src_id)
+        if not s:
+            await query.answer("Source not found.", show_alert=True)
+            return
+        current = s["prompt_extra"] or "—"
+        text = (
+            f"📝 <b>Prompt instructions</b>\n\n"
+            f"Source: <b>{escape(s['name'])}</b>\n\n"
+            f"Current: <i>{escape(current)}</i>"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Edit", callback_data=f"src_prompt_edit:{src_id}")],
+            [InlineKeyboardButton("🗑 Clear", callback_data=f"src_prompt_clear:{src_id}")],
+            [InlineKeyboardButton("◀ Back", callback_data=f"src_view:{src_id}")],
+        ])
+        await query.message.edit_text(text, reply_markup=kb)
+
+    @bot.on_callback_query(pf.regex(r"^src_prompt_edit:") & admin_cb)
+    async def cb_src_prompt_edit(_, query: CallbackQuery) -> None:
+        src_id = int(query.data.split(":", 1)[1])
+        s = await get_source(src_id)
+        if not s:
+            await query.answer("Source not found.", show_alert=True)
+            return
+        uid = query.from_user.id
+        _pending[uid] = {
+            "action": "edit_source_prompt",
+            "step": 0,
+            "data": {"source_id": src_id},
+        }
+        await query.message.edit_text(
+            f"Send prompt instructions for <b>{escape(s['name'])}</b>:\n\n"
+            f"Example: <i>keep proper nouns, don't cut context, focus on numbers</i>",
+            reply_markup=_back_kb(f"src_prompt:{src_id}"),
+        )
+
+    @bot.on_callback_query(pf.regex(r"^src_prompt_clear:") & admin_cb)
+    async def cb_src_prompt_clear(_, query: CallbackQuery) -> None:
+        src_id = int(query.data.split(":", 1)[1])
+        await set_source_prompt_extra(src_id, None)
+        log.info("Source prompt cleared: id=%d", src_id)
+        s = await get_source(src_id)
+        await query.message.edit_text(
+            f"✅ Prompt cleared for <b>{escape(s['name']) if s else str(src_id)}</b>.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ Back", callback_data=f"src_view:{src_id}")],
+            ]),
+        )
 
     @bot.on_callback_query(pf.regex(r"^src_order_(up|down):") & admin_cb)
     async def cb_src_order(_, query: CallbackQuery) -> None:

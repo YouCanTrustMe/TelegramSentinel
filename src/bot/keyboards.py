@@ -107,6 +107,7 @@ def _category_view_keyboard(cat_name: str, sources, page: int = 0) -> InlineKeyb
         InlineKeyboardButton("✏️ Edit", callback_data=f"cat_edit:{cat_name}"),
         InlineKeyboardButton("🗑 Delete", callback_data=f"cat_del:{cat_name}"),
     ])
+    buttons.append([InlineKeyboardButton("📝 Bulk prompt", callback_data=f"cat_bulk_prompt:{cat_name}")])
     buttons.append([InlineKeyboardButton("◀ Back", callback_data="cat_list")])
     return InlineKeyboardMarkup(buttons)
 
@@ -123,6 +124,7 @@ def _cat_edit_keyboard(cat_name: str) -> InlineKeyboardMarkup:
 def _source_view_keyboard(source_id: int, cat_name: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ Rename", callback_data=f"src_rename:{source_id}")],
+        [InlineKeyboardButton("📝 Prompt", callback_data=f"src_prompt:{source_id}")],
         [InlineKeyboardButton("🔄 Reassign category", callback_data=f"src_reassign:{source_id}")],
         [InlineKeyboardButton("🗑 Remove source", callback_data=f"src_del:{source_id}")],
         [InlineKeyboardButton("◀ Back", callback_data=f"cat_view:{cat_name}")],

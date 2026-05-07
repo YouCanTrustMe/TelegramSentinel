@@ -67,15 +67,19 @@ async def _acquire_rate_slot() -> None:
         _last_call_time = time.monotonic()
 
 
-async def classify(text: str) -> ClassificationResult:
+async def classify(text: str, prompt_extra: str | None = None) -> ClassificationResult:
     await _acquire_rate_slot()
+
+    system = _SYSTEM_PROMPT
+    if prompt_extra:
+        system = f"{_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
 
     for attempt in range(2):
         try:
             response = await _client.chat.completions.create(
                 model=settings.groq_model,
                 messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": text[:4000]},
                 ],
                 response_format={"type": "json_object"},

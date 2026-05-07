@@ -19,5 +19,7 @@ class Settings(BaseSettings):
 
     database_path: str = "data/sentinel.db"
 
+    radar_cooldown_seconds: int = 60
+
 
 settings = Settings()

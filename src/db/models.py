@@ -397,6 +397,99 @@ async def reorder_category(name: str, direction: str) -> None:
         await db.commit()
 
 
+async def get_radar_keywords() -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute("SELECT * FROM radar_keywords ORDER BY keyword") as cur:
+            return await cur.fetchall()
+
+
+async def add_radar_keyword(keyword: str) -> bool:
+    async with get_db() as db:
+        try:
+            await db.execute("INSERT INTO radar_keywords (keyword) VALUES (?)", (keyword,))
+            await db.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
+
+
+async def remove_radar_keyword(keyword_id: int) -> bool:
+    async with get_db() as db:
+        cur = await db.execute("DELETE FROM radar_keywords WHERE id = ?", (keyword_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_radar_chats() -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute("SELECT * FROM radar_chats ORDER BY id") as cur:
+            return await cur.fetchall()
+
+
+async def add_radar_chat(chat_ref: str, title: str | None) -> bool:
+    async with get_db() as db:
+        try:
+            await db.execute("INSERT INTO radar_chats (chat_ref, title) VALUES (?, ?)", (chat_ref, title))
+            await db.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
+
+
+async def remove_radar_chat(chat_id: int) -> bool:
+    async with get_db() as db:
+        cur = await db.execute("DELETE FROM radar_chats WHERE id = ?", (chat_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_radar_blacklist() -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute("SELECT * FROM radar_blacklist ORDER BY id") as cur:
+            return await cur.fetchall()
+
+
+async def add_radar_blacklist(user_id: int) -> bool:
+    async with get_db() as db:
+        try:
+            await db.execute("INSERT INTO radar_blacklist (user_id) VALUES (?)", (user_id,))
+            await db.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
+
+
+async def remove_radar_blacklist(entry_id: int) -> bool:
+    async with get_db() as db:
+        cur = await db.execute("DELETE FROM radar_blacklist WHERE id = ?", (entry_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def log_radar_alert(
+    keyword: str,
+    chat_ref: str,
+    author_id: int | None,
+    message_text: str,
+    message_url: str,
+) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO radar_alert_log (keyword, chat_ref, author_id, message_text, message_url)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (keyword, chat_ref, author_id, message_text, message_url),
+        )
+        await db.commit()
+
+
+async def get_recent_radar_alerts(limit: int = 3) -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT * FROM radar_alert_log ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            return await cur.fetchall()
+
+
 async def reorder_source(source_id: int, cat_name: str, direction: str) -> None:
     async with get_db() as db:
         async with db.execute(

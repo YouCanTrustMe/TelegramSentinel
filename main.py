@@ -10,6 +10,7 @@ from src.collectors.rss_collector import run_rss_collector
 from src.collectors.telegram_collector import run_telegram_collector, userbot
 from src.db.models import init_db
 from src.dispatcher.sender import bot
+from src.radar.handlers import register_radar_handlers
 from src.scheduler import start_scheduler
 
 logging.basicConfig(
@@ -41,6 +42,7 @@ async def main() -> None:
     log.info("Database initialized")
 
     register_commands()
+    register_radar_handlers()
 
     await bot.start()
     await userbot.start()

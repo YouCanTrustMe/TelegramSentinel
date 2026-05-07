@@ -397,6 +397,17 @@ async def reorder_category(name: str, direction: str) -> None:
         await db.commit()
 
 
+async def place_source_at_bottom(source_id: int, cat_name: str) -> None:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) FROM sources WHERE category = ? AND id != ?",
+            (cat_name, source_id),
+        ) as cur:
+            max_order = (await cur.fetchone())[0]
+        await db.execute("UPDATE sources SET sort_order = ? WHERE id = ?", (max_order + 1, source_id))
+        await db.commit()
+
+
 async def set_source_prompt_extra(source_id: int, text: str | None) -> None:
     async with get_db() as db:
         await db.execute("UPDATE sources SET prompt_extra = ? WHERE id = ?", (text, source_id))

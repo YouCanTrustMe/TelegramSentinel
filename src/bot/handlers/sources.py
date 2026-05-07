@@ -20,6 +20,7 @@ from src.db.models import (
     category_exists,
     get_categories,
     get_source,
+    place_source_at_bottom,
     reassign_source_category,
     remove_source,
     rename_source,
@@ -59,6 +60,8 @@ async def _finalize_add_source(uid: int, cat: str, data: dict, message, reply: b
                 extra = "\n⏳ Could not join — saved as pending"
 
     source_id = await add_source(source_type, name, url, cat, status=status)
+    if source_type == "rss":
+        await place_source_at_bottom(source_id, cat)
 
     if status == "pending":
         try:

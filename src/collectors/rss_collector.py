@@ -55,6 +55,7 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
             summary=result.summary,
             category=category,
             processed_at=datetime.now(timezone.utc).isoformat(),
+            key_phrase=result.key_phrase,
         )
         log.info("Saved item from '%s' | category=%s | %s", name, category, (entry_url or message_id)[:80])
         saved += 1

@@ -108,7 +108,8 @@ async def _rebuild_jobs() -> None:
         cat_time_set = frozenset(x.strip() for x in cat["digest_time"].split(","))
         if cat_time_set != default_time_set:
             for time_part in cat_time_set:
-                custom.setdefault(time_part, []).append(cat["name"])
+                if time_part not in default_time_set:
+                    custom.setdefault(time_part, []).append(cat["name"])
 
     for time_str, cat_names in custom.items():
         try:

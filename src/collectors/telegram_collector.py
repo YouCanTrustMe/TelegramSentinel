@@ -82,9 +82,11 @@ async def _process_message(chat_ref: str, source: dict, message: Message) -> boo
 
     if raw_text in ("[Photo]", "[Video]", "[GIF]"):
         summary = raw_text
+        key_phrase = ""
     else:
         result = await classify(raw_text, prompt_extra=source.get("prompt_extra"))
         summary = result.summary
+        key_phrase = result.key_phrase
 
     await save_item(
         source_id=source["id"],
@@ -95,6 +97,7 @@ async def _process_message(chat_ref: str, source: dict, message: Message) -> boo
         summary=summary,
         category=source["category"],
         processed_at=datetime.now(timezone.utc).isoformat(),
+        key_phrase=key_phrase,
     )
     log.info("Saved item from %s | category=%s | %s", chat_ref, source["category"], original_url)
     return True

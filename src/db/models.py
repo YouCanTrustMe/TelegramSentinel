@@ -211,15 +211,16 @@ async def save_item(
     summary: str | None,
     category: str,
     processed_at: str,
+    key_phrase: str | None = None,
 ) -> int:
     async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO items
                (source_id, message_id, raw_text, original_url, published_at,
-                summary, category, processed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                summary, category, processed_at, key_phrase)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (source_id, message_id, raw_text, original_url, published_at,
-             summary, category, processed_at),
+             summary, category, processed_at, key_phrase or None),
         )
         await db.commit()
         return cur.lastrowid

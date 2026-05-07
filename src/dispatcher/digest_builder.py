@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from collections import defaultdict
@@ -12,6 +13,7 @@ from src.processor.classifier import group_by_topic
 
 log = logging.getLogger(__name__)
 
+_digest_lock = asyncio.Lock()
 _TELEGRAM_LIMIT = 4000
 _MAX_ITEMS_PER_SOURCE = 50
 _STARS_RE = re.compile(r'^([★☆]{5})\s*')
@@ -47,11 +49,27 @@ def _format_item(item: dict) -> str:
         except Exception:
             pass
 
+    blocked_by = item.get("blocked_by")
+    suffix = f' <i>⚠ {escape(blocked_by)}</i>' if blocked_by else ""
+
     parts = [p for p in [hour, stars] if p]
     prefix = " · ".join(parts) + " · " if parts else ""
-    if url:
-        return f'{prefix}{summary} <a href="{escape(url, quote=True)}">🔗</a>'
-    return f"{prefix}{summary}"
+    key_phrase = (item.get("key_phrase") or "").strip()
+    if url and key_phrase:
+        escaped_url = escape(url, quote=True)
+        anchor = escape(key_phrase)
+        rest_text = summary_text.strip()
+        if rest_text.lower().startswith(key_phrase.lower()):
+            rest = escape(rest_text[len(key_phrase):].lstrip())
+            return f'{prefix}<a href="{escaped_url}">{anchor}</a> {rest}{suffix}'.rstrip()
+        return f'{prefix}{summary} <a href="{escaped_url}">{anchor}</a>{suffix}'
+    if url and summary_text.strip():
+        words = summary_text.strip().split(" ", 1)
+        anchor = escape(words[0])
+        rest = (" " + escape(words[1])) if len(words) > 1 else ""
+        escaped_url = escape(url, quote=True)
+        return f'{prefix}<a href="{escaped_url}">{anchor}</a>{rest}{suffix}'
+    return f"{prefix}{summary}{suffix}"
 
 
 async def _merge_source_items(items: list) -> list[dict]:
@@ -59,6 +77,7 @@ async def _merge_source_items(items: list) -> list[dict]:
         return [
             {
                 "summary": item["summary"],
+                "key_phrase": item["key_phrase"] if "key_phrase" in item.keys() else "",
                 "original_url": item["original_url"],
                 "published_at": item["published_at"],
                 "raw_text": item["raw_text"],
@@ -83,6 +102,7 @@ async def _merge_source_items(items: list) -> list[dict]:
                 summary = f"{summary} · merged {n}"
             merged.append({
                 "summary": summary,
+                "key_phrase": g.get("key_phrase") or "",
                 "original_url": url,
                 "published_at": pub,
                 "raw_text": None,
@@ -93,6 +113,7 @@ async def _merge_source_items(items: list) -> list[dict]:
         return [
             {
                 "summary": item["summary"],
+                "key_phrase": item["key_phrase"] if "key_phrase" in item.keys() else "",
                 "original_url": item["original_url"],
                 "published_at": item["published_at"],
                 "raw_text": item["raw_text"],
@@ -150,6 +171,14 @@ def _split_into_messages(lines: list[str]) -> list[str]:
 
 
 async def send_digest(categories: list[str] | None = None) -> bool:
+    if _digest_lock.locked():
+        log.warning("Digest already in progress, skipping duplicate run | filter=%s", categories)
+        return False
+    async with _digest_lock:
+        return await _send_digest_locked(categories)
+
+
+async def _send_digest_locked(categories: list[str] | None = None) -> bool:
     items = await get_unsent_items(categories=categories)
     if not items:
         log.info("Digest triggered: no unsent items | filter=%s", categories)
@@ -164,8 +193,12 @@ async def send_digest(categories: list[str] | None = None) -> bool:
         filtered, blocked_items = [], []
         for item in items:
             text_to_check = ((item["summary"] or "") + " " + (item["raw_text"] or "")).lower()
-            if any(p.search(text_to_check) for p in blocked_patterns):
-                blocked_items.append(item)
+            matched_word = next(
+                (b["word"] for p, b in zip(blocked_patterns, blocked_words) if p.search(text_to_check)),
+                None,
+            )
+            if matched_word is not None:
+                blocked_items.append({**item, "blocked_by": matched_word})
             else:
                 filtered.append(item)
         if blocked_items:

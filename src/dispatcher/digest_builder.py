@@ -205,10 +205,11 @@ async def _send_digest_locked(
         return False
 
     building_msg_id: int | None = None
-    try:
-        building_msg_id = await send_message("⏳ Building digest...")
-    except Exception:
-        pass
+    if not status_fn:
+        try:
+            building_msg_id = await send_message("⏳ Building digest...")
+        except Exception:
+            pass
 
     blocked_words = await get_blocked_words()
     if blocked_words:

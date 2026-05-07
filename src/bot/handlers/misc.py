@@ -105,10 +105,12 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
             for cat_name, sources in by_cat.items():
                 emoji = cat_emoji.get(cat_name, "📌")
                 lines.append(f"\n{emoji} <b>{cat_name}</b>")
+                block_lines = []
                 for r in sources:
                     type_label = "tg" if r["type"] == "telegram" else "rss"
                     unsent_part = f"  ({r['unsent_cnt']}⏳)" if r["unsent_cnt"] else ""
-                    lines.append(f"  [{type_label}] {escape(r['name'])} · {r['cnt']}{unsent_part}")
+                    block_lines.append(f"[{type_label}] {escape(r['name'])} · {r['cnt']}{unsent_part}")
+                lines.append("<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>")
 
         await message.reply("\n".join(lines))
 

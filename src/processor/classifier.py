@@ -14,7 +14,15 @@ _client = AsyncGroq(api_key=settings.groq_api_key)
 
 _rate_lock = asyncio.Lock()
 _last_call_time: float = 0.0
-_MIN_INTERVAL = 60.0 / 29  # stay just under 30 RPM free tier
+_backoff_until: float = 0.0
+_MIN_INTERVAL = 60.0 / 25  # 25 RPM — buffer below 30 RPM free tier limit
+
+
+def _signal_backoff(seconds: float = 65.0) -> None:
+    """Tell the whole queue to pause: all waiting classify() calls will hold off."""
+    global _backoff_until
+    _backoff_until = time.monotonic() + seconds
+    log.warning("Groq rate limit: signalling %gs backoff to all queued calls", seconds)
 
 _SYSTEM_PROMPT = """You are a news summarizer for a Ukrainian-language digest.
 
@@ -119,20 +127,20 @@ class ClassificationResult:
 async def _acquire_rate_slot() -> None:
     global _last_call_time
     async with _rate_lock:
-        elapsed = time.monotonic() - _last_call_time
-        if elapsed < _MIN_INTERVAL:
-            await asyncio.sleep(_MIN_INTERVAL - elapsed)
+        now = time.monotonic()
+        wait_until = max(_last_call_time + _MIN_INTERVAL, _backoff_until)
+        if wait_until > now:
+            await asyncio.sleep(wait_until - now)
         _last_call_time = time.monotonic()
 
 
 async def classify(text: str, prompt_extra: str | None = None) -> ClassificationResult:
-    await _acquire_rate_slot()
-
     system = _SYSTEM_PROMPT
     if prompt_extra:
         system = f"{_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
 
     for attempt in range(2):
+        await _acquire_rate_slot()
         try:
             response = await _client.chat.completions.create(
                 model=settings.groq_model,
@@ -153,11 +161,11 @@ async def classify(text: str, prompt_extra: str | None = None) -> Classification
             log.debug("Classified: %s | key=%s", result.summary, result.key_phrase)
             return result
         except RateLimitError:
+            _signal_backoff()
             if attempt == 0:
-                log.warning("Groq rate limit hit, waiting 30s")
-                await asyncio.sleep(30)
+                log.warning("Groq rate limit hit, retrying via queue after backoff")
             else:
-                log.warning("Groq rate limit hit again, using fallback")
+                log.warning("Groq rate limit persistent, using fallback")
         except Exception as exc:
             log.warning("Classification error, using fallback: %s", exc)
             break
@@ -171,11 +179,10 @@ async def group_by_topic(items: list[dict]) -> list[dict]:
     Returns: list of {"ids": [int, ...], "score": int, "summary": str, "key_phrase": str}
     Falls back to one group per item on error.
     """
-    await _acquire_rate_slot()
-
     numbered = "\n".join(f"{item['id']}: {item['text'][:600]}" for item in items)
 
     for attempt in range(2):
+        await _acquire_rate_slot()
         try:
             response = await _client.chat.completions.create(
                 model=settings.groq_model,
@@ -201,11 +208,11 @@ async def group_by_topic(items: list[dict]) -> list[dict]:
             log.debug("Grouped %d items into %d groups", len(items), len(result))
             return result
         except RateLimitError:
+            _signal_backoff()
             if attempt == 0:
-                log.warning("Groq rate limit hit during batch grouping, waiting 30s")
-                await asyncio.sleep(30)
+                log.warning("Groq rate limit hit during batch grouping, retrying via queue after backoff")
             else:
-                log.warning("Groq rate limit hit again during batch grouping, falling back")
+                log.warning("Groq rate limit persistent during batch grouping, falling back")
         except Exception as exc:
             log.warning("Batch grouping error, falling back to individual items: %s", exc)
             break

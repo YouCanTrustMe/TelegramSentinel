@@ -10,7 +10,7 @@ from src.db.models import (
     get_radar_keywords,
     log_radar_alert,
 )
-from src.dispatcher.sender import bot
+from src.dispatcher.sender import send_to
 from src.radar.cooldown import is_on_cooldown, set_cooldown
 from src.radar.matcher import match_keywords
 
@@ -96,12 +96,7 @@ def register_radar_handlers() -> None:
                     f"🔗 <a href=\"{msg_link}\">Open message</a>\n"
                     f"⏱️ {ts} UTC"
                 )
-                await bot.send_message(
-                    settings.telegram_admin_id,
-                    alert,
-                    parse_mode="html",
-                    disable_web_page_preview=True,
-                )
+                await send_to(settings.telegram_admin_id, alert)
                 await log_radar_alert(
                     kw,
                     chat_ref_str,

@@ -18,6 +18,7 @@ _digest_lock = asyncio.Lock()
 _TELEGRAM_LIMIT = 4000
 _MAX_ITEMS_PER_SOURCE = 50
 _STARS_RE = re.compile(r'^([★☆]{5})\s*')
+_MEDIA_EMOJI = {"[Photo]": "📷", "[Video]": "🎬", "[GIF]": "🎞️"}
 
 
 def _get_tz() -> ZoneInfo:
@@ -30,6 +31,8 @@ def _format_item(item: dict) -> str:
     if not summary_text:
         raw = item["raw_text"] or ""
         summary_text = raw[:60].split("\n")[0]
+
+    summary_text = _MEDIA_EMOJI.get(summary_text, summary_text)
 
     stars = ""
     m = _STARS_RE.match(summary_text)
@@ -71,7 +74,12 @@ def _format_item(item: dict) -> str:
         rest = (" " + escape(words[1])) if len(words) > 1 else ""
         escaped_url = escape(url, quote=True)
         return f'{prefix}<a href="{escaped_url}">{anchor}</a>{rest}{suffix}'
-    return f"{prefix}{summary}{suffix}"
+    if url:
+        escaped_url = escape(url, quote=True)
+        return f'{prefix}<a href="{escaped_url}">→</a>{suffix}'
+    if summary_text.strip():
+        return f"{prefix}{summary}{suffix}"
+    return ""
 
 
 async def _merge_source_items(items: list) -> list[dict]:
@@ -99,6 +107,9 @@ async def _merge_source_items(items: list) -> list[dict]:
                 default=None,
             )
             summary = g["summary"] or group_items[0]["summary"] or ""
+            if not summary:
+                raw_fallback = (group_items[0]["raw_text"] or "")[:80].split("\n")[0]
+                summary = raw_fallback
             n = len(g["ids"])
             if n > 1:
                 summary = f"{summary} · merged {n}"
@@ -127,12 +138,29 @@ async def _merge_source_items(items: list) -> list[dict]:
 def _source_block(source_name: str, source_items: list) -> str:
     block_lines = [f"<b>{escape(source_name)}</b>"]
     for item in source_items:
-        block_lines.append(_format_item(item))
+        line = _format_item(item)
+        if line:
+            block_lines.append(line)
     return "<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>"
 
 
-def _build_digest_text(cat_meta: dict, date_str: str, blocked_items: list | None = None) -> list[str]:
+def _build_digest_text(
+    cat_meta: dict,
+    date_str: str,
+    blocked_items: list | None = None,
+    filtered_categories: list[str] | None = None,
+    all_categories: list | None = None,
+) -> list[str]:
     lines = [f"<b>📋 Digest — {date_str}</b>"]
+    if filtered_categories is not None and all_categories:
+        cat_info = {r["name"]: r["emoji"] for r in all_categories}
+        tags = " · ".join(
+            f"{cat_info.get(c, '📌')} {escape(c.capitalize())}"
+            for c in filtered_categories
+            if c in cat_info
+        )
+        if tags:
+            lines.append(f"<i>{tags}</i>")
 
     for cat_name, data in cat_meta.items():
         sources = data["sources"]
@@ -284,7 +312,13 @@ async def _send_digest_locked(
                 data["sources"][source_name] = source_items[:_MAX_ITEMS_PER_SOURCE]
 
     date_str = datetime.now(_get_tz()).strftime("%d %B %Y")
-    lines = _build_digest_text(cat_meta, date_str, blocked_items=blocked_items)
+    lines = _build_digest_text(
+        cat_meta,
+        date_str,
+        blocked_items=blocked_items,
+        filtered_categories=categories,
+        all_categories=all_categories,
+    )
     messages = _split_into_messages(lines)
 
     await _update("⏳ Sending...")

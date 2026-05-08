@@ -12,6 +12,7 @@ from pyrogram.types import (
 
 from src.bot.keyboards import _back_kb
 from src.bot.state import _pending
+from src.collectors.folder_manager import RADAR_FOLDER, add_to_folder, remove_from_folder
 from src.collectors.telegram_collector import userbot
 from src.db.models import (
     add_radar_blacklist,
@@ -179,8 +180,12 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
     @bot.on_callback_query(pf.regex(r"^radar_chat_del:\d+$") & admin_cb)
     async def cb_radar_chat_del(_, query: CallbackQuery) -> None:
         entry_id = int(query.data.split(":")[1])
+        all_chats = await get_radar_chats()
+        chat_row = next((c for c in all_chats if c["id"] == entry_id), None)
         await remove_radar_chat(entry_id)
         log.info("Radar chat removed: id=%d", entry_id)
+        if chat_row:
+            await remove_from_folder(chat_row["chat_ref"], RADAR_FOLDER)
         items = await get_radar_chats()
         text = (
             f"💬 <b>Monitored chats</b> ({len(items)})"
@@ -330,6 +335,13 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
                 log.warning("Could not resolve radar chat %s: %s", raw, exc)
             added = await add_radar_chat(ref, title)
             del _pending[uid]
+            if added:
+                try:
+                    await userbot.join_chat(ref if ref.startswith("@") else int(ref))
+                    log.info("Radar: joined chat %s", ref)
+                except Exception as exc:
+                    log.warning("Radar: could not join chat %s: %s", ref, exc)
+                await add_to_folder(ref, RADAR_FOLDER)
             items = await get_radar_chats()
             if added:
                 log.info("Radar chat added: ref=%s title=%s", ref, title)

@@ -93,6 +93,22 @@ async def edit_message(message_id: int, text: str) -> None:
                 log.warning("Bot API editMessageText failed: %s %s", resp.status, body)
 
 
+async def send_reply(chat_id: int, text: str, reply_to_message_id: int | None = None) -> None:
+    payload: dict = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if reply_to_message_id:
+        payload["reply_parameters"] = {"message_id": reply_to_message_id}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"{_BOT_API}/sendMessage", json=payload) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                log.error("Bot API sendMessage (reply) failed: %s %s", resp.status, body)
+
+
 async def send_document(chat_id: int, file_path: str, filename: str | None = None) -> None:
     url = f"{_BOT_API}/sendDocument"
     with open(file_path, "rb") as f:

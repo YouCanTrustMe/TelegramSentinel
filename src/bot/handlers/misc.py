@@ -2,14 +2,14 @@ import logging
 from html import escape
 from pathlib import Path
 
-from pyrogram import enums, filters as pf
+from pyrogram import filters as pf
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from src.bot.state import _pending
 from src.config import settings
 from src.db.models import get_categories, get_db
 from src.dispatcher.digest_builder import send_digest
-from src.dispatcher.sender import send_document
+from src.dispatcher.sender import send_document, send_reply
 
 log = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
                     block_lines.append(f"[{type_label}] {escape(r['name'])} · {r['cnt']}{unsent_part}")
                 lines.append("<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>")
 
-        await message.reply("\n".join(lines), parse_mode=enums.ParseMode.HTML)
+        await send_reply(message.chat.id, "\n".join(lines), reply_to_message_id=message.id)
 
     @bot.on_message(pf.command("logs") & admin_msg)
     async def cmd_logs(_, message: Message) -> None:

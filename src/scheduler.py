@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -24,6 +25,15 @@ async def rebuild_digest_jobs() -> None:
     if _scheduler is None:
         return
     await _rebuild_jobs()
+
+
+async def _pre_digest_collect() -> None:
+    from src.collectors.rss_collector import run_rss_collector
+    from src.collectors.telegram_collector import run_telegram_collector
+
+    log.info("Pre-digest collection started")
+    await asyncio.gather(run_telegram_collector(), run_rss_collector())
+    log.info("Pre-digest collection done")
 
 
 async def _check_pending_sources() -> None:
@@ -77,9 +87,17 @@ def _parse_times(time_str: str) -> list[tuple[int, int]]:
     return result
 
 
+def _pre_collect_time(h: int, m: int) -> tuple[int, int]:
+    m -= 1
+    if m < 0:
+        m = 59
+        h = (h - 1) % 24
+    return h, m
+
+
 async def _rebuild_jobs() -> None:
     for job in _scheduler.get_jobs():
-        if job.id.startswith("digest_"):
+        if job.id.startswith("digest_") or job.id.startswith("pre_collect_"):
             _scheduler.remove_job(job.id)
 
     _scheduler.add_job(
@@ -91,6 +109,19 @@ async def _rebuild_jobs() -> None:
 
     default_times = _parse_times(_DEFAULT_DIGEST_TIME)
     default_time_set = frozenset(f"{h:02d}:{m:02d}" for h, m in default_times)
+    scheduled_pre_collect: set[str] = set()
+
+    def _add_pre_collect(h: int, m: int) -> None:
+        ph, pm = _pre_collect_time(h, m)
+        job_id = f"pre_collect_{ph:02d}:{pm:02d}"
+        if job_id not in scheduled_pre_collect:
+            _scheduler.add_job(
+                _pre_digest_collect,
+                CronTrigger(hour=ph, minute=pm, timezone=settings.digest_timezone),
+                id=job_id,
+                replace_existing=True,
+            )
+            scheduled_pre_collect.add(job_id)
 
     for h, m in default_times:
         time_str = f"{h:02d}:{m:02d}"
@@ -100,6 +131,7 @@ async def _rebuild_jobs() -> None:
             id=f"digest_{time_str}",
             replace_existing=True,
         )
+        _add_pre_collect(h, m)
 
     # Extra jobs for categories with a custom (non-default) digest time
     categories = await get_categories()
@@ -124,6 +156,7 @@ async def _rebuild_jobs() -> None:
             replace_existing=True,
             kwargs={"categories": cat_names},
         )
+        _add_pre_collect(h, m)
 
     job_ids = [j.id for j in _scheduler.get_jobs()]
     log.info("Digest jobs: %s", job_ids)

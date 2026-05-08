@@ -2,7 +2,7 @@ import logging
 from html import escape
 from pathlib import Path
 
-from pyrogram import filters as pf
+from pyrogram import enums, filters as pf
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from src.bot.state import _pending
@@ -104,15 +104,14 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
                 by_cat.setdefault(r["category"], []).append(r)
             for cat_name, sources in by_cat.items():
                 emoji = cat_emoji.get(cat_name, "📌")
-                lines.append(f"\n{emoji} <b>{cat_name}</b>")
-                block_lines = []
+                block_lines = [f"{emoji} <b>{escape(cat_name)}</b>"]
                 for r in sources:
                     type_label = "tg" if r["type"] == "telegram" else "rss"
                     unsent_part = f"  ({r['unsent_cnt']}⏳)" if r["unsent_cnt"] else ""
                     block_lines.append(f"[{type_label}] {escape(r['name'])} · {r['cnt']}{unsent_part}")
                 lines.append("<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>")
 
-        await message.reply("\n".join(lines))
+        await message.reply("\n".join(lines), parse_mode=enums.ParseMode.HTML)
 
     @bot.on_message(pf.command("logs") & admin_msg)
     async def cmd_logs(_, message: Message) -> None:

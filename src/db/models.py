@@ -1,8 +1,11 @@
+import logging
 import aiosqlite
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from src.config import settings
+
+log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -165,6 +168,13 @@ async def update_source_url(source_id: int, url: str) -> None:
     async with get_db() as db:
         await db.execute("UPDATE sources SET url = ? WHERE id = ?", (url, source_id))
         await db.commit()
+
+
+async def update_source_status(source_id: int, status: str) -> None:
+    async with get_db() as db:
+        await db.execute("UPDATE sources SET status = ? WHERE id = ?", (status, source_id))
+        await db.commit()
+    log.info("Source id=%d status → %s", source_id, status)
 
 
 async def remove_source(source_id: int) -> bool:

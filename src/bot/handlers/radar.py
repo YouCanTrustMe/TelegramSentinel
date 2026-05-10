@@ -185,7 +185,13 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
         await remove_radar_chat(entry_id)
         log.info("Radar chat removed: id=%d", entry_id)
         if chat_row:
-            await remove_from_folder(chat_row["chat_ref"], RADAR_FOLDER)
+            ref = chat_row["chat_ref"]
+            await remove_from_folder(ref, RADAR_FOLDER)
+            try:
+                await userbot.leave_chat(ref if ref.startswith("@") else int(ref))
+                log.info("Radar: left chat %s", ref)
+            except Exception as exc:
+                log.warning("Radar: could not leave chat %s: %s", ref, exc)
         items = await get_radar_chats()
         text = (
             f"💬 <b>Monitored chats</b> ({len(items)})"

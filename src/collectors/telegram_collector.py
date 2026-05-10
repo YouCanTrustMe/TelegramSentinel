@@ -3,10 +3,12 @@ import logging
 from datetime import datetime, timezone
 
 from pyrogram import Client, raw as tg_raw
+from pyrogram.errors import ChannelBanned, ChannelInvalid, ChannelPrivate, ChatForbidden, UserBannedInChannel, UserKicked
 from pyrogram.types import Message
 
 from src.config import settings
-from src.db.models import get_active_sources, save_item, update_source_url
+from src.db.models import get_active_sources, save_item, update_source_status, update_source_url
+from src.dispatcher.sender import send_to
 from src.processor.classifier import classify
 from src.processor.deduplicator import is_duplicate, make_message_id
 
@@ -126,6 +128,16 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
                 message = next((m for m in group_msgs if (m.text or m.caption)), group_msgs[0])
             if await _process_message(chat_ref, source, message):
                 saved += 1
+    except (ChannelInvalid, ChannelPrivate, ChannelBanned, ChatForbidden, UserBannedInChannel, UserKicked) as exc:
+        log.error("Source '%s' permanently inaccessible: %s | marking error", source["name"], exc)
+        await update_source_status(source["id"], "error")
+        await send_to(
+            settings.telegram_admin_id,
+            f"⚠️ <b>Source error</b>\n"
+            f"<b>{source['name']}</b> ({chat_ref}) is no longer accessible.\n"
+            f"Status set to <b>error</b>.\n"
+            f"<i>{exc}</i>",
+        )
     except Exception as exc:
         log.error("Failed to poll %s: %s", chat_ref, exc)
     return saved

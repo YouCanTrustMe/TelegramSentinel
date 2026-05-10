@@ -5,7 +5,6 @@ from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 
 from src.bot.keyboards import (
     _back_kb,
-    _cancel_kb,
     _cat_edit_keyboard,
     _categories_keyboard,
     _category_view_keyboard,
@@ -93,7 +92,7 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
     async def cb_cat_add(_, query: CallbackQuery) -> None:
         uid = query.from_user.id
         _pending[uid] = {"action": "add_category", "step": 0, "data": {}}
-        await query.message.edit_text("Category name:", reply_markup=_cancel_kb())
+        await query.message.edit_text("Category name:", reply_markup=_back_kb("cat_list"))
 
     @bot.on_callback_query(pf.regex(r"^cat_add_time_default$") & admin_cb)
     async def cb_cat_add_time_default(_, query: CallbackQuery) -> None:

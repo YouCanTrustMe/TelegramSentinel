@@ -21,6 +21,11 @@ _STARS_RE = re.compile(r'^([★☆]{5})\s*')
 _MEDIA_EMOJI = {"[Photo]": "📷", "[Video]": "🎬", "[GIF]": "🎞️"}
 
 
+def _progress_bar(done: int, total: int, width: int = 8) -> str:
+    filled = round(width * done / total) if total else 0
+    return "▓" * filled + "░" * (width - filled)
+
+
 def _get_tz() -> ZoneInfo:
     return ZoneInfo(settings.digest_timezone)
 
@@ -294,13 +299,13 @@ async def _send_digest_locked(
     total = len(sources_to_merge)
     done = 0
     if total:
-        await _update(f"⏳ Merging topics... 0 / {total}")
+        await _update(f"⏳ {_progress_bar(0, total)} 0/{total}")
     for cat_name, source_name in sources_to_merge:
         cat_meta[cat_name]["sources"][source_name] = await _merge_source_items(
             cat_meta[cat_name]["sources"][source_name]
         )
         done += 1
-        await _update(f"⏳ Merging topics... {done} / {total}")
+        await _update(f"⏳ {_progress_bar(done, total)} {done}/{total} — {source_name}")
 
     for data in cat_meta.values():
         for source_name, source_items in data["sources"].items():

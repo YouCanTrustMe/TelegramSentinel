@@ -31,10 +31,6 @@ def _is_valid_time(t: str) -> bool:
     return True
 
 
-def _cancel_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_flow")]])
-
-
 def _back_kb(back_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("◀ Back", callback_data=back_data)]])
 
@@ -141,7 +137,7 @@ def _confirm_keyboard(yes_data: str, no_data: str) -> InlineKeyboardMarkup:
 def _time_step_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"⏭ Default ({_DEFAULT_DIGEST_TIME})", callback_data="cat_add_time_default")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_flow")],
+        [InlineKeyboardButton("◀ Back", callback_data="cat_list")],
     ])
 
 

@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 
 import feedparser
 
-from src.db.models import get_active_sources, save_item
+from src.config import settings
+from src.db.models import get_active_sources, save_item, update_source_status
+from src.dispatcher.sender import send_to
 from src.processor.classifier import classify
 from src.processor.deduplicator import is_duplicate, make_message_id
 
@@ -21,10 +23,26 @@ def _strip_html(text: str) -> str:
 POLL_INTERVAL = 900
 
 
+_PERMANENT_HTTP_ERRORS = {404, 410}
+
+
 async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_extra: str | None = None) -> int:
     log.info("Polling RSS source '%s' (%s)", name, url)
     feed = await asyncio.to_thread(feedparser.parse, url)
     saved = 0
+
+    http_status = getattr(feed, "status", None)
+    if http_status in _PERMANENT_HTTP_ERRORS:
+        log.error("RSS source '%s' returned HTTP %d | marking error", name, http_status)
+        await update_source_status(source_id, "error")
+        await send_to(
+            settings.telegram_admin_id,
+            f"⚠️ <b>Source error</b>\n"
+            f"<b>{name}</b> returned HTTP {http_status}.\n"
+            f"Status set to <b>error</b>.\n"
+            f"<i>{url}</i>",
+        )
+        return 0
 
     for entry in feed.entries:
         entry_url = entry.get("link", "")

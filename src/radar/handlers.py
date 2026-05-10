@@ -1,4 +1,5 @@
 import logging
+from html import escape
 
 from pyrogram import filters
 
@@ -82,21 +83,29 @@ def register_radar_handlers() -> None:
             ts = message.date.strftime("%Y-%m-%d %H:%M") if message.date else "—"
             short_text = text[:500] + ("..." if len(text) > 500 else "")
 
+            firing = []
             for kw in matched:
                 if is_on_cooldown(kw, chat_id, settings.radar_cooldown_seconds):
                     log.debug("Radar cooldown: keyword=%s chat_id=%d", kw, chat_id)
                     continue
                 set_cooldown(kw, chat_id)
+                firing.append(kw)
 
-                alert = (
-                    f"🔍 <b>Keyword:</b> {kw}\n"
-                    f"💬 <b>Chat:</b> {chat_title}\n"
-                    f"👤 <b>From:</b> {first} {last} ({username})\n"
-                    f"📝 <b>Text:</b> {short_text}\n"
-                    f"🔗 <a href=\"{msg_link}\">Open message</a>\n"
-                    f"⏱️ {ts} UTC"
-                )
-                await send_to(settings.telegram_admin_id, alert)
+            if not firing:
+                return
+
+            kw_label = "Keyword" if len(firing) == 1 else "Keywords"
+            kw_str = ", ".join(f"<b>{escape(kw)}</b>" for kw in firing)
+            alert_body = (
+                f"🔍 {kw_label}: {kw_str}\n"
+                f"💬 <b>Chat:</b> {escape(chat_title)}\n"
+                f"👤 <b>From:</b> {escape(first)} {escape(last)} ({escape(username)})\n"
+                f"📝 <b>Text:</b> {escape(short_text)}\n"
+                f"🔗 <a href=\"{escape(msg_link, quote=True)}\">Open message</a>\n"
+                f"⏱️ {ts} UTC"
+            )
+            await send_to(settings.telegram_admin_id, f"<blockquote expandable>{alert_body}</blockquote>")
+            for kw in firing:
                 await log_radar_alert(
                     kw,
                     chat_ref_str,
@@ -104,12 +113,12 @@ def register_radar_handlers() -> None:
                     text,
                     msg_link,
                 )
-                log.info(
-                    "Radar alert sent: keyword=%s chat=%s author=%s",
-                    kw,
-                    chat_title,
-                    username,
-                )
+            log.info(
+                "Radar alert sent: keywords=%s chat=%s author=%s",
+                firing,
+                chat_title,
+                username,
+            )
 
         except Exception:
             log.exception("Radar handler error")

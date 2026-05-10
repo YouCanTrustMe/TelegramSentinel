@@ -11,7 +11,6 @@ from src.bot.handlers.sources import _finalize_add_source
 from src.bot.keyboards import (
     _back_kb,
     _blocked_keyboard,
-    _cancel_kb,
     _cat_view_text,
     _category_view_keyboard,
     _is_rss,
@@ -59,7 +58,7 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
             if step == 0:
                 data["name"] = text.lower()
                 state["step"] = 1
-                await message.reply("Emoji:", reply_markup=_cancel_kb())
+                await message.reply("Emoji:", reply_markup=_back_kb("cat_list"))
             elif step == 1:
                 data["emoji"] = escape(text[:8])
                 state["step"] = 2
@@ -139,11 +138,11 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                 if cats:
                     keyboard = InlineKeyboardMarkup(
                         [[InlineKeyboardButton(f"{r['emoji']} {r['name']}", callback_data=f"add_src_cat:{r['name']}")] for r in cats]
-                        + [[InlineKeyboardButton("❌ Cancel", callback_data="cancel_flow")]]
+                        + [[InlineKeyboardButton("◀ Back", callback_data="cat_list")]]
                     )
                     await message.reply(f"Name: <b>{name}</b>\nCategory:", reply_markup=keyboard)
                 else:
-                    await message.reply(f"Name: <b>{name}</b>\nCategory:", reply_markup=_cancel_kb())
+                    await message.reply(f"Name: <b>{name}</b>\nCategory:", reply_markup=_back_kb("cat_list"))
 
             elif step == 1:
                 await _finalize_add_source(uid, text, data, message)

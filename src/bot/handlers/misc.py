@@ -5,7 +5,6 @@ from pathlib import Path
 from pyrogram import filters as pf
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from src.bot.state import _pending
 from src.config import settings
 from src.db.models import get_categories, get_db
 from src.dispatcher.digest_builder import send_digest
@@ -30,20 +29,6 @@ def _tail_lines(path: Path, n: int, block_size: int = 4096) -> list[str]:
 
 
 def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
-
-    @bot.on_message(pf.command("cancel") & admin_msg)
-    async def cmd_cancel(_, message: Message) -> None:
-        uid = message.from_user.id
-        if uid in _pending:
-            del _pending[uid]
-            await message.reply("Cancelled.")
-        else:
-            await message.reply("Nothing to cancel.")
-
-    @bot.on_callback_query(pf.regex(r"^cancel_flow$") & admin_cb)
-    async def cb_cancel_flow(_, query: CallbackQuery) -> None:
-        _pending.pop(query.from_user.id, None)
-        await query.message.edit_text("Cancelled.")
 
     @bot.on_callback_query(pf.regex(r"^noop$") & admin_cb)
     async def cb_noop(_, query: CallbackQuery) -> None:
@@ -95,8 +80,8 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
         cats = await get_categories()
         cat_emoji = {c["name"]: c["emoji"] for c in cats}
 
-        pending_part = f"  <b>{unsent}</b> pending" if unsent else ""
-        lines = ["📊 <b>Stats</b>", "", f"<b>{total}</b> collected (24h){pending_part}"]
+        pending_part = f"  <tg-spoiler><b>{unsent}</b> pending</tg-spoiler>" if unsent else ""
+        lines = ["📊 <b>Stats</b>", "", f"<tg-spoiler><b>{total}</b> collected (24h)</tg-spoiler>{pending_part}"]
 
         if by_source:
             by_cat: dict[str, list] = {}
@@ -108,7 +93,7 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
                 for r in sources:
                     type_label = "tg" if r["type"] == "telegram" else "rss"
                     unsent_part = f"  ({r['unsent_cnt']}⏳)" if r["unsent_cnt"] else ""
-                    block_lines.append(f"[{type_label}] {escape(r['name'])} · {r['cnt']}{unsent_part}")
+                    block_lines.append(f"[{type_label}] {escape(r['name'])} · <tg-spoiler>{r['cnt']}{unsent_part}</tg-spoiler>")
                 lines.append("<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>")
 
         await send_reply(message.chat.id, "\n".join(lines), reply_to_message_id=message.id)
@@ -142,9 +127,9 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
         await message.reply(
             "<b>TelegramSentinel</b>\n\n"
             "/categories — manage categories &amp; sources\n"
-            "/blocked — blocked words filter\n\n"
+            "/blocked — blocked words filter\n"
+            "/radar — keyword alerts\n\n"
             "/digest — send digest now\n"
             "/stats — statistics\n"
-            "/logs — recent log entries\n"
-            "/cancel — cancel current input"
+            "/logs — recent log entries"
         )

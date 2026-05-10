@@ -340,7 +340,7 @@ async def _send_digest_locked(
     first_message_id: int | None = None
     for msg in messages:
         try:
-            msg_id = await send_message(msg)
+            msg_id = await send_message(msg, disable_notification=first_message_id is not None)
             if first_message_id is None:
                 first_message_id = msg_id
             sent_count += 1

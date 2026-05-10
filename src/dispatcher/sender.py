@@ -17,13 +17,14 @@ bot = Client(
 _BOT_API = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 
 
-async def send_message(text: str) -> int:
+async def send_message(text: str, disable_notification: bool = False) -> int:
     url = f"{_BOT_API}/sendMessage"
     payload = {
         "chat_id": settings.telegram_supergroup_id,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
+        "disable_notification": disable_notification,
     }
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload) as resp:

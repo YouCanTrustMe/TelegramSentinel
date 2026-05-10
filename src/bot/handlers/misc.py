@@ -50,7 +50,7 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
         if result is None:
             await message.reply("⏳ Digest is already building, please wait.")
         elif result:
-            await message.reply("✅ Digest sent.")
+            pass
         else:
             await message.reply("ℹ️ No new items.")
 
@@ -80,8 +80,8 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
         cats = await get_categories()
         cat_emoji = {c["name"]: c["emoji"] for c in cats}
 
-        pending_part = f"  <tg-spoiler><b>{unsent}</b> pending</tg-spoiler>" if unsent else ""
-        lines = ["📊 <b>Stats</b>", "", f"<tg-spoiler><b>{total}</b> collected (24h)</tg-spoiler>{pending_part}"]
+        pending_part = f"  <b>{unsent}</b> pending" if unsent else ""
+        lines = ["📊 <b>Stats</b>", "", f"<tg-spoiler><b>{total}</b></tg-spoiler> collected (24h){pending_part}"]
 
         if by_source:
             by_cat: dict[str, list] = {}

@@ -42,9 +42,10 @@ Your task:
      "автор", "допис", "пост", "розповідає", "пише".
    - Never abbreviate proper nouns.
 
-3. Extract "key_phrase": 1-3 words — the most specific identifier of the subject.
-   - Prefer a proper noun: person name, org name, asset ticker, location.
-   - If no clear proper noun: use the most distinctive verb or noun from the summary.
+3. Extract "key_phrase": 1-3 words — the best anchor text for the news link.
+   - Priority: person name > org name > asset ticker > action phrase > location.
+   - Use a location ONLY if it is the sole distinctive element (e.g. a foreign country, a specific battlefield). Never use a generic Ukrainian city as key_phrase if a person, org, or action is available.
+   - If no proper noun: use the most distinctive verb phrase from the summary (the main action).
    - NEVER use: "автор", "допис", "повідомляється", "інформація", "подія", "новина".
 
 Examples:
@@ -80,6 +81,10 @@ Examples:
   GOOD summary: "Автор показує свої торгові угоди на біржі"
   GOOD key_phrase: "торгові угоди"
 
+  INPUT: "Чоловік стріляв у Черкасах, бо сусід зірвав бузок"
+  BAD key_phrase: "Черкаси"  (generic city — not the distinctive element)
+  GOOD key_phrase: "стріляв через бузок"  (the distinctive action)
+
 Respond ONLY with valid JSON:
 {"score": 1-5, "summary": "<Ukrainian, up to 15 words>", "key_phrase": "<1-3 words>"}"""
 
@@ -98,8 +103,9 @@ Your tasks:
      "автор", "допис", "пост", "розповідає", "пише".
    - Never abbreviate proper nouns.
 
-3. Extract "key_phrase": 1-3 words — the most specific identifier of the subject for the group.
-   - Prefer a proper noun: person name, org name, asset ticker, location.
+3. Extract "key_phrase": 1-3 words — the best anchor text for the news link.
+   - Priority: person name > org name > asset ticker > action phrase > location.
+   - Use a location ONLY if it is the sole distinctive element. Never use a generic Ukrainian city if a person, org, or action is available.
    - NEVER use: "автор", "допис", "повідомляється", "інформація", "подія".
 
 4. Rate group importance 1-5:

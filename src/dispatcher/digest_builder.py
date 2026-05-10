@@ -69,9 +69,13 @@ def _format_item(item: dict) -> str:
         escaped_url = escape(url, quote=True)
         anchor = escape(key_phrase)
         rest_text = summary_text.strip()
-        if rest_text.lower().startswith(key_phrase.lower()):
-            rest = escape(rest_text[len(key_phrase):].lstrip())
-            return f'{prefix}<a href="{escaped_url}">{anchor}</a> {rest}{suffix}'.rstrip()
+        idx = rest_text.lower().find(key_phrase.lower())
+        if idx != -1:
+            before = escape(rest_text[:idx].rstrip())
+            after = escape(rest_text[idx + len(key_phrase):].lstrip())
+            link = f'<a href="{escaped_url}">{anchor}</a>'
+            parts_text = " ".join(p for p in [before, link, after] if p)
+            return f'{prefix}{parts_text}{suffix}'
         return f'{prefix}{summary} <a href="{escaped_url}">{anchor}</a>{suffix}'
     if url and summary_text.strip():
         words = summary_text.strip().split(" ", 1)

@@ -93,7 +93,7 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
                 for r in sources:
                     type_label = "tg" if r["type"] == "telegram" else "rss"
                     unsent_part = f"  ({r['unsent_cnt']}⏳)" if r["unsent_cnt"] else ""
-                    block_lines.append(f"[{type_label}] {escape(r['name'])} · <tg-spoiler>{r['cnt']}{unsent_part}</tg-spoiler>")
+                    block_lines.append(f"[{type_label}] {escape(r['name'])} · <tg-spoiler>{r['cnt']}</tg-spoiler>{unsent_part}")
                 lines.append("<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>")
 
         await send_reply(message.chat.id, "\n".join(lines), reply_to_message_id=message.id)

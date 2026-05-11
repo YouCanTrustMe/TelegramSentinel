@@ -16,6 +16,8 @@ _rate_lock = asyncio.Lock()
 _last_call_time: float = 0.0
 _backoff_until: float = 0.0
 _MIN_INTERVAL = 60.0 / 25  # 25 RPM — buffer below 30 RPM free tier limit
+_last_alert_time: float = 0.0
+_ALERT_COOLDOWN = 1800.0
 
 
 def _signal_backoff(seconds: float = 65.0) -> None:
@@ -155,6 +157,7 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
                 log.warning("Groq rate limit hit, retrying via queue after backoff (attempt %d/%d)", attempt + 1, max_retries)
             else:
                 log.warning("Groq rate limit persistent after %d attempts, using fallback", max_retries)
+                await _maybe_send_rate_limit_alert()
         except Exception as exc:
             log.warning("Classification error, using fallback: %s", exc)
             break
@@ -204,3 +207,43 @@ async def group_by_topic(items: list[dict]) -> list[dict]:
             break
 
     return [{"ids": [item["id"]], "summary": "", "key_phrase": ""} for item in items]
+
+
+async def _maybe_send_rate_limit_alert() -> None:
+    global _last_alert_time
+    now = time.monotonic()
+    if now - _last_alert_time < _ALERT_COOLDOWN:
+        return
+    _last_alert_time = now
+    try:
+        from src.dispatcher.sender import send_alert
+        await send_alert("Groq rate limit exhausted — summaries will fall back to raw text until quota resets")
+    except Exception:
+        pass
+
+
+async def classify_pending_items() -> None:
+    from src.db.models import get_unsent_items, update_item_classification
+    items = await get_unsent_items()
+    pending = [
+        item for item in items
+        if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip()
+    ]
+    if not pending:
+        log.debug("Background classify: no pending items with empty summary")
+        return
+    log.info("Background classify: %d unsent items with empty summary", len(pending))
+    classified = 0
+    for item in pending:
+        raw = (item["raw_text"] or "").strip()
+        if len(raw) < 15:
+            await update_item_classification(item["id"], raw, "")
+            log.info("Background classify: short text used as summary for item id=%d", item["id"])
+            classified += 1
+        else:
+            result = await classify(raw)
+            if result.summary:
+                await update_item_classification(item["id"], result.summary, result.key_phrase)
+                log.info("Background classify: item id=%d | summary=%s", item["id"], result.summary)
+                classified += 1
+    log.info("Background classify done: %d/%d classified", classified, len(pending))

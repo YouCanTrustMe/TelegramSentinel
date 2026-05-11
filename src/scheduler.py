@@ -107,6 +107,14 @@ async def _rebuild_jobs() -> None:
         replace_existing=True,
     )
 
+    from src.processor.classifier import classify_pending_items
+    _scheduler.add_job(
+        classify_pending_items,
+        CronTrigger(minute="*/30"),
+        id="classify_pending",
+        replace_existing=True,
+    )
+
     default_times = _parse_times(_DEFAULT_DIGEST_TIME)
     default_time_set = frozenset(f"{h:02d}:{m:02d}" for h, m in default_times)
     scheduled_pre_collect: set[str] = set()

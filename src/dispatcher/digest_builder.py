@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -238,12 +239,28 @@ async def _send_digest_locked(
         log.info("Digest triggered: no unsent items | filter=%s", categories)
         return False
 
+    building_msg_id: int | None = None
+    if not status_fn:
+        try:
+            building_msg_id = await send_message("⏳ Building digest...")
+        except Exception:
+            pass
+
+    _RECLASSIFY_TIMEOUT = 120.0
     empty = [item for item in items if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip()]
     if empty:
-        log.info("Re-classifying %d item(s) with empty summary before digest", len(empty))
+        log.info("Re-classifying %d item(s) with empty summary before digest (timeout=%ds)", len(empty), int(_RECLASSIFY_TIMEOUT))
         items = list(items)
+        reclassify_start = time.monotonic()
+        done = 0
         for i, item in enumerate(items):
             if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip():
+                elapsed = time.monotonic() - reclassify_start
+                if elapsed > _RECLASSIFY_TIMEOUT:
+                    remaining = sum(1 for x in items[i:] if not (x["summary"] or "").strip())
+                    log.warning("Re-classify timeout after %.0fs, %d items will show as link", elapsed, remaining)
+                    break
+                await _update(f"⏳ Re-classifying {done + 1}/{len(empty)}...")
                 raw = (item["raw_text"] or "").strip()
                 if len(raw) < 15:
                     await update_item_classification(item["id"], raw, "")
@@ -256,14 +273,8 @@ async def _send_digest_locked(
                         items[i] = {**dict(item), "summary": result.summary, "key_phrase": result.key_phrase}
                         log.info("Re-classified item id=%d | summary=%s", item["id"], result.summary)
                     else:
-                        log.warning("Re-classify gave up on item id=%d after 10 retries, using raw_text", item["id"])
-
-    building_msg_id: int | None = None
-    if not status_fn:
-        try:
-            building_msg_id = await send_message("⏳ Building digest...")
-        except Exception:
-            pass
+                        log.warning("Re-classify gave up on item id=%d, will show as link", item["id"])
+                done += 1
 
     blocked_words = await get_blocked_words()
     if blocked_words:

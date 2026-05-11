@@ -124,6 +124,14 @@ async def send_to(chat_id: int, text: str) -> None:
                 log.error("Bot API sendMessage (send_to) failed: %s %s", resp.status, body)
 
 
+async def send_alert(text: str) -> None:
+    try:
+        await send_message(f"⚠️ {text}")
+        log.info("Alert sent: %s", text)
+    except Exception as exc:
+        log.warning("Failed to send alert: %s", exc)
+
+
 async def send_document(chat_id: int, file_path: str, filename: str | None = None) -> None:
     url = f"{_BOT_API}/sendDocument"
     with open(file_path, "rb") as f:

@@ -18,8 +18,10 @@ _tokens: float = _CAPACITY
 _last_refill: float = time.monotonic()
 _call_lock = asyncio.Lock()
 _backoff_until: float = 0.0
+_quota_dead_until: float = 0.0
 _last_alert_time: float = 0.0
 _ALERT_COOLDOWN = 1800.0
+_QUOTA_DEAD_THRESHOLD = 300.0
 
 
 def _signal_backoff(seconds: float = 65.0) -> None:
@@ -27,6 +29,58 @@ def _signal_backoff(seconds: float = 65.0) -> None:
     _backoff_until = time.monotonic() + seconds
     _tokens = 0.0
     log.warning("Groq rate limit: signalling %gs backoff, bucket drained", seconds)
+
+
+def _parse_reset(value: str | None) -> float | None:
+    """Parse Groq reset header like '2m59.56s', '15s', '1h30m'."""
+    if not value:
+        return None
+    try:
+        total = 0.0
+        num = ""
+        for ch in value.strip():
+            if ch.isdigit() or ch == ".":
+                num += ch
+            elif ch == "h" and num:
+                total += float(num) * 3600
+                num = ""
+            elif ch == "m" and num:
+                total += float(num) * 60
+                num = ""
+            elif ch == "s" and num:
+                total += float(num)
+                num = ""
+        if num:
+            total += float(num)
+        return total if total > 0 else None
+    except (ValueError, AttributeError):
+        return None
+
+
+def _extract_retry_after(exc) -> float | None:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) if response is not None else None
+    if not headers:
+        return None
+    candidates = [
+        headers.get("retry-after"),
+        headers.get("x-ratelimit-reset-tokens"),
+        headers.get("x-ratelimit-reset-requests"),
+    ]
+    values = [v for v in (_parse_reset(c) if c else None for c in candidates) if v is not None]
+    return max(values) if values else None
+
+
+def is_quota_dead() -> bool:
+    return _quota_dead_until > time.monotonic()
+
+
+def _signal_quota_dead(seconds: float) -> None:
+    global _quota_dead_until, _backoff_until, _tokens
+    _quota_dead_until = time.monotonic() + seconds
+    _backoff_until = _quota_dead_until
+    _tokens = 0.0
+    log.warning("Groq quota exhausted: dead for %.0fs (until reset)", seconds)
 
 _SYSTEM_PROMPT = """You are a news summarizer for a Ukrainian-language digest.
 
@@ -128,6 +182,9 @@ def _refill_tokens() -> None:
 
 async def _groq_call(messages: list[dict], max_retries: int) -> dict:
     global _tokens
+    if is_quota_dead():
+        log.debug("Groq quota dead, short-circuiting call (%.0fs remaining)", _quota_dead_until - time.monotonic())
+        return {}
     for attempt in range(max_retries):
         async with _call_lock:
             now = time.monotonic()
@@ -147,8 +204,13 @@ async def _groq_call(messages: list[dict], max_retries: int) -> dict:
                     temperature=0.1,
                 )
                 return json.loads(response.choices[0].message.content)
-            except RateLimitError:
-                _signal_backoff()
+            except RateLimitError as exc:
+                retry_after = _extract_retry_after(exc)
+                if retry_after is not None and retry_after >= _QUOTA_DEAD_THRESHOLD:
+                    _signal_quota_dead(retry_after)
+                    await _maybe_send_rate_limit_alert()
+                    return {}
+                _signal_backoff(retry_after if retry_after else 65.0)
                 if attempt < max_retries - 1:
                     log.warning("Groq rate limit hit, retrying after backoff (attempt %d/%d)", attempt + 1, max_retries)
                 else:
@@ -242,10 +304,13 @@ async def classify_pending_items() -> None:
             await update_item_classification(item["id"], raw, "")
             log.info("Background classify: short text used as summary for item id=%d", item["id"])
             classified += 1
-        else:
-            result = await classify(raw)
-            if result.summary:
-                await update_item_classification(item["id"], result.summary, result.key_phrase)
-                log.info("Background classify: item id=%d | summary=%s", item["id"], result.summary)
-                classified += 1
+            continue
+        if is_quota_dead():
+            log.info("Background classify: quota dead, stopping (classified %d/%d)", classified, len(pending))
+            break
+        result = await classify(raw)
+        if result.summary:
+            await update_item_classification(item["id"], result.summary, result.key_phrase)
+            log.info("Background classify: item id=%d | summary=%s", item["id"], result.summary)
+            classified += 1
     log.info("Background classify done: %d/%d classified", classified, len(pending))

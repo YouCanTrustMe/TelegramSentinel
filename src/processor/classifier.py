@@ -82,89 +82,27 @@ def _signal_quota_dead(seconds: float) -> None:
     _tokens = 0.0
     log.warning("Groq quota exhausted: dead for %.0fs (until reset)", seconds)
 
-_SYSTEM_PROMPT = """You are a news summarizer for a Ukrainian-language digest.
+_SYSTEM_PROMPT = """Summarize news for a Ukrainian digest. Output JSON only.
 
-Your task:
-1. Write a summary in Ukrainian (translate if not Ukrainian), up to 15 words.
-   - Start with the key entity: a specific person, place, organization, or asset.
-   - State the concrete action or event with a strong verb.
-   - Include specific numbers, names, or locations where present.
-   - NEVER start with: "повідомляється", "з'явилась інформація", "стало відомо", "відбулась подія",
-     "автор", "допис", "пост", "розповідає", "пише".
-   - Never abbreviate proper nouns.
+summary: Ukrainian, up to 15 words. Start with the key entity (person, org, asset, place). Strong verb. Keep numbers and names. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, з'явилась інформація, відбулась подія, автор, допис, пост, розповідає, пише.
 
-2. Extract "key_phrase": 1-3 words — the best anchor text for the news link.
-   - Priority: person name > org name > asset ticker > action phrase > location.
-   - Use a location ONLY if it is the sole distinctive element (e.g. a foreign country, a specific battlefield). Never use a generic Ukrainian city as key_phrase if a person, org, or action is available.
-   - If no proper noun: use the most distinctive verb phrase from the summary (the main action).
-   - NEVER use: "автор", "допис", "повідомляється", "інформація", "подія", "новина".
+key_phrase: 1-3 words, best anchor for the link. Priority: person > org > asset ticker > action phrase > location. Use a generic Ukrainian city only if nothing more distinctive exists. Never: автор, допис, інформація, подія, новина.
 
-Examples:
-  INPUT: "Автор анонсував новий канал про крипту і бізнес"
-  BAD summary: "Автор створює новий канал для обговорення крипти та бізнесу"
-  BAD key_phrase: "автор"
-  GOOD summary: "Капітаник запускає новий канал про крипту та бізнес"
-  GOOD key_phrase: "Капітаник"
+Example:
+  IN: "Bitcoin price drops 8% after Fed rate hike"
+  OUT: {"summary": "Bitcoin впав на 8% після рішення ФРС підвищити ставку", "key_phrase": "Bitcoin"}
 
-  INPUT: (market news about Bitcoin) "Bitcoin price drops 8% after Fed rate hike decision"
-  BAD summary: "З'явилась інформація про криптовалютний ринок"
-  BAD key_phrase: "інформація"
-  GOOD summary: "Bitcoin впав на 8% після рішення ФРС підвищити ставку"
-  GOOD key_phrase: "Bitcoin"
+Respond ONLY with JSON: {"summary": "...", "key_phrase": "..."}"""
 
-  INPUT: (NBU raises rate) "Національний банк підвищив облікову ставку до 15,5%"
-  BAD summary: "Повідомляється про важливу подію у фінансовому секторі"
-  GOOD summary: "НБУ підвищив облікову ставку до 15,5% через інфляційний тиск"
-  GOOD key_phrase: "НБУ"
+_BATCH_SYSTEM_PROMPT = """Group same-topic news from one source and summarize each group in Ukrainian. Output JSON only.
 
-  INPUT: (court verdict) "Суд засудив заступника голови Рівненської облради до 9 років"
-  BAD summary: "Стало відомо про судове рішення щодо чиновника"
-  GOOD summary: "Заступника голови Рівненської облради засуджено до 9 років"
-  GOOD key_phrase: "Рівненська облрада"
+Items are numbered from 0. Every item must appear in exactly one group. Follow-ups and updates of the same event are one group.
 
-  INPUT: (crypto theft news) "California man sentenced 78 months for $250M crypto theft conspiracy"
-  BAD summary: "Американця засуджено за крадіжку криптовалюти"
-  GOOD summary: "Марлон Ферро вламувався до будинків, щоб викрасти гаманці на $250M"
-  GOOD key_phrase: "Марлон Ферро"
+Per group:
+- summary: Ukrainian. Single item: up to 15 words. Merged: up to 30 words. Start with key entity (person, org, asset, place). Strong verb. Keep numbers and names. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
+- key_phrase: 1-3 words. Priority: person > org > asset > action > location. Generic city only if nothing better. Never: автор, допис, інформація, подія.
 
-  INPUT: (vague trade post) "Торгую на біржі, ось мої угоди сьогодні"
-  BAD summary: "Допис про торговельну діяльність"
-  GOOD summary: "Автор показує свої торгові угоди на біржі"
-  GOOD key_phrase: "торгові угоди"
-
-  INPUT: "Чоловік стріляв у Черкасах, бо сусід зірвав бузок"
-  BAD key_phrase: "Черкаси"  (generic city — not the distinctive element)
-  GOOD key_phrase: "стріляв через бузок"  (the distinctive action)
-
-Respond ONLY with valid JSON:
-{"summary": "<Ukrainian, up to 15 words>", "key_phrase": "<1-3 words>"}"""
-
-_BATCH_SYSTEM_PROMPT = """You are a news summarizer for a Ukrainian-language digest.
-
-You will receive multiple news items from the same source, numbered starting from 0.
-Your tasks:
-1. Group items that cover the same event or topic (follow-ups and updates count as same topic).
-
-2. For each group write ONE summary in Ukrainian (translate if not Ukrainian):
-   - Single item: up to 15 words. Multiple items merged: up to 30 words combining key facts.
-   - Start with the key entity: a specific person, place, organization, or asset.
-   - State the concrete action or event with a strong verb.
-   - Include specific numbers, names, or locations where present.
-   - NEVER start with: "повідомляється", "з'явилась інформація", "стало відомо", "відбулась подія",
-     "автор", "допис", "пост", "розповідає", "пише".
-   - Never abbreviate proper nouns.
-
-3. Extract "key_phrase": 1-3 words — the best anchor text for the news link.
-   - Priority: person name > org name > asset ticker > action phrase > location.
-   - Use a location ONLY if it is the sole distinctive element. Never use a generic Ukrainian city if a person, org, or action is available.
-   - NEVER use: "автор", "допис", "повідомляється", "інформація", "подія".
-
-4. Never abbreviate proper nouns (person names, place names, organizations, brands).
-
-Every item must appear in exactly one group.
-
-Respond ONLY with valid JSON:
-{"groups": [{"ids": [0], "summary": "Коротке резюме", "key_phrase": "Ключове слово"}, {"ids": [1, 2], "summary": "Об'єднане резюме", "key_phrase": "Ключове слово"}]}"""
+Respond ONLY with JSON: {"groups": [{"ids": [0], "summary": "...", "key_phrase": "..."}]}"""
 
 
 @dataclass
@@ -230,7 +168,7 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
     data = await _groq_call(
         messages=[
             {"role": "system", "content": system},
-            {"role": "user", "content": text[:4000]},
+            {"role": "user", "content": text[:1500]},
         ],
         max_retries=max_retries,
     )
@@ -248,7 +186,7 @@ async def group_by_topic(items: list[dict]) -> list[dict]:
     Returns: list of {"ids": [int, ...], "summary": str, "key_phrase": str}
     Falls back to one group per item on error.
     """
-    numbered = "\n".join(f"{item['id']}: {item['text'][:600]}" for item in items)
+    numbered = "\n".join(f"{item['id']}: {item['text'][:400]}" for item in items)
 
     data = await _groq_call(
         messages=[

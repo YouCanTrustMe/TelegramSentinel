@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_unsent_items, log_digest, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
-from src.processor.classifier import classify, group_by_topic
+from src.processor.classifier import ClassificationResult, classify, group_by_topic
 
 log = logging.getLogger(__name__)
 
@@ -267,7 +267,12 @@ async def _send_digest_locked(
                     items[i] = {**dict(item), "summary": raw, "key_phrase": ""}
                     log.info("Short raw_text used as summary for item id=%d", item["id"])
                 else:
-                    result = await classify(raw, max_retries=10)
+                    remaining_time = _RECLASSIFY_TIMEOUT - (time.monotonic() - reclassify_start)
+                    try:
+                        result = await asyncio.wait_for(classify(raw, max_retries=3), timeout=max(5.0, remaining_time))
+                    except asyncio.TimeoutError:
+                        log.warning("Re-classify timed out on item id=%d, will show as link", item["id"])
+                        result = ClassificationResult(summary="")
                     if result.summary:
                         await update_item_classification(item["id"], result.summary, result.key_phrase)
                         items[i] = {**dict(item), "summary": result.summary, "key_phrase": result.key_phrase}

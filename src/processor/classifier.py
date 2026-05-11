@@ -127,6 +127,7 @@ def _refill_tokens() -> None:
 
 
 async def _groq_call(messages: list[dict], max_retries: int) -> dict:
+    global _tokens
     for attempt in range(max_retries):
         async with _call_lock:
             now = time.monotonic()

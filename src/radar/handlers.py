@@ -18,6 +18,7 @@ from src.radar.matcher import match_keywords
 log = logging.getLogger(__name__)
 
 _my_id: int | None = None
+_seen: set[tuple[int, int]] = set()
 
 
 def register_radar_handlers() -> None:
@@ -36,6 +37,10 @@ def register_radar_handlers() -> None:
                 return
 
             chat_id = message.chat.id
+
+            if (chat_id, message.id) in _seen:
+                return
+            _seen.add((chat_id, message.id))
 
             chats = await get_radar_chats()
             monitored: set[str | int] = set()

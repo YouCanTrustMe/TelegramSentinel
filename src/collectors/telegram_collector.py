@@ -9,7 +9,6 @@ from pyrogram.types import Message
 from src.config import settings
 from src.db.models import get_active_sources, save_item, update_source_status, update_source_url
 from src.dispatcher.sender import send_to
-from src.processor.classifier import classify
 from src.processor.deduplicator import is_duplicate, make_message_id
 
 log = logging.getLogger(__name__)
@@ -82,16 +81,12 @@ async def _process_message(chat_ref: str, source: dict, message: Message) -> boo
 
     published_at = message.date.replace(tzinfo=timezone.utc).isoformat() if message.date else None
 
-    if raw_text in ("[Photo]", "[Video]", "[GIF]"):
-        summary = raw_text
-        key_phrase = ""
-    elif len(raw_text.strip()) < 15:
+    if raw_text in ("[Photo]", "[Video]", "[GIF]") or len(raw_text.strip()) < 15:
         summary = raw_text.strip()
         key_phrase = ""
     else:
-        result = await classify(raw_text, prompt_extra=source.get("prompt_extra"))
-        summary = result.summary
-        key_phrase = result.key_phrase
+        summary = ""
+        key_phrase = ""
 
     await save_item(
         source_id=source["id"],

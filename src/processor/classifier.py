@@ -27,14 +27,7 @@ def _signal_backoff(seconds: float = 65.0) -> None:
 _SYSTEM_PROMPT = """You are a news summarizer for a Ukrainian-language digest.
 
 Your task:
-1. Rate the news importance 1-5:
-   5 = breaking news, attacks, casualties, official decisions, arrests, disasters
-   4 = significant developments, confirmed events, policy changes
-   3 = regular updates, ongoing situations, market moves
-   2 = analysis, opinions, forecasts, soft news
-   1 = ads, self-promotion, reposts, entertainment, polls
-
-2. Write a summary in Ukrainian (translate if not Ukrainian), up to 15 words.
+1. Write a summary in Ukrainian (translate if not Ukrainian), up to 15 words.
    - Start with the key entity: a specific person, place, organization, or asset.
    - State the concrete action or event with a strong verb.
    - Include specific numbers, names, or locations where present.
@@ -42,7 +35,7 @@ Your task:
      "автор", "допис", "пост", "розповідає", "пише".
    - Never abbreviate proper nouns.
 
-3. Extract "key_phrase": 1-3 words — the best anchor text for the news link.
+2. Extract "key_phrase": 1-3 words — the best anchor text for the news link.
    - Priority: person name > org name > asset ticker > action phrase > location.
    - Use a location ONLY if it is the sole distinctive element (e.g. a foreign country, a specific battlefield). Never use a generic Ukrainian city as key_phrase if a person, org, or action is available.
    - If no proper noun: use the most distinctive verb phrase from the summary (the main action).
@@ -86,7 +79,7 @@ Examples:
   GOOD key_phrase: "стріляв через бузок"  (the distinctive action)
 
 Respond ONLY with valid JSON:
-{"score": 1-5, "summary": "<Ukrainian, up to 15 words>", "key_phrase": "<1-3 words>"}"""
+{"summary": "<Ukrainian, up to 15 words>", "key_phrase": "<1-3 words>"}"""
 
 _BATCH_SYSTEM_PROMPT = """You are a news summarizer for a Ukrainian-language digest.
 
@@ -108,20 +101,12 @@ Your tasks:
    - Use a location ONLY if it is the sole distinctive element. Never use a generic Ukrainian city if a person, org, or action is available.
    - NEVER use: "автор", "допис", "повідомляється", "інформація", "подія".
 
-4. Rate group importance 1-5:
-   5 = breaking news, attacks, casualties, official decisions, arrests, disasters
-   4 = significant developments, confirmed events, policy changes
-   3 = regular updates, ongoing situations, market moves
-   2 = analysis, opinions, forecasts, soft news
-   1 = ads, self-promotion, reposts, entertainment, polls
-
-5. Never abbreviate proper nouns (person names, place names, organizations, brands).
-6. Stars: 5=★★★★★ 4=★★★★☆ 3=★★★☆☆ 2=★★☆☆☆ 1=★☆☆☆☆
+4. Never abbreviate proper nouns (person names, place names, organizations, brands).
 
 Every item must appear in exactly one group.
 
 Respond ONLY with valid JSON:
-{"groups": [{"ids": [0], "score": 3, "summary": "Коротке резюме", "key_phrase": "Ключове слово"}, {"ids": [1, 2], "score": 4, "summary": "Об'єднане резюме", "key_phrase": "Ключове слово"}]}"""
+{"groups": [{"ids": [0], "summary": "Коротке резюме", "key_phrase": "Ключове слово"}, {"ids": [1, 2], "summary": "Об'єднане резюме", "key_phrase": "Ключове слово"}]}"""
 
 
 @dataclass
@@ -158,10 +143,8 @@ async def classify(text: str, prompt_extra: str | None = None) -> Classification
                 temperature=0.1,
             )
             data = json.loads(response.choices[0].message.content)
-            score = max(1, min(5, int(data.get("score", 1))))
-            stars = "★" * score + "☆" * (5 - score)
             result = ClassificationResult(
-                summary=f"{stars} {data.get('summary', '')}",
+                summary=data.get("summary", ""),
                 key_phrase=data.get("key_phrase", ""),
             )
             log.debug("Classified: %s | key=%s", result.summary, result.key_phrase)
@@ -203,12 +186,9 @@ async def group_by_topic(items: list[dict]) -> list[dict]:
             groups = data.get("groups", [])
             result = []
             for g in groups:
-                score = max(1, min(5, int(g.get("score", 3))))
-                stars = "★" * score + "☆" * (5 - score)
                 result.append({
                     "ids": [int(i) for i in g["ids"]],
-                    "score": score,
-                    "summary": f"{stars} {g.get('summary', '')}",
+                    "summary": g.get("summary", ""),
                     "key_phrase": g.get("key_phrase", ""),
                 })
             log.debug("Grouped %d items into %d groups", len(items), len(result))
@@ -223,4 +203,4 @@ async def group_by_topic(items: list[dict]) -> list[dict]:
             log.warning("Batch grouping error, falling back to individual items: %s", exc)
             break
 
-    return [{"ids": [item["id"]], "score": 3, "summary": "", "key_phrase": ""} for item in items]
+    return [{"ids": [item["id"]], "summary": "", "key_phrase": ""} for item in items]

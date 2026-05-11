@@ -257,6 +257,15 @@ async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlit
             return await cur.fetchall()
 
 
+async def update_item_classification(item_id: int, summary: str, key_phrase: str) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE items SET summary = ?, key_phrase = ? WHERE id = ?",
+            (summary, key_phrase, item_id),
+        )
+        await db.commit()
+
+
 async def mark_sent(item_ids: list[int]) -> None:
     async with get_db() as db:
         await db.executemany(

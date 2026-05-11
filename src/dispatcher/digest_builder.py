@@ -8,16 +8,15 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.db.models import get_app_setting, get_blocked_words, get_categories, get_unsent_items, log_digest, mark_sent, set_app_setting
+from src.db.models import get_app_setting, get_blocked_words, get_categories, get_unsent_items, log_digest, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
-from src.processor.classifier import group_by_topic
+from src.processor.classifier import classify, group_by_topic
 
 log = logging.getLogger(__name__)
 
 _digest_lock = asyncio.Lock()
 _TELEGRAM_LIMIT = 4000
 _MAX_ITEMS_PER_SOURCE = 50
-_STARS_RE = re.compile(r'^([★☆]{5})\s*')
 _MEDIA_EMOJI = {"[Photo]": "📷", "[Video]": "🎬", "[GIF]": "🎞️"}
 
 
@@ -39,12 +38,6 @@ def _format_item(item: dict) -> str:
 
     summary_text = _MEDIA_EMOJI.get(summary_text, summary_text)
 
-    stars = ""
-    m = _STARS_RE.match(summary_text)
-    if m:
-        stars = m.group(1)
-        summary_text = summary_text[m.end():]
-
     summary = escape(summary_text)
     hour = ""
     pub = item["published_at"]
@@ -62,8 +55,7 @@ def _format_item(item: dict) -> str:
     blocked_by = item["blocked_by"] if "blocked_by" in item_keys else None
     suffix = f' <i>⚠ {escape(blocked_by)}</i>' if blocked_by else ""
 
-    parts = [p for p in [hour, stars] if p]
-    prefix = " · ".join(parts) + " · " if parts else ""
+    prefix = f"{hour} · " if hour else ""
     key_phrase = ((item["key_phrase"] if "key_phrase" in item_keys else "") or "").strip()
     if url and key_phrase:
         escaped_url = escape(url, quote=True)
@@ -148,12 +140,12 @@ async def _merge_source_items(items: list) -> list[dict]:
 
 
 def _source_block(source_name: str, source_items: list) -> str:
-    block_lines = [f"<b>{escape(source_name)}</b>"]
-    for item in source_items:
-        line = _format_item(item)
-        if line:
-            block_lines.append(line)
-    return "<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>"
+    item_lines = [_format_item(item) for item in source_items]
+    item_lines = [l for l in item_lines if l]
+    if not item_lines:
+        return ""
+    header = f"<b>{escape(source_name)}</b>"
+    return "<blockquote expandable>" + "\n".join([header] + item_lines) + "</blockquote>"
 
 
 def _build_digest_text(
@@ -184,7 +176,9 @@ def _build_digest_text(
         for source_name, source_items in sources.items():
             if not source_items:
                 continue
-            lines.append(_source_block(source_name, source_items))
+            block = _source_block(source_name, source_items)
+            if block:
+                lines.append(block)
 
     if blocked_items:
         lines.append("\n<b>🚫 Filtered</b>")
@@ -243,6 +237,18 @@ async def _send_digest_locked(
     if not items:
         log.info("Digest triggered: no unsent items | filter=%s", categories)
         return False
+
+    empty = [item for item in items if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip()]
+    if empty:
+        log.info("Re-classifying %d item(s) with empty summary before digest", len(empty))
+        items = list(items)
+        for i, item in enumerate(items):
+            if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip():
+                result = await classify(item["raw_text"])
+                if result.summary:
+                    await update_item_classification(item["id"], result.summary, result.key_phrase)
+                    items[i] = {**dict(item), "summary": result.summary, "key_phrase": result.key_phrase}
+                    log.info("Re-classified item id=%d | summary=%s", item["id"], result.summary)
 
     building_msg_id: int | None = None
     if not status_fn:

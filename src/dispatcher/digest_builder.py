@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_unsent_items, log_digest, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
-from src.processor.classifier import ClassificationResult, classify, group_by_topic
+from src.processor.classifier import ClassificationResult, classify, group_by_topic, is_quota_dead
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +89,19 @@ def _format_item(item: dict) -> str:
 
 async def _merge_source_items(items: list) -> list[dict]:
     if len(items) <= 1:
+        return [
+            {
+                "summary": item["summary"],
+                "key_phrase": item["key_phrase"] if "key_phrase" in item.keys() else "",
+                "original_url": item["original_url"],
+                "published_at": item["published_at"],
+                "raw_text": item["raw_text"],
+            }
+            for item in items
+        ]
+
+    if is_quota_dead():
+        log.info("Skipping group_by_topic for source: Groq quota dead, returning items as-is")
         return [
             {
                 "summary": item["summary"],
@@ -255,6 +268,10 @@ async def _send_digest_locked(
         done = 0
         for i, item in enumerate(items):
             if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip():
+                if is_quota_dead():
+                    remaining = sum(1 for x in items[i:] if not (x["summary"] or "").strip())
+                    log.warning("Re-classify aborted: Groq quota dead, %d items will show as link", remaining)
+                    break
                 elapsed = time.monotonic() - reclassify_start
                 if elapsed > _RECLASSIFY_TIMEOUT:
                     remaining = sum(1 for x in items[i:] if not (x["summary"] or "").strip())

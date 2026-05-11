@@ -110,9 +110,11 @@ async def _rebuild_jobs() -> None:
     from src.processor.classifier import classify_pending_items
     _scheduler.add_job(
         classify_pending_items,
-        CronTrigger(minute="*/30"),
+        CronTrigger(minute="*/10"),
         id="classify_pending",
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
 
     default_times = _parse_times(_DEFAULT_DIGEST_TIME)

@@ -104,6 +104,16 @@ Per group:
 
 Respond ONLY with JSON: {"groups": [{"ids": [0], "summary": "...", "key_phrase": "..."}]}"""
 
+_MULTI_SYSTEM_PROMPT = """Summarize each news item separately in Ukrainian. Output JSON only.
+
+Items are numbered from 0. Produce exactly one entry per input id. Do NOT merge items.
+
+Per item:
+- summary: Ukrainian, up to 15 words. Start with the key entity (person, org, asset, place). Strong verb. Keep numbers and names. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
+- key_phrase: 1-3 words. Priority: person > org > asset > action > location. Generic city only if nothing better. Never: автор, допис, інформація, подія.
+
+Respond ONLY with JSON: {"items": [{"id": 0, "summary": "...", "key_phrase": "..."}]}"""
+
 
 @dataclass
 class ClassificationResult:
@@ -180,6 +190,36 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
     return result
 
 
+async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
+    """
+    items: list of {"id": int, "text": str}
+    Returns: {id: ClassificationResult} for items the model returned.
+    Missing ids are left for the caller to fall back on.
+    """
+    if not items:
+        return {}
+    numbered = "\n".join(f"{item['id']}: {item['text'][:400]}" for item in items)
+    data = await _groq_call(
+        messages=[
+            {"role": "system", "content": _MULTI_SYSTEM_PROMPT},
+            {"role": "user", "content": numbered},
+        ],
+        max_retries=3,
+    )
+    out: dict[int, ClassificationResult] = {}
+    for row in data.get("items", []):
+        try:
+            rid = int(row["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        out[rid] = ClassificationResult(
+            summary=row.get("summary", "") or "",
+            key_phrase=row.get("key_phrase", "") or "",
+        )
+    log.debug("Batch classified %d/%d items", len(out), len(items))
+    return out
+
+
 async def group_by_topic(items: list[dict]) -> list[dict]:
     """
     items: list of {"id": int, "text": str}
@@ -224,7 +264,7 @@ async def _maybe_send_rate_limit_alert() -> None:
         pass
 
 
-async def classify_pending_items() -> None:
+async def classify_pending_items(limit: int = 3) -> None:
     from src.db.models import get_unsent_items, update_item_classification
     items = await get_unsent_items()
     pending = [
@@ -234,21 +274,37 @@ async def classify_pending_items() -> None:
     if not pending:
         log.debug("Background classify: no pending items with empty summary")
         return
-    log.info("Background classify: %d unsent items with empty summary", len(pending))
-    classified = 0
+
+    short, long_items = [], []
     for item in pending:
         raw = (item["raw_text"] or "").strip()
         if len(raw) < 15:
-            await update_item_classification(item["id"], raw, "")
-            log.info("Background classify: short text used as summary for item id=%d", item["id"])
-            classified += 1
-            continue
-        if is_quota_dead():
-            log.info("Background classify: quota dead, stopping (classified %d/%d)", classified, len(pending))
-            break
-        result = await classify(raw)
-        if result.summary:
+            short.append((item, raw))
+        else:
+            long_items.append((item, raw))
+
+    for item, raw in short:
+        await update_item_classification(item["id"], raw, "")
+        log.info("Background classify: short text used as summary for item id=%d", item["id"])
+
+    if not long_items:
+        log.info("Background classify done: %d short / 0 long", len(short))
+        return
+    if is_quota_dead():
+        log.info("Background classify: quota dead, skipping %d long items", len(long_items))
+        return
+
+    batch = long_items[:limit]
+    log.info("Background classify: %d pending (taking batch of %d, %d short done)", len(long_items), len(batch), len(short))
+    batch_input = [{"id": item["id"], "text": raw} for item, raw in batch]
+    results = await classify_batch(batch_input)
+    classified = 0
+    for item, _raw in batch:
+        result = results.get(item["id"])
+        if result and result.summary:
             await update_item_classification(item["id"], result.summary, result.key_phrase)
             log.info("Background classify: item id=%d | summary=%s", item["id"], result.summary)
             classified += 1
-    log.info("Background classify done: %d/%d classified", classified, len(pending))
+        else:
+            log.debug("Background classify: no result for item id=%d (will retry next pass)", item["id"])
+    log.info("Background classify done: %d/%d classified in batch", classified, len(batch))

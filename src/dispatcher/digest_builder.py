@@ -244,11 +244,19 @@ async def _send_digest_locked(
         items = list(items)
         for i, item in enumerate(items):
             if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip():
-                result = await classify(item["raw_text"])
-                if result.summary:
-                    await update_item_classification(item["id"], result.summary, result.key_phrase)
-                    items[i] = {**dict(item), "summary": result.summary, "key_phrase": result.key_phrase}
-                    log.info("Re-classified item id=%d | summary=%s", item["id"], result.summary)
+                raw = (item["raw_text"] or "").strip()
+                if len(raw) < 15:
+                    await update_item_classification(item["id"], raw, "")
+                    items[i] = {**dict(item), "summary": raw, "key_phrase": ""}
+                    log.info("Short raw_text used as summary for item id=%d", item["id"])
+                else:
+                    result = await classify(raw, max_retries=10)
+                    if result.summary:
+                        await update_item_classification(item["id"], result.summary, result.key_phrase)
+                        items[i] = {**dict(item), "summary": result.summary, "key_phrase": result.key_phrase}
+                        log.info("Re-classified item id=%d | summary=%s", item["id"], result.summary)
+                    else:
+                        log.warning("Re-classify gave up on item id=%d after 10 retries, using raw_text", item["id"])
 
     building_msg_id: int | None = None
     if not status_fn:

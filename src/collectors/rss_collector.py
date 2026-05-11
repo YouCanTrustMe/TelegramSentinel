@@ -62,7 +62,13 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
         if hasattr(entry, "published_parsed") and entry.published_parsed:
             published_at = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc).isoformat()
 
-        result = await classify(raw_text, prompt_extra=prompt_extra)
+        if len(raw_text.strip()) < 15:
+            summary = raw_text.strip()
+            key_phrase = ""
+        else:
+            result = await classify(raw_text, prompt_extra=prompt_extra)
+            summary = result.summary
+            key_phrase = result.key_phrase
 
         await save_item(
             source_id=source_id,
@@ -70,10 +76,10 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
             raw_text=raw_text,
             original_url=entry_url or None,
             published_at=published_at,
-            summary=result.summary,
+            summary=summary,
             category=category,
             processed_at=datetime.now(timezone.utc).isoformat(),
-            key_phrase=result.key_phrase,
+            key_phrase=key_phrase,
         )
         log.info("Saved item from '%s' | category=%s | %s", name, category, (entry_url or message_id)[:80])
         saved += 1

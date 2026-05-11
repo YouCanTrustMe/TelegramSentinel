@@ -85,6 +85,9 @@ async def _process_message(chat_ref: str, source: dict, message: Message) -> boo
     if raw_text in ("[Photo]", "[Video]", "[GIF]"):
         summary = raw_text
         key_phrase = ""
+    elif len(raw_text.strip()) < 15:
+        summary = raw_text.strip()
+        key_phrase = ""
     else:
         result = await classify(raw_text, prompt_extra=source.get("prompt_extra"))
         summary = result.summary

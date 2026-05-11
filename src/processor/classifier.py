@@ -125,12 +125,12 @@ async def _acquire_rate_slot() -> None:
         _last_call_time = time.monotonic()
 
 
-async def classify(text: str, prompt_extra: str | None = None) -> ClassificationResult:
+async def classify(text: str, prompt_extra: str | None = None, max_retries: int = 2) -> ClassificationResult:
     system = _SYSTEM_PROMPT
     if prompt_extra:
         system = f"{_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
 
-    for attempt in range(2):
+    for attempt in range(max_retries):
         await _acquire_rate_slot()
         try:
             response = await _client.chat.completions.create(
@@ -151,10 +151,10 @@ async def classify(text: str, prompt_extra: str | None = None) -> Classification
             return result
         except RateLimitError:
             _signal_backoff()
-            if attempt == 0:
-                log.warning("Groq rate limit hit, retrying via queue after backoff")
+            if attempt < max_retries - 1:
+                log.warning("Groq rate limit hit, retrying via queue after backoff (attempt %d/%d)", attempt + 1, max_retries)
             else:
-                log.warning("Groq rate limit persistent, using fallback")
+                log.warning("Groq rate limit persistent after %d attempts, using fallback", max_retries)
         except Exception as exc:
             log.warning("Classification error, using fallback: %s", exc)
             break

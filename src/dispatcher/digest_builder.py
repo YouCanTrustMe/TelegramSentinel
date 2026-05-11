@@ -76,7 +76,10 @@ def _format_item(item: dict) -> str:
             link = f'<a href="{escaped_url}">{anchor}</a>'
             parts_text = " ".join(p for p in [before, link, after] if p)
             return f'{prefix}{parts_text}{suffix}'
-        return f'{prefix}{summary} <a href="{escaped_url}">{anchor}</a>{suffix}'
+        words = rest_text.split(" ", 1)
+        fallback_anchor = escape(words[0])
+        fallback_rest = (" " + escape(words[1])) if len(words) > 1 else ""
+        return f'{prefix}<a href="{escaped_url}">{fallback_anchor}</a>{fallback_rest}{suffix}'
     if url and summary_text.strip():
         words = summary_text.strip().split(" ", 1)
         anchor = escape(words[0])
@@ -251,7 +254,7 @@ async def _send_digest_locked(
     blocked_words = await get_blocked_words()
     if blocked_words:
         blocked_patterns = [
-            re.compile(rf"(?<!\w){re.escape(b['word'].lower())}", re.UNICODE)
+            re.compile(rf"\b{re.escape(b['word'].lower())}\b", re.UNICODE)
             for b in blocked_words
         ]
         filtered, blocked_items = [], []

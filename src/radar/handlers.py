@@ -100,11 +100,10 @@ def register_radar_handlers() -> None:
                 f"🔍 {kw_label}: {kw_str}\n"
                 f"💬 <b>Chat:</b> {escape(chat_title)}\n"
                 f"👤 <b>From:</b> {escape(first)} {escape(last)} ({escape(username)})\n"
-                f"📝 <b>Text:</b> {escape(short_text)}\n"
-                f"🔗 <a href=\"{escape(msg_link, quote=True)}\">Open message</a>\n"
-                f"⏱️ {ts} UTC"
+                f"🔗 <a href=\"{escape(msg_link, quote=True)}\">Open message</a> · ⏱️ {ts} UTC\n"
+                f"<blockquote expandable>{escape(short_text)}</blockquote>"
             )
-            await send_to(settings.telegram_admin_id, f"<blockquote expandable>{alert_body}</blockquote>")
+            await send_to(settings.telegram_admin_id, alert_body)
             for kw in firing:
                 await log_radar_alert(
                     kw,

@@ -7,7 +7,7 @@ from pyrogram.errors import ChannelBanned, ChannelInvalid, ChannelPrivate, ChatF
 from pyrogram.types import Message
 
 from src.config import settings
-from src.db.models import get_active_sources, save_item, update_source_status, update_source_url
+from src.db.models import get_active_sources, save_item, set_source_last_message_id, update_source_status, update_source_url
 from src.dispatcher.sender import send_to
 from src.processor.deduplicator import is_duplicate, make_message_id
 
@@ -109,14 +109,22 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
     else:
         chat_id = chat_ref if chat_ref.startswith("@") else f"@{chat_ref}"
 
+    last_msg_id = source.get("last_message_id")
+    limit = 20 if last_msg_id is None else 100
+
     saved = 0
     try:
         messages = []
-        async for message in userbot.get_chat_history(chat_id, limit=20):
+        async for message in userbot.get_chat_history(chat_id, limit=limit):
+            if last_msg_id is not None and message.id <= last_msg_id:
+                break
             messages.append(message)
 
+        max_seen_id = 0
         seen_group_ids: set = set()
         for message in messages:
+            if message.id > max_seen_id:
+                max_seen_id = message.id
             group_id = message.media_group_id
             if group_id is not None:
                 if group_id in seen_group_ids:
@@ -126,6 +134,9 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
                 message = next((m for m in group_msgs if (m.text or m.caption)), group_msgs[0])
             if await _process_message(chat_ref, source, message):
                 saved += 1
+
+        if max_seen_id:
+            await set_source_last_message_id(source["id"], max_seen_id)
     except (ChannelInvalid, ChannelPrivate, ChannelBanned, ChatForbidden, UserBannedInChannel, UserKicked) as exc:
         log.error("Source '%s' permanently inaccessible: %s | marking error", source["name"], exc)
         await update_source_status(source["id"], "error")
@@ -148,7 +159,12 @@ async def run_telegram_collector() -> None:
             sources = await get_active_sources(type_="telegram")
             for row in sources:
                 chat_ref = row["url"].lower() if not row["url"].lstrip("-").isdigit() else row["url"]
-                source = {"id": row["id"], "name": row["name"], "category": row["category"]}
+                source = {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "category": row["category"],
+                    "last_message_id": row["last_message_id"] if "last_message_id" in row.keys() else None,
+                }
 
                 if _is_invite_link(chat_ref):
                     chat_ref = await _resolve_invite_link(chat_ref, row["id"])

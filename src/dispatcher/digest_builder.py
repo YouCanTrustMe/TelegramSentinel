@@ -87,8 +87,11 @@ def _format_item(item: dict) -> str:
     return ""
 
 
+_MERGE_MIN_ITEMS = 4
+
+
 async def _merge_source_items(items: list) -> list[dict]:
-    if len(items) <= 1:
+    if len(items) < _MERGE_MIN_ITEMS:
         return [
             {
                 "summary": item["summary"],
@@ -348,7 +351,7 @@ async def _send_digest_locked(
         (cat_name, source_name)
         for cat_name, data in cat_meta.items()
         for source_name, source_items in data["sources"].items()
-        if len(source_items) > 1
+        if len(source_items) >= _MERGE_MIN_ITEMS
     ]
     total = len(sources_to_merge)
     done = 0

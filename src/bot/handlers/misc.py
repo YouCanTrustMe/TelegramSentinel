@@ -65,12 +65,12 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
                 unsent = (await cur.fetchone())["unsent"]
             async with db.execute(
                 """SELECT sources.name, sources.category, sources.type,
-                          COUNT(*) as cnt,
+                          SUM(CASE WHEN items.processed_at >= datetime('now', '-24 hours') THEN 1 ELSE 0 END) as cnt,
                           SUM(CASE WHEN items.sent = 0 THEN 1 ELSE 0 END) as unsent_cnt
                    FROM items JOIN sources ON items.source_id = sources.id
                    LEFT JOIN categories ON sources.category = categories.name
-                   WHERE items.processed_at >= datetime('now', '-24 hours')
                    GROUP BY sources.id
+                   HAVING cnt > 0 OR unsent_cnt > 0
                    ORDER BY COALESCE(categories.sort_order, 999), sources.category,
                             CASE WHEN sources.type = 'telegram' THEN 0 ELSE 1 END,
                             cnt DESC"""

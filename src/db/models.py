@@ -129,6 +129,15 @@ async def set_source_pending_msg_id(source_id: int, msg_id: int | None) -> None:
         await db.commit()
 
 
+async def set_source_last_message_id(source_id: int, msg_id: int) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE sources SET last_message_id = ? WHERE id = ? AND (last_message_id IS NULL OR last_message_id < ?)",
+            (msg_id, source_id, msg_id),
+        )
+        await db.commit()
+
+
 async def rename_source(source_id: int, new_name: str) -> bool:
     async with get_db() as db:
         cur = await db.execute(

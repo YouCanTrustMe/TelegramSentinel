@@ -65,7 +65,7 @@ async def _process_message(chat_ref: str, source: dict, message: Message) -> boo
         media_prefix = ""
 
     raw_text = (media_prefix + caption).strip()
-    if not raw_text:
+    if not raw_text or raw_text in ("[Photo]", "[Video]", "[GIF]"):
         return False
 
     message_id = make_message_id("telegram", chat_ref, str(message.id))
@@ -81,7 +81,7 @@ async def _process_message(chat_ref: str, source: dict, message: Message) -> boo
 
     published_at = message.date.replace(tzinfo=timezone.utc).isoformat() if message.date else None
 
-    if raw_text in ("[Photo]", "[Video]", "[GIF]") or len(raw_text.strip()) < 15:
+    if len(raw_text.strip()) < 15:
         summary = raw_text.strip()
         key_phrase = ""
     else:

@@ -53,20 +53,41 @@ async def _resolve_invite_link(url: str, source_id: int) -> str | None:
     return None
 
 
-async def _process_message(chat_ref: str, source: dict, message: Message) -> bool:
-    caption = message.text or message.caption or ""
-    if message.photo:
-        media_prefix = "[Photo] "
-    elif message.video:
-        media_prefix = "[Video] "
-    elif message.animation:
-        media_prefix = "[GIF] "
+async def _process_message(chat_ref: str, source: dict, message: Message, parent_msg: "Message | None" = None) -> bool:
+    if message.poll:
+        poll = message.poll
+        opts = ", ".join(opt.text for opt in (poll.options or [])[:4])
+        raw_text = f"[Poll] {poll.question}" + (f" ({opts})" if opts else "")
     else:
-        media_prefix = ""
+        caption = message.text or message.caption or ""
+        if message.photo:
+            media_prefix = "[Photo] "
+        elif message.video:
+            media_prefix = "[Video] "
+        elif message.animation:
+            media_prefix = "[GIF] "
+        elif message.document:
+            media_prefix = "[Doc] "
+        elif message.audio:
+            media_prefix = "[Audio] "
+        elif message.voice:
+            media_prefix = "[Voice] "
+        else:
+            media_prefix = ""
 
-    raw_text = (media_prefix + caption).strip()
-    if not raw_text or raw_text in ("[Photo]", "[Video]", "[GIF]"):
-        return False
+        raw_text = (media_prefix + caption).strip()
+        if not raw_text or raw_text in ("[Photo]", "[Video]", "[GIF]", "[Doc]", "[Audio]", "[Voice]"):
+            return False
+
+        if message.forward_from_chat and message.forward_from_chat.title:
+            fwd_title = message.forward_from_chat.title.strip()
+            if fwd_title:
+                raw_text = f"[Forwarded from {fwd_title}] {raw_text}"
+
+        if parent_msg is not None:
+            parent_text = (parent_msg.text or parent_msg.caption or "").strip()
+            if parent_text:
+                raw_text = f"[Context: {parent_text[:200].split('\n')[0]}]\n{raw_text}"
 
     message_id = make_message_id("telegram", chat_ref, str(message.id))
     if await is_duplicate(message_id):
@@ -122,6 +143,7 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
 
         max_seen_id = 0
         seen_group_ids: set = set()
+        messages_by_id = {m.id: m for m in messages}
         for message in messages:
             if message.id > max_seen_id:
                 max_seen_id = message.id
@@ -132,7 +154,8 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
                 seen_group_ids.add(group_id)
                 group_msgs = [m for m in messages if m.media_group_id == group_id]
                 message = next((m for m in group_msgs if (m.text or m.caption)), group_msgs[0])
-            if await _process_message(chat_ref, source, message):
+            parent_msg = messages_by_id.get(message.reply_to_message_id) if message.reply_to_message_id else None
+            if await _process_message(chat_ref, source, message, parent_msg=parent_msg):
                 saved += 1
 
         if max_seen_id:

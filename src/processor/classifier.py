@@ -84,7 +84,7 @@ def _signal_quota_dead(seconds: float) -> None:
 
 _SYSTEM_PROMPT = """Summarize news for a Ukrainian digest. Output JSON only.
 
-summary: Ukrainian, up to 15 words. Start with the key entity (person, org, asset, place). Strong verb. Keep numbers and names. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, з'явилась інформація, відбулась подія, автор, допис, пост, розповідає, пише.
+summary: Ukrainian. Use up to 15 words for simple news; up to 25 words when the event has multiple key details (numbers, names, consequences). Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, з'явилась інформація, відбулась подія, автор, допис, пост, розповідає, пише.
 
 key_phrase: 1-3 words, best anchor for the link. Priority: person > org > asset ticker > action phrase > location. Use a generic Ukrainian city only if nothing more distinctive exists. Never: автор, допис, інформація, подія, новина.
 
@@ -94,13 +94,17 @@ Example:
 
 Respond ONLY with JSON: {"summary": "...", "key_phrase": "..."}"""
 
-_BATCH_SYSTEM_PROMPT = """Group same-topic news from one source and summarize each group in Ukrainian. Output JSON only.
+_BATCH_SYSTEM_PROMPT = """Group news items from one source by event, then summarize each group in Ukrainian. Output JSON only.
 
-Items are numbered from 0. Every item must appear in exactly one group. Follow-ups and updates of the same event are one group.
+Items are numbered from 0. Every item MUST appear in exactly one group — no item may be omitted or duplicated.
+
+MERGE RULE: merge ONLY items that describe THE SAME SPECIFIC EVENT with new developments (same attack, same trial, same announcement, same person's statement on same day). Do NOT merge items that are merely about the same topic, person, or organisation if they are different events.
+Examples of correct merges: "Air alert in Kyiv" + "All-clear in Kyiv" = one group. "Zelensky signed decree X" + "Details of decree X released" = one group.
+Examples of wrong merges: "OPEC raises output" + "Saudi Arabia oil strategy" = separate groups. "Trump raised tariffs" + "EU responds to tariffs" = separate groups.
 
 Per group:
-- summary: Ukrainian. Single item: up to 15 words. Merged: up to 30 words. Start with key entity (person, org, asset, place). Strong verb. Keep numbers and names. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
-- key_phrase: 1-3 words. Priority: person > org > asset > action > location. Generic city only if nothing better. Never: автор, допис, інформація, подія.
+- summary: Ukrainian. Single item: up to 20 words. Merged (2+ items): up to 30 words — include the key development from each merged item. Start with key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Never start with: повідомляється, стало відомо, автор, допис, пост.
+- key_phrase: 1-3 words. Priority: person > org > asset > action > location. Never: автор, допис, інформація, подія.
 
 Respond ONLY with JSON: {"groups": [{"ids": [0], "summary": "...", "key_phrase": "..."}]}"""
 
@@ -109,7 +113,7 @@ _MULTI_SYSTEM_PROMPT = """Summarize each news item separately in Ukrainian. Outp
 Items are numbered from 0. Produce exactly one entry per input id. Do NOT merge items.
 
 Per item:
-- summary: Ukrainian, up to 15 words. Start with the key entity (person, org, asset, place). Strong verb. Keep numbers and names. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
+- summary: Ukrainian. Up to 20 words; up to 25 words for events with multiple key details. Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
 - key_phrase: 1-3 words. Priority: person > org > asset > action > location. Generic city only if nothing better. Never: автор, допис, інформація, подія.
 
 Respond ONLY with JSON: {"items": [{"id": 0, "summary": "...", "key_phrase": "..."}]}"""
@@ -198,7 +202,7 @@ async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
     """
     if not items:
         return {}
-    numbered = "\n".join(f"{item['id']}: {item['text'][:400]}" for item in items)
+    numbered = "\n".join(f"{item['id']}: {item['text'][:700]}" for item in items)
     data = await _groq_call(
         messages=[
             {"role": "system", "content": _MULTI_SYSTEM_PROMPT},
@@ -220,17 +224,63 @@ async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
     return out
 
 
-async def group_by_topic(items: list[dict]) -> list[dict]:
+_NO_MERGE_KEYWORDS = ("no merge", "no_merge", "не мерджити", "не об'єднувати", "не объединять", "окремо", "separate")
+
+
+def _wants_no_merge(prompt_extra: str | None) -> bool:
+    if not prompt_extra:
+        return False
+    lower = prompt_extra.lower()
+    return any(kw in lower for kw in _NO_MERGE_KEYWORDS)
+
+
+async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> list[dict]:
     """
     items: list of {"id": int, "text": str}
     Returns: list of {"ids": [int, ...], "summary": str, "key_phrase": str}
     Falls back to one group per item on error.
     """
-    numbered = "\n".join(f"{item['id']}: {item['text'][:400]}" for item in items)
+    all_ids = {item["id"] for item in items}
+
+    if _wants_no_merge(prompt_extra):
+        log.info("group_by_topic: no-merge instruction in prompt_extra, using multi-summarise")
+        numbered = "\n".join(f"{item['id']}: {item['text'][:700]}" for item in items)
+        system = _MULTI_SYSTEM_PROMPT
+        if prompt_extra:
+            system = f"{_MULTI_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
+        data = await _groq_call(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": numbered},
+            ],
+            max_retries=3,
+        )
+        result = []
+        covered: set[int] = set()
+        for row in data.get("items", []):
+            try:
+                rid = int(row["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            covered.add(rid)
+            result.append({
+                "ids": [rid],
+                "summary": row.get("summary", "") or "",
+                "key_phrase": row.get("key_phrase", "") or "",
+            })
+        for mid in all_ids - covered:
+            result.append({"ids": [mid], "summary": "", "key_phrase": ""})
+        log.debug("No-merge summarised %d items into %d entries", len(items), len(result))
+        return result
+
+    numbered = "\n".join(f"{item['id']}: {item['text'][:700]}" for item in items)
+    system = _BATCH_SYSTEM_PROMPT
+    if prompt_extra and not _wants_no_merge(prompt_extra):
+        system = f"{_BATCH_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
 
     data = await _groq_call(
         messages=[
-            {"role": "system", "content": _BATCH_SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": numbered},
         ],
         max_retries=3,
@@ -241,12 +291,23 @@ async def group_by_topic(items: list[dict]) -> list[dict]:
         return [{"ids": [item["id"]], "summary": "", "key_phrase": ""} for item in items]
 
     result = []
+    covered_ids: set[int] = set()
     for g in groups:
+        ids = [int(i) for i in g["ids"]]
+        for i in ids:
+            covered_ids.add(i)
         result.append({
-            "ids": [int(i) for i in g["ids"]],
+            "ids": ids,
             "summary": g.get("summary", ""),
             "key_phrase": g.get("key_phrase", ""),
         })
+
+    missing = all_ids - covered_ids
+    if missing:
+        log.warning("group_by_topic: %d item(s) missing from AI output, adding as singletons: %s", len(missing), missing)
+        for mid in missing:
+            result.append({"ids": [mid], "summary": "", "key_phrase": ""})
+
     log.debug("Grouped %d items into %d groups", len(items), len(result))
     return result
 

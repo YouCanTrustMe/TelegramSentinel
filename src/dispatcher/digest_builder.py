@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_unsent_items, log_digest, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
-from src.processor.classifier import ClassificationResult, classify, group_by_topic, is_quota_dead
+from src.processor.classifier import ClassificationResult, classify, group_by_topic, is_quota_dead, _wants_no_merge
 
 log = logging.getLogger(__name__)
 
@@ -90,35 +90,30 @@ def _format_item(item: dict) -> str:
 _MERGE_MIN_ITEMS = 4
 
 
-async def _merge_source_items(items: list) -> list[dict]:
-    if len(items) < _MERGE_MIN_ITEMS:
-        return [
-            {
-                "summary": item["summary"],
-                "key_phrase": item["key_phrase"] if "key_phrase" in item.keys() else "",
-                "original_url": item["original_url"],
-                "published_at": item["published_at"],
-                "raw_text": item["raw_text"],
-            }
-            for item in items
-        ]
+def _items_as_plain(items: list) -> list[dict]:
+    return [
+        {
+            "summary": item["summary"],
+            "key_phrase": item["key_phrase"] if "key_phrase" in item.keys() else "",
+            "original_url": item["original_url"],
+            "published_at": item["published_at"],
+            "raw_text": item["raw_text"],
+        }
+        for item in items
+    ]
+
+
+async def _merge_source_items(items: list, prompt_extra: str | None = None) -> list[dict]:
+    if len(items) < _MERGE_MIN_ITEMS or _wants_no_merge(prompt_extra):
+        return _items_as_plain(items)
 
     if is_quota_dead():
         log.info("Skipping group_by_topic for source: Groq quota dead, returning items as-is")
-        return [
-            {
-                "summary": item["summary"],
-                "key_phrase": item["key_phrase"] if "key_phrase" in item.keys() else "",
-                "original_url": item["original_url"],
-                "published_at": item["published_at"],
-                "raw_text": item["raw_text"],
-            }
-            for item in items
-        ]
+        return _items_as_plain(items)
 
     raw_inputs = [{"id": i, "text": item["raw_text"] or ""} for i, item in enumerate(items)]
     try:
-        groups = await group_by_topic(raw_inputs)
+        groups = await group_by_topic(raw_inputs, prompt_extra=prompt_extra)
         merged = []
         for g in groups:
             group_items = [items[i] for i in g["ids"]]
@@ -144,16 +139,7 @@ async def _merge_source_items(items: list) -> list[dict]:
         return merged
     except Exception as exc:
         log.warning("Topic merging failed, using original items: %s", exc)
-        return [
-            {
-                "summary": item["summary"],
-                "key_phrase": item["key_phrase"] if "key_phrase" in item.keys() else "",
-                "original_url": item["original_url"],
-                "published_at": item["published_at"],
-                "raw_text": item["raw_text"],
-            }
-            for item in items
-        ]
+        return _items_as_plain(items)
 
 
 def _source_block(source_name: str, source_items: list) -> str:
@@ -347,11 +333,18 @@ async def _send_digest_locked(
         source_name = item["source_name"] or "Unknown"
         cat_meta[cat]["sources"][source_name].append(item)
 
+    source_prompt_extra: dict[str, str | None] = {}
+    for item in items:
+        sname = item["source_name"] or "Unknown"
+        if sname not in source_prompt_extra:
+            keys = item.keys()
+            source_prompt_extra[sname] = item["source_prompt_extra"] if "source_prompt_extra" in keys else None
+
     sources_to_merge = [
         (cat_name, source_name)
         for cat_name, data in cat_meta.items()
         for source_name, source_items in data["sources"].items()
-        if len(source_items) >= _MERGE_MIN_ITEMS
+        if len(source_items) >= _MERGE_MIN_ITEMS and not _wants_no_merge(source_prompt_extra.get(source_name))
     ]
     total = len(sources_to_merge)
     done = 0
@@ -359,7 +352,8 @@ async def _send_digest_locked(
         await _update(f"⏳ {_progress_bar(0, total)} 0/{total}")
     for cat_name, source_name in sources_to_merge:
         cat_meta[cat_name]["sources"][source_name] = await _merge_source_items(
-            cat_meta[cat_name]["sources"][source_name]
+            cat_meta[cat_name]["sources"][source_name],
+            prompt_extra=source_prompt_extra.get(source_name),
         )
         done += 1
         await _update(f"⏳ {_progress_bar(done, total)} {done}/{total} — {source_name}")

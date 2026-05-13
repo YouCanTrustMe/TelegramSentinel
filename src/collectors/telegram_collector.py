@@ -54,6 +54,7 @@ async def _resolve_invite_link(url: str, source_id: int) -> str | None:
 
 
 async def _process_message(chat_ref: str, source: dict, message: Message, parent_msg: "Message | None" = None) -> bool:
+    no_caption = False
     if message.poll:
         poll = message.poll
         opts = ", ".join(opt.text for opt in (poll.options or [])[:4])
@@ -77,17 +78,20 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
 
         raw_text = (media_prefix + caption).strip()
         if not raw_text or raw_text in ("[Photo]", "[Video]", "[GIF]", "[Doc]", "[Audio]", "[Voice]"):
-            return False
+            if not media_prefix:
+                return False
+            raw_text = media_prefix.strip()
+            no_caption = True
+        else:
+            if message.forward_from_chat and message.forward_from_chat.title:
+                fwd_title = message.forward_from_chat.title.strip()
+                if fwd_title:
+                    raw_text = f"[Forwarded from {fwd_title}] {raw_text}"
 
-        if message.forward_from_chat and message.forward_from_chat.title:
-            fwd_title = message.forward_from_chat.title.strip()
-            if fwd_title:
-                raw_text = f"[Forwarded from {fwd_title}] {raw_text}"
-
-        if parent_msg is not None:
-            parent_text = (parent_msg.text or parent_msg.caption or "").strip()
-            if parent_text:
-                raw_text = f"[Context: {parent_text[:200].split('\n')[0]}]\n{raw_text}"
+            if parent_msg is not None:
+                parent_text = (parent_msg.text or parent_msg.caption or "").strip()
+                if parent_text:
+                    raw_text = f"[Context: {parent_text[:200].split(chr(10))[0]}]\n{raw_text}"
 
     message_id = make_message_id("telegram", chat_ref, str(message.id))
     if await is_duplicate(message_id):
@@ -102,7 +106,10 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
 
     published_at = message.date.replace(tzinfo=timezone.utc).isoformat() if message.date else None
 
-    if len(raw_text.strip()) < 15:
+    if no_caption:
+        summary = "no text"
+        key_phrase = ""
+    elif len(raw_text.strip()) < 15:
         summary = raw_text.strip()
         key_phrase = ""
     else:

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -11,6 +12,13 @@ from src.config import settings
 log = logging.getLogger(__name__)
 
 _client = AsyncGroq(api_key=settings.groq_api_key)
+
+_MEDIA_PREFIX_RE = re.compile(r"^\[(?:Photo|Video|Audio|Document|Sticker|GIF|Animation)\]\s*", re.IGNORECASE)
+_TRIVIAL_MAX_LEN = 60
+
+
+def _strip_media_prefix(text: str) -> str:
+    return _MEDIA_PREFIX_RE.sub("", text).strip()
 
 _RATE = 25.0 / 60.0
 _CAPACITY = 3.0
@@ -175,6 +183,11 @@ async def _groq_call(messages: list[dict], max_retries: int) -> dict:
 
 
 async def classify(text: str, prompt_extra: str | None = None, max_retries: int = 5) -> ClassificationResult:
+    stripped = _strip_media_prefix(text)
+    if len(stripped) < _TRIVIAL_MAX_LEN:
+        log.debug("classify: trivial text (%d chars after strip), using raw as summary", len(stripped))
+        return ClassificationResult(summary=text.strip(), key_phrase="")
+
     system = _SYSTEM_PROMPT
     if prompt_extra:
         system = f"{_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
@@ -339,7 +352,7 @@ async def classify_pending_items(limit: int = 3) -> None:
     short, long_items = [], []
     for item in pending:
         raw = (item["raw_text"] or "").strip()
-        if len(raw) < 15:
+        if len(_strip_media_prefix(raw)) < _TRIVIAL_MAX_LEN:
             short.append((item, raw))
         else:
             long_items.append((item, raw))

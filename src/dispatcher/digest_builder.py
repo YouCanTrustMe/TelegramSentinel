@@ -209,6 +209,19 @@ def _split_into_messages(lines: list[str]) -> list[str]:
     return messages
 
 
+async def _delete_pin_service_message() -> None:
+    try:
+        from src.collectors.telegram_collector import userbot
+        chat_id = settings.telegram_supergroup_id
+        async for msg in userbot.get_chat_history(chat_id, limit=1):
+            if msg.pinned_message is not None:
+                await userbot.delete_messages(chat_id, msg.id)
+                log.info("Deleted pin service message id=%d", msg.id)
+            break
+    except Exception as exc:
+        log.warning("Failed to delete pin service message: %s", exc)
+
+
 async def send_digest(
     categories: list[str] | None = None,
     status_fn: Callable[[str], Awaitable[None]] | None = None,
@@ -289,10 +302,13 @@ async def _send_digest_locked(
 
     blocked_words = await get_blocked_words()
     if blocked_words:
-        blocked_patterns = [
-            re.compile(rf"\b{re.escape(b['word'].lower())}\b", re.UNICODE)
-            for b in blocked_words
-        ]
+        blocked_patterns = []
+        for b in blocked_words:
+            w = b["word"].lower()
+            if w.endswith("*"):
+                blocked_patterns.append(re.compile(rf"\b{re.escape(w[:-1])}", re.UNICODE))
+            else:
+                blocked_patterns.append(re.compile(rf"\b{re.escape(w)}\b", re.UNICODE))
         filtered, blocked_items = [], []
         for item in items:
             text_to_check = ((item["summary"] or "") + " " + (item["raw_text"] or "")).lower()
@@ -411,6 +427,7 @@ async def _send_digest_locked(
             await unpin_message(int(prev_id))
         await pin_message(first_message_id)
         await set_app_setting("pinned_digest_message_id", str(first_message_id))
+        await _delete_pin_service_message()
 
     status = "ok" if failed_count == 0 else "partial"
     total = len(items) + len(blocked_items)

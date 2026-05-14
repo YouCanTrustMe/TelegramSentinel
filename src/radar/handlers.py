@@ -133,5 +133,5 @@ def register_radar_handlers() -> None:
         except Exception:
             log.exception("Radar handler error")
 
-    userbot.on_message(filters.incoming)(_handle)
-    userbot.on_edited_message(filters.incoming)(_handle)
+    userbot.on_message(filters.all)(_handle)
+    userbot.on_edited_message(filters.all)(_handle)

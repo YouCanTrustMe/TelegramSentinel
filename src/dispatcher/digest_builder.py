@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_unsent_items, log_digest, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
-from src.processor.classifier import ClassificationResult, classify, group_by_topic, is_quota_dead, _wants_no_merge
+from src.processor.classifier import ClassificationResult, classify, group_by_topic, is_quota_dead, _wants_no_merge, _wants_no_filter
 
 log = logging.getLogger(__name__)
 
@@ -185,11 +185,12 @@ def _build_digest_text(
 
     if blocked_items:
         lines.append("\n<b>🚫 Filtered</b>")
-        filtered_by_source: dict[str, list] = defaultdict(list)
+        filtered_by_word: dict[str, list] = defaultdict(list)
         for item in blocked_items:
-            filtered_by_source[item["source_name"] or "Unknown"].append(item)
-        for source_name, source_items in filtered_by_source.items():
-            lines.append(_source_block(source_name, source_items))
+            word = item.get("blocked_by") or "?"
+            filtered_by_word[word].append(item)
+        for word, word_items in filtered_by_word.items():
+            lines.append(_source_block(escape(word), word_items))
 
     return lines
 
@@ -213,11 +214,12 @@ async def _delete_pin_service_message() -> None:
     try:
         from src.collectors.telegram_collector import userbot
         chat_id = settings.telegram_supergroup_id
-        async for msg in userbot.get_chat_history(chat_id, limit=1):
+        await asyncio.sleep(2)
+        async for msg in userbot.get_chat_history(chat_id, limit=5):
             if msg.pinned_message is not None:
                 await userbot.delete_messages(chat_id, msg.id)
                 log.info("Deleted pin service message id=%d", msg.id)
-            break
+                return
     except Exception as exc:
         log.warning("Failed to delete pin service message: %s", exc)
 
@@ -311,6 +313,9 @@ async def _send_digest_locked(
                 blocked_patterns.append(re.compile(rf"\b{re.escape(w)}\b", re.UNICODE))
         filtered, blocked_items = [], []
         for item in items:
+            if _wants_no_filter(item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None):
+                filtered.append(item)
+                continue
             text_to_check = ((item["summary"] or "") + " " + (item["raw_text"] or "")).lower()
             matched_word = next(
                 (b["word"] for p, b in zip(blocked_patterns, blocked_words) if p.search(text_to_check)),

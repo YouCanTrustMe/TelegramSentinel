@@ -19,13 +19,17 @@ log = logging.getLogger(__name__)
 
 _my_id: int | None = None
 _seen: set[tuple[int, int]] = set()
+_handler_fired: bool = False
 
 
 def register_radar_handlers() -> None:
 
     async def _handle(client, message) -> None:
         try:
-            global _my_id
+            global _my_id, _handler_fired
+            if not _handler_fired:
+                _handler_fired = True
+                log.info("Radar handler: first update received | chat_id=%s", getattr(getattr(message, 'chat', None), 'id', '?'))
             if _my_id is None:
                 _my_id = (await client.get_me()).id
 
@@ -37,6 +41,9 @@ def register_radar_handlers() -> None:
                 return
 
             chat_id = message.chat.id
+            chat_username = (
+                f"@{message.chat.username.lower()}" if message.chat.username else None
+            )
 
             if (chat_id, message.id) in _seen:
                 return
@@ -54,13 +61,12 @@ def register_radar_handlers() -> None:
                     except ValueError:
                         pass
 
-            chat_username = (
-                f"@{message.chat.username.lower()}" if message.chat.username else None
-            )
             if chat_id not in monitored and (
                 chat_username is None or chat_username not in monitored
             ):
                 return
+
+            log.info("Radar: message in monitored chat | chat=%s id=%d", chat_username or chat_id, message.id)
 
             blacklist = await get_radar_blacklist()
             blacklisted_ids = {row["user_id"] for row in blacklist}

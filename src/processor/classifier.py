@@ -92,7 +92,7 @@ def _signal_quota_dead(seconds: float) -> None:
 
 _SYSTEM_PROMPT = """Summarize news for a Ukrainian digest. Output JSON only.
 
-summary: Ukrainian. Use up to 15 words for simple news; up to 25 words when the event has multiple key details (numbers, names, consequences). Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, з'явилась інформація, відбулась подія, автор, допис, пост, розповідає, пише.
+summary: ALWAYS in Ukrainian (translate from any language if needed). Use up to 15 words for simple news; up to 25 words when the event has multiple key details (numbers, names, consequences). Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, з'явилась інформація, відбулась подія, автор, допис, пост, розповідає, пише.
 
 key_phrase: 1-3 words, best anchor for the link. Priority: person > org > asset ticker > action phrase > location. Use a generic Ukrainian city only if nothing more distinctive exists. Never: автор, допис, інформація, подія, новина.
 
@@ -111,7 +111,7 @@ Examples of correct merges: "Air alert in Kyiv" + "All-clear in Kyiv" = one grou
 Examples of wrong merges: "OPEC raises output" + "Saudi Arabia oil strategy" = separate groups. "Trump raised tariffs" + "EU responds to tariffs" = separate groups.
 
 Per group:
-- summary: Ukrainian. Single item: up to 20 words. Merged (2+ items): up to 30 words — include the key development from each merged item. Start with key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Never start with: повідомляється, стало відомо, автор, допис, пост.
+- summary: ALWAYS in Ukrainian (translate from any language if needed). Single item: up to 20 words. Merged (2+ items): up to 30 words — include the key development from each merged item. Start with key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Never start with: повідомляється, стало відомо, автор, допис, пост.
 - key_phrase: 1-3 words. Priority: person > org > asset > action > location. Never: автор, допис, інформація, подія.
 
 Respond ONLY with JSON: {"groups": [{"ids": [0], "summary": "...", "key_phrase": "..."}]}"""
@@ -121,7 +121,7 @@ _MULTI_SYSTEM_PROMPT = """Summarize each news item separately in Ukrainian. Outp
 Items are numbered from 0. Produce exactly one entry per input id. Do NOT merge items.
 
 Per item:
-- summary: Ukrainian. Up to 20 words; up to 25 words for events with multiple key details. Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
+- summary: ALWAYS in Ukrainian (translate from any language if needed). Up to 20 words; up to 25 words for events with multiple key details. Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
 - key_phrase: 1-3 words. Priority: person > org > asset > action > location. Generic city only if nothing better. Never: автор, допис, інформація, подія.
 
 Respond ONLY with JSON: {"items": [{"id": 0, "summary": "...", "key_phrase": "..."}]}"""
@@ -163,7 +163,8 @@ async def _groq_call(messages: list[dict], max_retries: int) -> dict:
                     response_format={"type": "json_object"},
                     temperature=0.1,
                 )
-                return json.loads(response.choices[0].message.content)
+                parsed = json.loads(response.choices[0].message.content)
+                return parsed if isinstance(parsed, dict) else {}
             except RateLimitError as exc:
                 retry_after = _extract_retry_after(exc)
                 if retry_after is not None and retry_after >= _QUOTA_DEAD_THRESHOLD:
@@ -238,6 +239,7 @@ async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
 
 
 _NO_MERGE_KEYWORDS = ("no merge", "no_merge", "не мерджити", "не об'єднувати", "не объединять", "окремо", "separate")
+_NO_FILTER_KEYWORDS = ("no filter", "no_filter", "не фільтрувати", "не блокувати", "не фільтр", "bypass filter")
 
 
 def _wants_no_merge(prompt_extra: str | None) -> bool:
@@ -245,6 +247,13 @@ def _wants_no_merge(prompt_extra: str | None) -> bool:
         return False
     lower = prompt_extra.lower()
     return any(kw in lower for kw in _NO_MERGE_KEYWORDS)
+
+
+def _wants_no_filter(prompt_extra: str | None) -> bool:
+    if not prompt_extra:
+        return False
+    lower = prompt_extra.lower()
+    return any(kw in lower for kw in _NO_FILTER_KEYWORDS)
 
 
 async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> list[dict]:

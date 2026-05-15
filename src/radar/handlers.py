@@ -13,7 +13,6 @@ from src.db.models import (
     log_radar_alert,
 )
 from src.dispatcher.sender import send_to
-from src.radar.cooldown import is_on_cooldown, set_cooldown
 from src.radar.matcher import match_keywords
 
 log = logging.getLogger(__name__)
@@ -105,19 +104,8 @@ def register_radar_handlers() -> None:
             ts = message.date.strftime("%Y-%m-%d %H:%M") if message.date else "—"
             short_text = text[:500] + ("..." if len(text) > 500 else "")
 
-            firing = []
-            for kw in matched:
-                if is_on_cooldown(kw, chat_id, settings.radar_cooldown_seconds):
-                    log.debug("Radar cooldown: keyword=%s chat_id=%d", kw, chat_id)
-                    continue
-                set_cooldown(kw, chat_id)
-                firing.append(kw)
-
-            if not firing:
-                return
-
-            kw_label = "Keyword" if len(firing) == 1 else "Keywords"
-            kw_str = ", ".join(f"<b>{escape(kw)}</b>" for kw in firing)
+            kw_label = "Keyword" if len(matched) == 1 else "Keywords"
+            kw_str = ", ".join(f"<b>{escape(kw)}</b>" for kw in matched)
             alert_body = (
                 f"🔍 {kw_label}: {kw_str}\n"
                 f"💬 <b>Chat:</b> {escape(chat_title)}\n"
@@ -126,7 +114,7 @@ def register_radar_handlers() -> None:
                 f"<blockquote expandable>{escape(short_text)}</blockquote>"
             )
             await send_to(settings.telegram_admin_id, alert_body)
-            for kw in firing:
+            for kw in matched:
                 await log_radar_alert(
                     kw,
                     chat_ref_str,
@@ -136,7 +124,7 @@ def register_radar_handlers() -> None:
                 )
             log.info(
                 "Radar alert sent: keywords=%s chat=%s author=%s",
-                firing,
+                matched,
                 chat_title,
                 username,
             )

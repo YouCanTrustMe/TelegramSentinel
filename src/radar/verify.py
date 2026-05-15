@@ -48,6 +48,12 @@ async def verify_radar_chats() -> None:
 
         new_ref = f"@{chat.username}" if chat.username else str(chat.id)
         new_title = chat.title or chat.first_name or None
+        try:
+            async for _ in userbot.get_chat_history(chat.id, limit=1):
+                break
+            log.info("Radar verify: peer warmed id=%d ref=%s chat_id=%s", entry_id, new_ref, chat.id)
+        except Exception as exc:
+            log.warning("Radar verify: peer warm failed id=%d ref=%s: %s", entry_id, new_ref, exc)
         if new_ref != ref or stored_id != chat.id:
             log.info(
                 "Radar verify: healed entry id=%d | old_ref=%s new_ref=%s old_id=%s new_id=%s",

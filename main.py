@@ -54,6 +54,12 @@ async def main() -> None:
     await userbot.start()
     log.info("Clients started")
 
+    from src.radar.verify import verify_radar_chats
+    try:
+        await verify_radar_chats()
+    except Exception:
+        log.exception("Startup radar verify failed")
+
     await start_scheduler()
     log.info("Scheduler started")
 

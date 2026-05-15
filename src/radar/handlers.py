@@ -6,6 +6,7 @@ from pyrogram import filters
 from src.collectors.telegram_collector import userbot
 from src.config import settings
 from src.db.models import (
+    get_keyword_ids_for_chat,
     get_radar_blacklist,
     get_radar_chats,
     get_radar_keywords,
@@ -80,7 +81,11 @@ def register_radar_handlers() -> None:
                 return
 
             keywords = await get_radar_keywords()
-            matched = match_keywords(text, [row["keyword"] for row in keywords])
+            linked_kw_ids = await get_keyword_ids_for_chat(matched_chat_row["id"])
+            chat_keywords = [row["keyword"] for row in keywords if row["id"] in linked_kw_ids]
+            if not chat_keywords:
+                return
+            matched = match_keywords(text, chat_keywords)
             if not matched:
                 return
 

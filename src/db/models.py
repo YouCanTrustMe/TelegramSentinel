@@ -497,10 +497,13 @@ async def get_radar_chats() -> list[aiosqlite.Row]:
             return await cur.fetchall()
 
 
-async def add_radar_chat(chat_ref: str, title: str | None) -> bool:
+async def add_radar_chat(chat_ref: str, title: str | None, chat_id: int | None = None) -> bool:
     async with get_db() as db:
         try:
-            await db.execute("INSERT INTO radar_chats (chat_ref, title) VALUES (?, ?)", (chat_ref, title))
+            await db.execute(
+                "INSERT INTO radar_chats (chat_ref, title, chat_id) VALUES (?, ?, ?)",
+                (chat_ref, title, chat_id),
+            )
             await db.commit()
             return True
         except aiosqlite.IntegrityError:
@@ -578,6 +581,78 @@ async def get_recent_radar_alerts(limit: int = 3) -> list[aiosqlite.Row]:
             "SELECT * FROM radar_alert_log ORDER BY id DESC LIMIT ?", (limit,)
         ) as cur:
             return await cur.fetchall()
+
+
+async def link_keyword_chat(keyword_id: int, chat_id: int) -> bool:
+    async with get_db() as db:
+        try:
+            await db.execute(
+                "INSERT INTO radar_keyword_chats (keyword_id, chat_id) VALUES (?, ?)",
+                (keyword_id, chat_id),
+            )
+            await db.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
+
+
+async def unlink_keyword_chat(keyword_id: int, chat_id: int) -> bool:
+    async with get_db() as db:
+        cur = await db.execute(
+            "DELETE FROM radar_keyword_chats WHERE keyword_id = ? AND chat_id = ?",
+            (keyword_id, chat_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_keyword_chat_links() -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT keyword_id, chat_id FROM radar_keyword_chats"
+        ) as cur:
+            return await cur.fetchall()
+
+
+async def get_chats_for_keyword(keyword_id: int) -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT c.* FROM radar_chats c "
+            "JOIN radar_keyword_chats l ON l.chat_id = c.id "
+            "WHERE l.keyword_id = ? ORDER BY c.id",
+            (keyword_id,),
+        ) as cur:
+            return await cur.fetchall()
+
+
+async def get_keyword_ids_for_chat(chat_id: int) -> set[int]:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT keyword_id FROM radar_keyword_chats WHERE chat_id = ?",
+            (chat_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+            return {r["keyword_id"] for r in rows}
+
+
+async def count_links_for_keyword(keyword_id: int) -> int:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT COUNT(*) AS n FROM radar_keyword_chats WHERE keyword_id = ?",
+            (keyword_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row["n"]) if row else 0
+
+
+async def count_links_for_chat(chat_id: int) -> int:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT COUNT(*) AS n FROM radar_keyword_chats WHERE chat_id = ?",
+            (chat_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row["n"]) if row else 0
 
 
 async def reorder_source(source_id: int, cat_name: str, direction: str) -> None:

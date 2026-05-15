@@ -179,6 +179,21 @@ async def update_source_url(source_id: int, url: str) -> None:
         await db.commit()
 
 
+async def increment_source_fail_count(source_id: int) -> int:
+    async with get_db() as db:
+        await db.execute("UPDATE sources SET fail_count = fail_count + 1 WHERE id = ?", (source_id,))
+        await db.commit()
+        async with db.execute("SELECT fail_count FROM sources WHERE id = ?", (source_id,)) as cur:
+            row = await cur.fetchone()
+            return int(row["fail_count"]) if row else 0
+
+
+async def reset_source_fail_count(source_id: int) -> None:
+    async with get_db() as db:
+        await db.execute("UPDATE sources SET fail_count = 0 WHERE id = ?", (source_id,))
+        await db.commit()
+
+
 async def update_source_status(source_id: int, status: str) -> None:
     async with get_db() as db:
         await db.execute("UPDATE sources SET status = ? WHERE id = ?", (status, source_id))
@@ -497,6 +512,25 @@ async def remove_radar_chat(chat_id: int) -> bool:
         cur = await db.execute("DELETE FROM radar_chats WHERE id = ?", (chat_id,))
         await db.commit()
         return cur.rowcount > 0
+
+
+async def update_radar_chat_status(entry_id: int, status: str) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE radar_chats SET status = ?, last_verified_at = datetime('now') WHERE id = ?",
+            (status, entry_id),
+        )
+        await db.commit()
+
+
+async def update_radar_chat_resolved(entry_id: int, chat_id: int, chat_ref: str, title: str | None) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE radar_chats SET chat_id = ?, chat_ref = ?, title = COALESCE(?, title), "
+            "status = 'active', last_verified_at = datetime('now') WHERE id = ?",
+            (chat_id, chat_ref, title, entry_id),
+        )
+        await db.commit()
 
 
 async def get_radar_blacklist() -> list[aiosqlite.Row]:

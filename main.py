@@ -9,6 +9,7 @@ from src.bot.commands import register_commands
 from src.collectors.rss_collector import run_rss_collector
 from src.collectors.telegram_collector import run_telegram_collector, userbot
 from src.db.models import init_db
+from src.dispatcher.admin_alert import AdminAlertLogHandler, set_loop
 from src.dispatcher.sender import bot
 from src.radar.handlers import register_radar_handlers
 from src.scheduler import start_scheduler
@@ -36,6 +37,11 @@ async def main() -> None:
     running_loop = asyncio.get_running_loop()
     bot.dispatcher.loop = running_loop
     userbot.dispatcher.loop = running_loop
+
+    set_loop(running_loop)
+    _admin_handler = AdminAlertLogHandler()
+    _admin_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+    logging.getLogger().addHandler(_admin_handler)
 
     Path("sessions").mkdir(exist_ok=True)
     await init_db()

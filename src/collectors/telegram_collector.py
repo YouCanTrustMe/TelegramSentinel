@@ -3,17 +3,19 @@ import logging
 from datetime import datetime, timezone
 
 from pyrogram import Client, raw as tg_raw
-from pyrogram.errors import ChannelBanned, ChannelInvalid, ChannelPrivate, ChatForbidden, UserBannedInChannel, UserKicked
+from pyrogram.errors import ChannelBanned, ChannelInvalid, ChannelPrivate, ChatForbidden, UserBannedInChannel, UserKicked, UsernameInvalid, UsernameNotOccupied
 from pyrogram.types import Message
 
 from src.config import settings
-from src.db.models import get_active_sources, save_item, set_source_last_message_id, update_source_status, update_source_url
+from src.db.models import get_active_sources, increment_source_fail_count, reset_source_fail_count, save_item, set_source_last_message_id, update_source_status, update_source_url
+from src.dispatcher.admin_alert import admin_alert
 from src.dispatcher.sender import send_to
 from src.processor.deduplicator import is_duplicate, make_message_id
 
 log = logging.getLogger(__name__)
 
 POLL_INTERVAL = 300  # seconds between channel polls
+_INVITE_FAIL_THRESHOLD = 20  # mark source as 'error' after this many consecutive invite-resolve failures
 
 userbot = Client(
     "sessions/sentinel_userbot",
@@ -33,7 +35,25 @@ def _invite_hash(url: str) -> str:
     return url.split("/joinchat/", 1)[1]
 
 
-async def _resolve_invite_link(url: str, source_id: int) -> str | None:
+async def _find_chat_by_title_in_dialogs(name: str) -> int | None:
+    """Fallback: scan userbot dialogs for a channel whose title matches `name` (case-insensitive)."""
+    needle = name.strip().lower()
+    if not needle:
+        return None
+    try:
+        async for dialog in userbot.get_dialogs():
+            chat = dialog.chat
+            if chat is None or not chat.title:
+                continue
+            title = chat.title.strip().lower()
+            if title == needle or needle in title:
+                return chat.id
+    except Exception as exc:
+        log.warning("Dialog scan failed while looking for %r: %s", name, exc)
+    return None
+
+
+async def _resolve_invite_link(url: str, source_id: int, source_name: str) -> str | None:
     try:
         result = await userbot.invoke(
             tg_raw.functions.messages.CheckChatInvite(hash=_invite_hash(url))
@@ -45,11 +65,41 @@ async def _resolve_invite_link(url: str, source_id: int) -> str | None:
             else:
                 pyrogram_id = -chat.id
             await update_source_url(source_id, str(pyrogram_id))
+            await reset_source_fail_count(source_id)
             log.info("Resolved invite link source id=%d → chat_id=%d", source_id, pyrogram_id)
             return str(pyrogram_id)
         log.warning("Invite link not yet joined for source id=%d", source_id)
     except Exception as exc:
-        log.warning("Could not resolve invite link source id=%d: %s", source_id, exc)
+        # Invite hash may be dead (one-time / revoked) but userbot may already be a member.
+        # Try a dialog scan by source name.
+        dialog_id = await _find_chat_by_title_in_dialogs(source_name)
+        if dialog_id is not None:
+            await update_source_url(source_id, str(dialog_id))
+            await reset_source_fail_count(source_id)
+            log.info(
+                "Invite hash dead for source id=%d (%s), but found member chat via dialog title → id=%d",
+                source_id, source_name, dialog_id,
+            )
+            await admin_alert(
+                f"ℹ️ <b>Source self-healed</b>\n"
+                f"<b>{source_name}</b>: invite link expired, but userbot is already a member.\n"
+                f"URL updated to <code>{dialog_id}</code>.",
+                key=f"source_selfheal:{source_id}",
+            )
+            return str(dialog_id)
+        fails = await increment_source_fail_count(source_id)
+        log.warning("Could not resolve invite link source id=%d (fail %d/%d): %s",
+                    source_id, fails, _INVITE_FAIL_THRESHOLD, exc)
+        if fails >= _INVITE_FAIL_THRESHOLD:
+            await update_source_status(source_id, "error")
+            await reset_source_fail_count(source_id)
+            await admin_alert(
+                f"⚠️ <b>Invite link dead</b>\n"
+                f"<b>{source_name}</b> ({url})\n"
+                f"Could not resolve after {fails} attempts and userbot is not a member.\n"
+                f"Status set to <b>error</b>. Replace URL with a fresh invite link.",
+                key=f"invite_dead:{source_id}",
+            )
     return None
 
 
@@ -167,15 +217,25 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
 
         if max_seen_id:
             await set_source_last_message_id(source["id"], max_seen_id)
+    except (UsernameNotOccupied, UsernameInvalid) as exc:
+        log.error("Source '%s' username gone: %s | marking error", source["name"], exc)
+        await update_source_status(source["id"], "error")
+        await admin_alert(
+            f"⚠️ <b>Source username gone</b>\n"
+            f"<b>{source['name']}</b> ({chat_ref}) — username no longer exists.\n"
+            f"Status set to <b>error</b>. Check if the channel was renamed.\n"
+            f"<i>{exc}</i>",
+            key=f"source_username_gone:{source['id']}",
+        )
     except (ChannelInvalid, ChannelPrivate, ChannelBanned, ChatForbidden, UserBannedInChannel, UserKicked) as exc:
         log.error("Source '%s' permanently inaccessible: %s | marking error", source["name"], exc)
         await update_source_status(source["id"], "error")
-        await send_to(
-            settings.telegram_admin_id,
+        await admin_alert(
             f"⚠️ <b>Source error</b>\n"
             f"<b>{source['name']}</b> ({chat_ref}) is no longer accessible.\n"
             f"Status set to <b>error</b>.\n"
             f"<i>{exc}</i>",
+            key=f"source_inaccessible:{source['id']}",
         )
     except Exception as exc:
         log.error("Failed to poll %s: %s", chat_ref, exc)
@@ -197,7 +257,7 @@ async def run_telegram_collector() -> None:
                 }
 
                 if _is_invite_link(chat_ref):
-                    chat_ref = await _resolve_invite_link(chat_ref, row["id"])
+                    chat_ref = await _resolve_invite_link(chat_ref, row["id"], row["name"])
                     if not chat_ref:
                         continue
 

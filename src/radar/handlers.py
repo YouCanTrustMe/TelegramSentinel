@@ -50,20 +50,26 @@ def register_radar_handlers() -> None:
             _seen.add((chat_id, message.id))
 
             chats = await get_radar_chats()
-            monitored: set[str | int] = set()
+            matched_chat_row = None
             for row in chats:
+                row_keys = row.keys()
+                resolved = row["chat_id"] if "chat_id" in row_keys else None
+                if resolved is not None and int(resolved) == chat_id:
+                    matched_chat_row = row
+                    break
                 ref = row["chat_ref"]
-                if ref.startswith("@"):
-                    monitored.add(ref.lower())
-                else:
+                if ref.startswith("@") and chat_username == ref.lower():
+                    matched_chat_row = row
+                    break
+                if not ref.startswith("@"):
                     try:
-                        monitored.add(int(ref))
+                        if int(ref) == chat_id:
+                            matched_chat_row = row
+                            break
                     except ValueError:
                         pass
 
-            if chat_id not in monitored and (
-                chat_username is None or chat_username not in monitored
-            ):
+            if matched_chat_row is None:
                 return
 
             log.info("Radar: message in monitored chat | chat=%s id=%d", chat_username or chat_id, message.id)

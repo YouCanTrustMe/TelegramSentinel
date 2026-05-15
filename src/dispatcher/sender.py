@@ -110,12 +110,13 @@ async def send_reply(chat_id: int, text: str, reply_to_message_id: int | None = 
                 log.error("Bot API sendMessage (reply) failed: %s %s", resp.status, body)
 
 
-async def send_to(chat_id: int, text: str) -> None:
+async def send_to(chat_id: int, text: str, disable_notification: bool = False) -> None:
     payload: dict = {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
+        "disable_notification": disable_notification,
     }
     async with aiohttp.ClientSession() as session:
         async with session.post(f"{_BOT_API}/sendMessage", json=payload) as resp:

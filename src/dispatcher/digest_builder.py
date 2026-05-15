@@ -53,20 +53,22 @@ def _format_item(item: dict) -> str:
             pass
 
     item_keys = item.keys()
-    blocked_by = item["blocked_by"] if "blocked_by" in item_keys else None
-    suffix = f' <i>⚠ {escape(blocked_by)}</i>' if blocked_by else ""
+    suffix = ""
 
     prefix = f"{hour} · " if hour else ""
     key_phrase = ((item["key_phrase"] if "key_phrase" in item_keys else "") or "").strip()
     if url and key_phrase:
         escaped_url = escape(url, quote=True)
-        anchor = escape(key_phrase)
         rest_text = summary_text.strip()
         idx = rest_text.lower().find(key_phrase.lower())
         if idx != -1:
+            end = idx + len(key_phrase)
+            while end < len(rest_text) and re.match(r"\w", rest_text[end], re.UNICODE):
+                end += 1
+            anchor_text = rest_text[idx:end]
             before = escape(rest_text[:idx].rstrip())
-            after = escape(rest_text[idx + len(key_phrase):].lstrip())
-            link = f'<a href="{escaped_url}">{anchor}</a>'
+            after = escape(rest_text[end:].lstrip())
+            link = f'<a href="{escaped_url}">{escape(anchor_text)}</a>'
             parts_text = " ".join(p for p in [before, link, after] if p)
             return f'{prefix}{parts_text}{suffix}'
         words = rest_text.split(" ", 1)

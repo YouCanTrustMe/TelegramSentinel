@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 
 _PAGE_SIZE_CATS = 8
 _PAGE_SIZE_SOURCES = 8
-_PAGE_SIZE_BLOCKED = 10
+_PAGE_SIZE_BLOCKED = 7
 
 
 def _is_rss(url: str) -> bool:

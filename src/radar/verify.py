@@ -1,7 +1,15 @@
 import logging
 from html import escape
 
-from pyrogram.errors import ChannelInvalid, ChannelPrivate, PeerIdInvalid, UsernameInvalid, UsernameNotOccupied
+from pyrogram.enums import ChatMemberStatus
+from pyrogram.errors import (
+    ChannelInvalid,
+    ChannelPrivate,
+    PeerIdInvalid,
+    UserNotParticipant,
+    UsernameInvalid,
+    UsernameNotOccupied,
+)
 
 from src.collectors.telegram_collector import userbot
 from src.db.models import get_radar_chats, update_radar_chat_resolved, update_radar_chat_status
@@ -48,12 +56,32 @@ async def verify_radar_chats() -> None:
 
         new_ref = f"@{chat.username}" if chat.username else str(chat.id)
         new_title = chat.title or chat.first_name or None
+
         try:
-            async for _ in userbot.get_chat_history(chat.id, limit=1):
-                break
-            log.info("Radar verify: peer warmed id=%d ref=%s chat_id=%s", entry_id, new_ref, chat.id)
+            me = await userbot.get_me()
+            member = await userbot.get_chat_member(chat.id, me.id)
+            bad_statuses = {ChatMemberStatus.LEFT, ChatMemberStatus.BANNED, ChatMemberStatus.RESTRICTED}
+            if member.status in bad_statuses:
+                log.warning("Radar verify: not a member id=%d ref=%s status=%s", entry_id, new_ref, member.status)
+                await update_radar_chat_status(entry_id, "error")
+                await admin_alert(
+                    f"⚠️ <b>Radar chat: membership lost</b>\n"
+                    f"<code>{escape(new_ref)}</code> — status <code>{escape(str(member.status))}</code>.",
+                    key=f"radar_chat_left:{entry_id}",
+                )
+                continue
+        except UserNotParticipant:
+            log.warning("Radar verify: not participant id=%d ref=%s (pending invite?)", entry_id, new_ref)
+            await update_radar_chat_status(entry_id, "error")
+            await admin_alert(
+                f"⚠️ <b>Radar chat: not a participant</b>\n"
+                f"<code>{escape(new_ref)}</code> — join request likely still pending approval.",
+                key=f"radar_chat_pending:{entry_id}",
+            )
+            continue
         except Exception as exc:
-            log.warning("Radar verify: peer warm failed id=%d ref=%s: %s", entry_id, new_ref, exc)
+            log.warning("Radar verify: membership probe failed id=%d ref=%s: %s", entry_id, new_ref, exc)
+
         if new_ref != ref or stored_id != chat.id:
             log.info(
                 "Radar verify: healed entry id=%d | old_ref=%s new_ref=%s old_id=%s new_id=%s",
@@ -65,7 +93,18 @@ async def verify_radar_chats() -> None:
                 key=f"radar_chat_updated:{entry_id}",
             )
         await update_radar_chat_resolved(entry_id, chat.id, new_ref, new_title)
+    await refresh_dialogs()
     log.info("Radar verify: done")
+
+
+async def refresh_dialogs() -> None:
+    try:
+        count = 0
+        async for _ in userbot.get_dialogs():
+            count += 1
+        log.info("Radar verify: dialogs refreshed (%d)", count)
+    except Exception as exc:
+        log.warning("Radar verify: dialog refresh failed: %s", exc)
 
 
 def _maybe_int(s: str) -> int | str:

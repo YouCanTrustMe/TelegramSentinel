@@ -498,11 +498,6 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
                 except Exception as exc:
                     log.warning("Radar: could not join chat %s: %s", ref, exc)
                 await add_to_folder(ref, RADAR_FOLDER)
-                try:
-                    from src.radar.verify import refresh_dialogs
-                    await refresh_dialogs()
-                except Exception as exc:
-                    log.warning("Radar: dialog refresh after add failed: %s", exc)
             items = await get_radar_chats()
             if added:
                 log.info("Radar chat added: ref=%s title=%s", ref, title)

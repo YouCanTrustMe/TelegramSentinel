@@ -6,12 +6,12 @@ from pathlib import Path
 from pyrogram import idle
 
 from src.bot.commands import register_commands
+from src.collectors.radar_collector import run_radar_collector
 from src.collectors.rss_collector import run_rss_collector
 from src.collectors.telegram_collector import run_telegram_collector, userbot
 from src.db.models import init_db
 from src.dispatcher.admin_alert import AdminAlertLogHandler, set_loop
 from src.dispatcher.sender import bot
-from src.radar.handlers import register_radar_handlers
 from src.scheduler import start_scheduler
 
 logging.basicConfig(
@@ -48,7 +48,6 @@ async def main() -> None:
     log.info("Database initialized")
 
     register_commands()
-    register_radar_handlers()
 
     await bot.start()
     await userbot.start()
@@ -64,7 +63,7 @@ async def main() -> None:
     log.info("Scheduler started")
 
     _background_tasks: set[asyncio.Task] = set()
-    for coro in (run_rss_collector(), run_telegram_collector()):
+    for coro in (run_rss_collector(), run_telegram_collector(), run_radar_collector()):
         task = asyncio.create_task(coro)
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)

@@ -1,7 +1,6 @@
 import logging
 from html import escape
 
-from pyrogram import raw as tg_raw
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import (
     ChannelInvalid,
@@ -94,48 +93,7 @@ async def verify_radar_chats() -> None:
                 key=f"radar_chat_updated:{entry_id}",
             )
         await update_radar_chat_resolved(entry_id, chat.id, new_ref, new_title)
-    await refresh_dialogs()
     log.info("Radar verify: done")
-
-
-async def refresh_dialogs() -> None:
-    try:
-        count = 0
-        async for _ in userbot.get_dialogs():
-            count += 1
-        log.info("Radar verify: dialogs refreshed (%d)", count)
-    except Exception as exc:
-        log.warning("Radar verify: dialog refresh failed: %s", exc)
-
-    warmed = 0
-    failed = 0
-    for row in await get_radar_chats():
-        keys = row.keys()
-        stored_id = row["chat_id"] if "chat_id" in keys else None
-        target = stored_id if stored_id is not None else (row["chat_ref"] if row["chat_ref"].startswith("@") else _maybe_int(row["chat_ref"]))
-        try:
-            async for _ in userbot.get_chat_history(target, limit=1):
-                break
-            try:
-                await userbot.read_chat_history(target)
-            except Exception as exc:
-                log.debug("Radar wake: read_chat_history failed for %s: %s", target, exc)
-            try:
-                peer = await userbot.resolve_peer(target)
-                if hasattr(peer, "channel_id"):
-                    full = await userbot.invoke(tg_raw.functions.channels.GetFullChannel(channel=peer))
-                    full_chat = getattr(full, "full_chat", None)
-                    notify = getattr(full_chat, "notify_settings", None)
-                    mute_until = getattr(notify, "mute_until", None)
-                    pts = getattr(full_chat, "pts", None)
-                    log.info("Radar wake: chat=%s pts=%s mute_until=%s", target, pts, mute_until)
-            except Exception as exc:
-                log.debug("Radar wake: getFullChannel failed for %s: %s", target, exc)
-            warmed += 1
-        except Exception as exc:
-            failed += 1
-            log.warning("Radar warm-up failed: target=%s err=%s", target, exc)
-    log.info("Radar warm-up: %d chat(s) primed, %d failed", warmed, failed)
 
 
 def _maybe_int(s: str) -> int | str:

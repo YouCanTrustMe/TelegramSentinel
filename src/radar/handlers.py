@@ -142,3 +142,29 @@ def register_radar_handlers() -> None:
 
     userbot.on_message(filters.all)(_handle)
     userbot.on_edited_message(filters.all)(_handle)
+
+    async def _raw(client, update, users, chats) -> None:
+        try:
+            cid = None
+            msg = getattr(update, "message", None)
+            peer = getattr(msg, "peer_id", None) if msg is not None else None
+            if peer is not None:
+                if hasattr(peer, "channel_id") and peer.channel_id is not None:
+                    cid = -1000000000000 - peer.channel_id
+                elif hasattr(peer, "chat_id") and peer.chat_id is not None:
+                    cid = -peer.chat_id
+                elif hasattr(peer, "user_id") and peer.user_id is not None:
+                    cid = peer.user_id
+            if cid is None:
+                channel_id = getattr(update, "channel_id", None)
+                if channel_id is not None:
+                    cid = -1000000000000 - channel_id
+            if cid is None:
+                return
+            monitored = {row["chat_id"] for row in await get_radar_chats() if row["chat_id"] is not None}
+            if cid in monitored:
+                log.info("Radar RAW update: type=%s chat_id=%s", type(update).__name__, cid)
+        except Exception:
+            log.exception("Radar raw handler error")
+
+    userbot.on_raw_update()(_raw)

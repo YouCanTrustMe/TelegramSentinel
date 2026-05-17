@@ -1,6 +1,7 @@
 import logging
 from html import escape
 
+from pyrogram import raw as tg_raw
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import (
     ChannelInvalid,
@@ -115,6 +116,21 @@ async def refresh_dialogs() -> None:
         try:
             async for _ in userbot.get_chat_history(target, limit=1):
                 break
+            try:
+                await userbot.read_chat_history(target)
+            except Exception as exc:
+                log.debug("Radar wake: read_chat_history failed for %s: %s", target, exc)
+            try:
+                peer = await userbot.resolve_peer(target)
+                if hasattr(peer, "channel_id"):
+                    full = await userbot.invoke(tg_raw.functions.channels.GetFullChannel(channel=peer))
+                    full_chat = getattr(full, "full_chat", None)
+                    notify = getattr(full_chat, "notify_settings", None)
+                    mute_until = getattr(notify, "mute_until", None)
+                    pts = getattr(full_chat, "pts", None)
+                    log.info("Radar wake: chat=%s pts=%s mute_until=%s", target, pts, mute_until)
+            except Exception as exc:
+                log.debug("Radar wake: getFullChannel failed for %s: %s", target, exc)
             warmed += 1
         except Exception as exc:
             failed += 1

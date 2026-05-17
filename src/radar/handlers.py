@@ -19,17 +19,25 @@ log = logging.getLogger(__name__)
 
 _my_id: int | None = None
 _seen: set[tuple[int, int]] = set()
-_handler_fired: bool = False
+_seen_chats: set[int] = set()
 
 
 def register_radar_handlers() -> None:
 
     async def _handle(client, message) -> None:
         try:
-            global _my_id, _handler_fired
-            if not _handler_fired:
-                _handler_fired = True
-                log.info("Radar handler: first update received | chat_id=%s", getattr(getattr(message, 'chat', None), 'id', '?'))
+            global _my_id
+            chat_obj = getattr(message, "chat", None)
+            chat_id_for_log = getattr(chat_obj, "id", None)
+            if chat_id_for_log is not None and chat_id_for_log not in _seen_chats:
+                _seen_chats.add(chat_id_for_log)
+                chat_title_for_log = getattr(chat_obj, "title", None) or getattr(chat_obj, "username", None) or "?"
+                log.info(
+                    "Radar handler: first update from chat | chat_id=%s title=%s (total seen=%d)",
+                    chat_id_for_log,
+                    chat_title_for_log,
+                    len(_seen_chats),
+                )
             if _my_id is None:
                 _my_id = (await client.get_me()).id
 

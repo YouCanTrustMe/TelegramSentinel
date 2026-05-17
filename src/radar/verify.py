@@ -106,6 +106,21 @@ async def refresh_dialogs() -> None:
     except Exception as exc:
         log.warning("Radar verify: dialog refresh failed: %s", exc)
 
+    warmed = 0
+    failed = 0
+    for row in await get_radar_chats():
+        keys = row.keys()
+        stored_id = row["chat_id"] if "chat_id" in keys else None
+        target = stored_id if stored_id is not None else (row["chat_ref"] if row["chat_ref"].startswith("@") else _maybe_int(row["chat_ref"]))
+        try:
+            async for _ in userbot.get_chat_history(target, limit=1):
+                break
+            warmed += 1
+        except Exception as exc:
+            failed += 1
+            log.warning("Radar warm-up failed: target=%s err=%s", target, exc)
+    log.info("Radar warm-up: %d chat(s) primed, %d failed", warmed, failed)
+
 
 def _maybe_int(s: str) -> int | str:
     try:

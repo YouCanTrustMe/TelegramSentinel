@@ -179,6 +179,28 @@ async def update_source_url(source_id: int, url: str) -> None:
         await db.commit()
 
 
+async def set_source_chat_id(source_id: int, chat_id: int) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE sources SET chat_id = ? WHERE id = ? AND (chat_id IS NULL OR chat_id != ?)",
+            (chat_id, source_id, chat_id),
+        )
+        await db.commit()
+
+
+async def find_sources_by_chat_id(chat_id: int, exclude_id: int | None = None) -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        if exclude_id is None:
+            async with db.execute(
+                "SELECT * FROM sources WHERE chat_id = ?", (chat_id,)
+            ) as cur:
+                return await cur.fetchall()
+        async with db.execute(
+            "SELECT * FROM sources WHERE chat_id = ? AND id != ?", (chat_id, exclude_id)
+        ) as cur:
+            return await cur.fetchall()
+
+
 async def increment_source_fail_count(source_id: int) -> int:
     async with get_db() as db:
         await db.execute("UPDATE sources SET fail_count = fail_count + 1 WHERE id = ?", (source_id,))

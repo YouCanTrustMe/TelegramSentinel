@@ -7,7 +7,7 @@ from pyrogram.errors import ChannelBanned, ChannelInvalid, ChannelPrivate, ChatF
 from pyrogram.types import Message
 
 from src.config import settings
-from src.db.models import get_active_sources, increment_source_fail_count, reset_source_fail_count, save_item, set_source_last_message_id, update_source_status, update_source_url
+from src.db.models import find_sources_by_chat_id, get_active_sources, increment_source_fail_count, reset_source_fail_count, save_item, set_source_chat_id, set_source_last_message_id, update_source_status, update_source_url
 from src.dispatcher.admin_alert import admin_alert
 from src.dispatcher.sender import send_to
 from src.processor.deduplicator import is_duplicate, make_message_id
@@ -53,6 +53,44 @@ async def _find_chat_by_title_in_dialogs(name: str) -> int | None:
     return None
 
 
+async def resolve_chat_id(url: str) -> int | None:
+    """Resolve a Telegram URL/username/invite link to a numeric pyrogram chat_id, or None if unreachable."""
+    try:
+        if url.lstrip("-").isdigit():
+            return int(url)
+        if _is_invite_link(url):
+            result = await userbot.invoke(
+                tg_raw.functions.messages.CheckChatInvite(hash=_invite_hash(url))
+            )
+            if isinstance(result, tg_raw.types.ChatInviteAlready):
+                chat = result.chat
+                if isinstance(chat, tg_raw.types.Channel):
+                    return int(f"-100{chat.id}")
+                return -chat.id
+            return None
+        chat = await userbot.get_chat(url.lstrip("@"))
+        return chat.id
+    except Exception as exc:
+        log.debug("Could not resolve chat_id for %s: %s", url, exc)
+        return None
+
+
+async def _warn_if_duplicate_chat(source_id: int, source_name: str, chat_id: int) -> None:
+    """Alert admin if another source already points to the same chat_id."""
+    dupes = await find_sources_by_chat_id(chat_id, exclude_id=source_id)
+    if not dupes:
+        return
+    lines = [
+        f"⚠️ <b>Duplicate source detected</b>",
+        f"<b>{source_name}</b> (id={source_id}) resolved to chat_id <code>{chat_id}</code>,",
+        f"which is already used by:",
+    ]
+    for d in dupes:
+        lines.append(f"  • <b>{d['name']}</b> (id={d['id']}, status={d['status']}, url=<code>{d['url']}</code>)")
+    lines.append("Remove one via /sources to stop double-collecting.")
+    await admin_alert("\n".join(lines), key=f"source_dup:{chat_id}")
+
+
 async def _resolve_invite_link(url: str, source_id: int, source_name: str) -> str | None:
     try:
         result = await userbot.invoke(
@@ -65,8 +103,10 @@ async def _resolve_invite_link(url: str, source_id: int, source_name: str) -> st
             else:
                 pyrogram_id = -chat.id
             await update_source_url(source_id, str(pyrogram_id))
+            await set_source_chat_id(source_id, pyrogram_id)
             await reset_source_fail_count(source_id)
             log.info("Resolved invite link source id=%d → chat_id=%d", source_id, pyrogram_id)
+            await _warn_if_duplicate_chat(source_id, source_name, pyrogram_id)
             return str(pyrogram_id)
         log.warning("Invite link not yet joined for source id=%d", source_id)
     except Exception as exc:
@@ -75,6 +115,7 @@ async def _resolve_invite_link(url: str, source_id: int, source_name: str) -> st
         dialog_id = await _find_chat_by_title_in_dialogs(source_name)
         if dialog_id is not None:
             await update_source_url(source_id, str(dialog_id))
+            await set_source_chat_id(source_id, dialog_id)
             await reset_source_fail_count(source_id)
             log.info(
                 "Invite hash dead for source id=%d (%s), but found member chat via dialog title → id=%d",
@@ -86,6 +127,7 @@ async def _resolve_invite_link(url: str, source_id: int, source_name: str) -> st
                 f"URL updated to <code>{dialog_id}</code>.",
                 key=f"source_selfheal:{source_id}",
             )
+            await _warn_if_duplicate_chat(source_id, source_name, dialog_id)
             return str(dialog_id)
         fails = await increment_source_fail_count(source_id)
         log.warning("Could not resolve invite link source id=%d (fail %d/%d): %s",
@@ -198,6 +240,13 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
                 break
             messages.append(message)
 
+        if messages and not source.get("chat_id"):
+            resolved_chat_id = messages[0].chat.id if messages[0].chat else None
+            if resolved_chat_id:
+                await set_source_chat_id(source["id"], resolved_chat_id)
+                source["chat_id"] = resolved_chat_id
+                await _warn_if_duplicate_chat(source["id"], source["name"], resolved_chat_id)
+
         max_seen_id = 0
         seen_group_ids: set = set()
         messages_by_id = {m.id: m for m in messages}
@@ -242,6 +291,19 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
     return saved
 
 
+async def keep_userbot_online() -> None:
+    """Ping Telegram every 4 min so the userbot account shows as online while collectors/radar run."""
+    from pyrogram.raw.functions.account import UpdateStatus
+    log.info("Userbot online keepalive started (interval=240s)")
+    while True:
+        try:
+            await userbot.invoke(UpdateStatus(offline=False))
+            log.debug("Userbot online status refreshed")
+        except Exception as exc:
+            log.warning("Online keepalive ping failed: %s", exc)
+        await asyncio.sleep(240)
+
+
 async def run_telegram_collector() -> None:
     log.info("Telegram collector started (interval=%ds)", POLL_INTERVAL)
     while True:
@@ -254,6 +316,7 @@ async def run_telegram_collector() -> None:
                     "name": row["name"],
                     "category": row["category"],
                     "last_message_id": row["last_message_id"] if "last_message_id" in row.keys() else None,
+                    "chat_id": row["chat_id"] if "chat_id" in row.keys() else None,
                 }
 
                 if _is_invite_link(chat_ref):

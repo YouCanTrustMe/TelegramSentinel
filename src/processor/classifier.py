@@ -90,41 +90,47 @@ def _signal_quota_dead(seconds: float) -> None:
     _tokens = 0.0
     log.warning("Groq quota exhausted: dead for %.0fs (until reset)", seconds)
 
-_SYSTEM_PROMPT = """Summarize news for a Ukrainian digest. Output JSON only.
+_TRANSLATE_RULE = """LANGUAGE RULE — STRICT: summary MUST be in Ukrainian (Cyrillic). If the source text is in English, Croatian, Polish, Czech, Serbian, Russian, German or any other non-Ukrainian language, TRANSLATE it to Ukrainian. Never copy the original language verbatim — even if the language looks similar to Ukrainian (Croatian, Polish, Russian). The only Latin-letter tokens allowed in the summary are proper nouns kept in their original form (Bitcoin, Tesla, Zagreb, BOSQAR INVEST, Trump). All verbs, nouns, adjectives and connectors must be Ukrainian.
+Examples:
+  EN: "Bitcoin price drops 8% after Fed rate hike" → "Bitcoin впав на 8% після рішення ФРС підвищити ставку"
+  HR: "Zagreb Mayor announced measures to regulate alcohol sales" → "Мер Загреба оголосив заходи з регулювання продажу алкоголю"
+  RU: "Президент подписал указ о повышении налогов" → "Президент підписав указ про підвищення податків"
+"""
 
-summary: ALWAYS in Ukrainian (translate from any language if needed). Use up to 15 words for simple news; up to 25 words when the event has multiple key details (numbers, names, consequences). Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, з'явилась інформація, відбулась подія, автор, допис, пост, розповідає, пише.
+_SYSTEM_PROMPT = f"""Summarize news for a Ukrainian digest. Output JSON only.
+
+{_TRANSLATE_RULE}
+summary: up to 15 words for simple news; up to 25 words when the event has multiple key details (numbers, names, consequences). Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, з'явилась інформація, відбулась подія, автор, допис, пост, розповідає, пише.
 
 key_phrase: 1-3 words, best anchor for the link. Priority: person > org > asset ticker > action phrase > location. Use a generic Ukrainian city only if nothing more distinctive exists. Never: автор, допис, інформація, подія, новина.
 
-Example:
-  IN: "Bitcoin price drops 8% after Fed rate hike"
-  OUT: {"summary": "Bitcoin впав на 8% після рішення ФРС підвищити ставку", "key_phrase": "Bitcoin"}
+Respond ONLY with JSON: {{"summary": "...", "key_phrase": "..."}}"""
 
-Respond ONLY with JSON: {"summary": "...", "key_phrase": "..."}"""
-
-_BATCH_SYSTEM_PROMPT = """Group news items from one source by event, then summarize each group in Ukrainian. Output JSON only.
+_BATCH_SYSTEM_PROMPT = f"""Group news items from one source by event, then summarize each group in Ukrainian. Output JSON only.
 
 Items are numbered from 0. Every item MUST appear in exactly one group — no item may be omitted or duplicated.
 
-MERGE RULE: merge ONLY items that describe THE SAME SPECIFIC EVENT with new developments (same attack, same trial, same announcement, same person's statement on same day). Do NOT merge items that are merely about the same topic, person, or organisation if they are different events.
+MERGE RULE: merge ONLY items that describe THE SAME SPECIFIC EVENT with new developments (same attack, same trial, same announcement, same person's statement on same day). Do NOT merge items that are merely about the same topic, person, or organisation if they are different events. WHEN IN DOUBT — KEEP SEPARATE. Never merge more than 3 items into one group; if 4+ items look related, split them into multiple groups of 2-3.
 Examples of correct merges: "Air alert in Kyiv" + "All-clear in Kyiv" = one group. "Zelensky signed decree X" + "Details of decree X released" = one group.
-Examples of wrong merges: "OPEC raises output" + "Saudi Arabia oil strategy" = separate groups. "Trump raised tariffs" + "EU responds to tariffs" = separate groups.
+Examples of wrong merges: "OPEC raises output" + "Saudi Arabia oil strategy" = separate groups. "Trump raised tariffs" + "EU responds to tariffs" = separate groups. Two separate Bitcoin price-action posts on the same day = separate groups (different events even if same asset).
 
+{_TRANSLATE_RULE}
 Per group:
-- summary: ALWAYS in Ukrainian (translate from any language if needed). Single item: up to 20 words. Merged (2+ items): up to 30 words — include the key development from each merged item. Start with key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Never start with: повідомляється, стало відомо, автор, допис, пост.
+- summary: Single item: up to 20 words. Merged (2-3 items): up to 35 words — include the key development from each merged item. Start with key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Never start with: повідомляється, стало відомо, автор, допис, пост.
 - key_phrase: 1-3 words. Priority: person > org > asset > action > location. Never: автор, допис, інформація, подія.
 
-Respond ONLY with JSON: {"groups": [{"ids": [0], "summary": "...", "key_phrase": "..."}]}"""
+Respond ONLY with JSON: {{"groups": [{{"ids": [0], "summary": "...", "key_phrase": "..."}}]}}"""
 
-_MULTI_SYSTEM_PROMPT = """Summarize each news item separately in Ukrainian. Output JSON only.
+_MULTI_SYSTEM_PROMPT = f"""Summarize each news item separately in Ukrainian. Output JSON only.
 
 Items are numbered from 0. Produce exactly one entry per input id. Do NOT merge items.
 
+{_TRANSLATE_RULE}
 Per item:
-- summary: ALWAYS in Ukrainian (translate from any language if needed). Up to 20 words; up to 25 words for events with multiple key details. Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
+- summary: Up to 20 words; up to 25 words for events with multiple key details. Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
 - key_phrase: 1-3 words. Priority: person > org > asset > action > location. Generic city only if nothing better. Never: автор, допис, інформація, подія.
 
-Respond ONLY with JSON: {"items": [{"id": 0, "summary": "...", "key_phrase": "..."}]}"""
+Respond ONLY with JSON: {{"items": [{{"id": 0, "summary": "...", "key_phrase": "..."}}]}}"""
 
 
 @dataclass
@@ -204,6 +210,22 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
         summary=data.get("summary", ""),
         key_phrase=data.get("key_phrase", ""),
     )
+    if result.summary and not _wants_no_translate(prompt_extra) and not _looks_ukrainian(result.summary):
+        log.info("classify: summary not in Ukrainian, retrying with translate-only directive | got=%s", result.summary[:80])
+        retry_data = await _groq_call(
+            messages=[
+                {"role": "system", "content": "Translate the given text into Ukrainian. Return JSON only: {\"summary\": \"...\", \"key_phrase\": \"...\"}. Summary must be Cyrillic Ukrainian, up to 20 words, keep proper nouns and numbers exact. key_phrase: 1-3 words."},
+                {"role": "user", "content": text[:1500]},
+            ],
+            max_retries=2,
+        )
+        new_summary = retry_data.get("summary", "") or ""
+        if new_summary and _looks_ukrainian(new_summary):
+            result = ClassificationResult(
+                summary=new_summary,
+                key_phrase=retry_data.get("key_phrase", "") or result.key_phrase,
+            )
+            log.info("classify: re-translated to Ukrainian | summary=%s", result.summary[:80])
     log.debug("Classified: %s | key=%s", result.summary, result.key_phrase)
     return result
 
@@ -240,6 +262,7 @@ async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
 
 _NO_MERGE_KEYWORDS = ("no merge", "no_merge", "не мерджити", "не об'єднувати", "не объединять", "окремо", "separate")
 _NO_FILTER_KEYWORDS = ("no filter", "no_filter", "не фільтрувати", "не блокувати", "не фільтр", "bypass filter")
+_NO_TRANSLATE_KEYWORDS = ("no translate", "no_translate", "no translation", "без перекладу", "не перекладати", "keep original language")
 
 
 def _wants_no_merge(prompt_extra: str | None) -> bool:
@@ -254,6 +277,24 @@ def _wants_no_filter(prompt_extra: str | None) -> bool:
         return False
     lower = prompt_extra.lower()
     return any(kw in lower for kw in _NO_FILTER_KEYWORDS)
+
+
+def _wants_no_translate(prompt_extra: str | None) -> bool:
+    if not prompt_extra:
+        return False
+    lower = prompt_extra.lower()
+    return any(kw in lower for kw in _NO_TRANSLATE_KEYWORDS)
+
+
+def _looks_ukrainian(summary: str) -> bool:
+    """True if the summary's alphabetic content is mostly Cyrillic (i.e. actually translated)."""
+    if not summary:
+        return True
+    letters = [c for c in summary if c.isalpha()]
+    if len(letters) < 4:
+        return True
+    cyrillic = sum(1 for c in letters if "Ѐ" <= c <= "ӿ")
+    return cyrillic / len(letters) >= 0.4
 
 
 async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> list[dict]:

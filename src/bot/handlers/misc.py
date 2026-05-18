@@ -30,6 +30,14 @@ def _tail_lines(path: Path, n: int, block_size: int = 4096) -> list[str]:
 
 def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
 
+    @bot.on_message(pf.chat(settings.telegram_supergroup_id) & pf.pinned_message)
+    async def delete_pin_service(_, message: Message) -> None:
+        try:
+            await message.delete()
+            log.info("Deleted pin service message id=%d", message.id)
+        except Exception as exc:
+            log.warning("Failed to delete pin service message id=%d: %s", message.id, exc)
+
     @bot.on_callback_query(pf.regex(r"^noop$") & admin_cb)
     async def cb_noop(_, query: CallbackQuery) -> None:
         await query.answer()

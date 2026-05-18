@@ -13,11 +13,12 @@ from src.bot.keyboards import (
 )
 from src.bot.state import _DEFAULT_DIGEST_TIME, _pending
 from src.collectors.folder_manager import add_to_folder, remove_from_folder
-from src.collectors.telegram_collector import userbot
+from src.collectors.telegram_collector import resolve_chat_id, userbot
 from src.db.models import (
     add_category,
     add_source,
     category_exists,
+    find_sources_by_chat_id,
     get_categories,
     get_source,
     place_source_at_bottom,
@@ -25,6 +26,7 @@ from src.db.models import (
     remove_source,
     rename_source,
     reorder_source,
+    set_source_chat_id,
     set_source_pending_msg_id,
     set_source_prompt_extra,
 )
@@ -43,6 +45,7 @@ async def _finalize_add_source(uid: int, cat: str, data: dict, message, reply: b
 
     status = "active"
     extra = ""
+    resolved_chat_id: int | None = None
     if source_type == "telegram":
         raw = url.lstrip("@")
         try:
@@ -59,7 +62,31 @@ async def _finalize_add_source(uid: int, cat: str, data: dict, message, reply: b
                 status = "pending"
                 extra = "\n⏳ Could not join — saved as pending"
 
+        if status == "active":
+            resolved_chat_id = await resolve_chat_id(url)
+            if resolved_chat_id is not None:
+                dupes = await find_sources_by_chat_id(resolved_chat_id)
+                if dupes:
+                    del _pending[uid]
+                    d = dupes[0]
+                    log.warning(
+                        "Refused duplicate add: %s resolves to chat_id=%d, already used by source id=%d (%s)",
+                        url, resolved_chat_id, d["id"], d["name"],
+                    )
+                    text = (
+                        f"⚠️ Already added as <b>{escape(d['name'])}</b> "
+                        f"(category: <b>{d['category']}</b>, status: <b>{d['status']}</b>).\n"
+                        f"Manage it via /sources — nothing added."
+                    )
+                    if reply:
+                        await message.reply(text, reply_markup=ReplyKeyboardRemove())
+                    else:
+                        await message.reply(text)
+                    return
+
     source_id = await add_source(source_type, name, url, cat, status=status)
+    if resolved_chat_id is not None:
+        await set_source_chat_id(source_id, resolved_chat_id)
     if source_type == "rss":
         await place_source_at_bottom(source_id, cat)
 
@@ -239,10 +266,57 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✏️ Edit", callback_data=f"src_prompt_edit:{src_id}")],
+            [InlineKeyboardButton("📋 Templates", callback_data=f"src_prompt_tpl:{src_id}")],
             [InlineKeyboardButton("🗑 Clear", callback_data=f"src_prompt_clear:{src_id}")],
             [InlineKeyboardButton("◀ Back", callback_data=f"src_view:{src_id}")],
         ])
         await query.message.edit_text(text, reply_markup=kb)
+
+    @bot.on_callback_query(pf.regex(r"^src_prompt_tpl:") & admin_cb)
+    async def cb_src_prompt_tpl(_, query: CallbackQuery) -> None:
+        src_id = int(query.data.split(":", 1)[1])
+        s = await get_source(src_id)
+        if not s:
+            await query.answer("Source not found.", show_alert=True)
+            return
+        text = (
+            f"📋 <b>Prompt templates</b>\n\n"
+            f"Source: <b>{escape(s['name'])}</b>\n\n"
+            f"Tap a preset to <b>replace</b> the current prompt:"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚫 No merge", callback_data=f"src_prompt_set:{src_id}:nomerge")],
+            [InlineKeyboardButton("🔓 No blocklist filter", callback_data=f"src_prompt_set:{src_id}:nofilter")],
+            [InlineKeyboardButton("🔢 Keep numbers & names verbatim", callback_data=f"src_prompt_set:{src_id}:verbatim")],
+            [InlineKeyboardButton("🌐 No translation", callback_data=f"src_prompt_set:{src_id}:notranslate")],
+            [InlineKeyboardButton("◀ Back", callback_data=f"src_prompt:{src_id}")],
+        ])
+        await query.message.edit_text(text, reply_markup=kb)
+
+    @bot.on_callback_query(pf.regex(r"^src_prompt_set:") & admin_cb)
+    async def cb_src_prompt_set(_, query: CallbackQuery) -> None:
+        _, src_id_str, tpl = query.data.split(":", 2)
+        src_id = int(src_id_str)
+        presets = {
+            "nomerge": "No merge — keep every item separate, do not combine related items.",
+            "nofilter": "No filter — bypass the blocklist for this source.",
+            "verbatim": "Keep all numbers and proper nouns verbatim. Do not round, abbreviate or rephrase them.",
+            "notranslate": "No translation — keep the summary in the source's original language.",
+        }
+        value = presets.get(tpl)
+        if value is None:
+            await query.answer("Unknown template.", show_alert=True)
+            return
+        await set_source_prompt_extra(src_id, value)
+        log.info("Source prompt template applied: id=%d preset=%s", src_id, tpl)
+        s = await get_source(src_id)
+        await query.message.edit_text(
+            f"✅ Prompt set for <b>{escape(s['name']) if s else str(src_id)}</b>:\n\n"
+            f"<i>{escape(value)}</i>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ Back", callback_data=f"src_view:{src_id}")],
+            ]),
+        )
 
     @bot.on_callback_query(pf.regex(r"^src_prompt_edit:") & admin_cb)
     async def cb_src_prompt_edit(_, query: CallbackQuery) -> None:

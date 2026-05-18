@@ -212,20 +212,6 @@ def _split_into_messages(lines: list[str]) -> list[str]:
     return messages
 
 
-async def _delete_pin_service_message() -> None:
-    try:
-        from src.collectors.telegram_collector import userbot
-        chat_id = settings.telegram_supergroup_id
-        await asyncio.sleep(2)
-        async for msg in userbot.get_chat_history(chat_id, limit=5):
-            if msg.pinned_message is not None:
-                await userbot.delete_messages(chat_id, msg.id)
-                log.info("Deleted pin service message id=%d", msg.id)
-                return
-    except Exception as exc:
-        log.warning("Failed to delete pin service message: %s", exc)
-
-
 async def send_digest(
     categories: list[str] | None = None,
     status_fn: Callable[[str], Awaitable[None]] | None = None,
@@ -434,7 +420,6 @@ async def _send_digest_locked(
             await unpin_message(int(prev_id))
         await pin_message(first_message_id)
         await set_app_setting("pinned_digest_message_id", str(first_message_id))
-        await _delete_pin_service_message()
 
     status = "ok" if failed_count == 0 else "partial"
     total = len(items) + len(blocked_items)

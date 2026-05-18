@@ -304,31 +304,35 @@ async def keep_userbot_online() -> None:
         await asyncio.sleep(240)
 
 
+async def poll_telegram_once() -> None:
+    try:
+        sources = await get_active_sources(type_="telegram")
+        for row in sources:
+            chat_ref = row["url"].lower() if not row["url"].lstrip("-").isdigit() else row["url"]
+            source = {
+                "id": row["id"],
+                "name": row["name"],
+                "category": row["category"],
+                "last_message_id": row["last_message_id"] if "last_message_id" in row.keys() else None,
+                "chat_id": row["chat_id"] if "chat_id" in row.keys() else None,
+            }
+
+            if _is_invite_link(chat_ref):
+                chat_ref = await _resolve_invite_link(chat_ref, row["id"], row["name"])
+                if not chat_ref:
+                    continue
+
+            saved = await _poll_channel(chat_ref, source)
+            if saved:
+                log.info("Telegram poll %s: %d new items", chat_ref, saved)
+            else:
+                log.debug("Telegram poll %s: 0 new items", chat_ref)
+    except Exception as exc:
+        log.exception("Telegram collector iteration failed: %s", exc)
+
+
 async def run_telegram_collector() -> None:
     log.info("Telegram collector started (interval=%ds)", POLL_INTERVAL)
     while True:
-        try:
-            sources = await get_active_sources(type_="telegram")
-            for row in sources:
-                chat_ref = row["url"].lower() if not row["url"].lstrip("-").isdigit() else row["url"]
-                source = {
-                    "id": row["id"],
-                    "name": row["name"],
-                    "category": row["category"],
-                    "last_message_id": row["last_message_id"] if "last_message_id" in row.keys() else None,
-                    "chat_id": row["chat_id"] if "chat_id" in row.keys() else None,
-                }
-
-                if _is_invite_link(chat_ref):
-                    chat_ref = await _resolve_invite_link(chat_ref, row["id"], row["name"])
-                    if not chat_ref:
-                        continue
-
-                saved = await _poll_channel(chat_ref, source)
-                if saved:
-                    log.info("Telegram poll %s: %d new items", chat_ref, saved)
-                else:
-                    log.debug("Telegram poll %s: 0 new items", chat_ref)
-        except Exception as exc:
-            log.exception("Telegram collector iteration failed: %s", exc)
+        await poll_telegram_once()
         await asyncio.sleep(POLL_INTERVAL)

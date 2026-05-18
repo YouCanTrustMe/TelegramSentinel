@@ -28,11 +28,11 @@ async def rebuild_digest_jobs() -> None:
 
 
 async def _pre_digest_collect() -> None:
-    from src.collectors.rss_collector import run_rss_collector
-    from src.collectors.telegram_collector import run_telegram_collector
+    from src.collectors.rss_collector import poll_rss_once
+    from src.collectors.telegram_collector import poll_telegram_once
 
     log.info("Pre-digest collection started")
-    await asyncio.gather(run_telegram_collector(), run_rss_collector())
+    await asyncio.gather(poll_telegram_once(), poll_rss_once())
     log.info("Pre-digest collection done")
 
 

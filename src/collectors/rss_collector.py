@@ -86,17 +86,21 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
     return saved
 
 
+async def poll_rss_once() -> None:
+    try:
+        sources = await get_active_sources(type_="rss")
+        tasks = [fetch_feed(r["id"], r["name"], r["url"], r["category"], r["prompt_extra"]) for r in sources]
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for source, result in zip(sources, results):
+                if isinstance(result, Exception):
+                    log.error("RSS feed '%s' failed: %s", source["name"], result)
+    except Exception as exc:
+        log.exception("RSS collector iteration failed: %s", exc)
+
+
 async def run_rss_collector() -> None:
     log.info("RSS collector started (interval=%ds)", POLL_INTERVAL)
     while True:
-        try:
-            sources = await get_active_sources(type_="rss")
-            tasks = [fetch_feed(r["id"], r["name"], r["url"], r["category"], r["prompt_extra"]) for r in sources]
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for source, result in zip(sources, results):
-                    if isinstance(result, Exception):
-                        log.error("RSS feed '%s' failed: %s", source["name"], result)
-        except Exception as exc:
-            log.exception("RSS collector iteration failed: %s", exc)
+        await poll_rss_once()
         await asyncio.sleep(POLL_INTERVAL)

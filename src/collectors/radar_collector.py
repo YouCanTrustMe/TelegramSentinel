@@ -48,6 +48,8 @@ async def _poll_chat(row: aiosqlite.Row) -> int:
             await _set_last_seen(row["id"], max_id)
         return 0
 
+    if new_messages:
+        log.debug("Radar: %d new message(s) in chat %s", len(new_messages), chat_id)
     alerts = 0
     for msg in reversed(new_messages):
         try:

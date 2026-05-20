@@ -308,7 +308,11 @@ async def poll_telegram_once() -> None:
     try:
         sources = await get_active_sources(type_="telegram")
         for row in sources:
-            chat_ref = row["url"].lower() if not row["url"].lstrip("-").isdigit() else row["url"]
+            stored_chat_id = row["chat_id"] if "chat_id" in row.keys() else None
+            if stored_chat_id:
+                chat_ref = str(stored_chat_id)
+            else:
+                chat_ref = row["url"].lower() if not row["url"].lstrip("-").isdigit() else row["url"]
             source = {
                 "id": row["id"],
                 "name": row["name"],

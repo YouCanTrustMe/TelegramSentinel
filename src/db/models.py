@@ -312,6 +312,18 @@ async def update_item_classification(item_id: int, summary: str, key_phrase: str
         await db.commit()
 
 
+async def increment_classify_attempts(item_id: int) -> int:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE items SET classify_attempts = classify_attempts + 1 WHERE id = ?",
+            (item_id,),
+        )
+        await db.commit()
+        async with db.execute("SELECT classify_attempts FROM items WHERE id = ?", (item_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+
 async def mark_sent(item_ids: list[int]) -> None:
     async with get_db() as db:
         await db.executemany(

@@ -388,8 +388,11 @@ async def _maybe_send_rate_limit_alert() -> None:
         pass
 
 
+_CLASSIFY_MAX_ATTEMPTS = 3
+
+
 async def classify_pending_items(limit: int = 3) -> None:
-    from src.db.models import get_unsent_items, update_item_classification
+    from src.db.models import get_unsent_items, increment_classify_attempts, update_item_classification
     items = await get_unsent_items()
     pending = [
         item for item in items
@@ -430,5 +433,12 @@ async def classify_pending_items(limit: int = 3) -> None:
             log.info("Background classify: item id=%d | summary=%s", item["id"], result.summary)
             classified += 1
         else:
-            log.debug("Background classify: no result for item id=%d (will retry next pass)", item["id"])
+            attempts = await increment_classify_attempts(item["id"])
+            if attempts >= _CLASSIFY_MAX_ATTEMPTS:
+                raw = (_raw or "").strip()
+                fallback = "⚠️ " + raw[:80].split("\n")[0]
+                await update_item_classification(item["id"], fallback, "")
+                log.info("Background classify: gave up on item id=%d after %d attempts, using fallback", item["id"], attempts)
+            else:
+                log.debug("Background classify: no result for item id=%d (attempt %d/%d)", item["id"], attempts, _CLASSIFY_MAX_ATTEMPTS)
     log.info("Background classify done: %d/%d classified in batch", classified, len(batch))

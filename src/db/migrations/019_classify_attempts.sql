@@ -1,0 +1,1 @@
+ALTER TABLE items ADD COLUMN classify_attempts INTEGER NOT NULL DEFAULT 0;

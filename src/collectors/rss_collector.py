@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import feedparser
 
 from src.config import settings
-from src.db.models import get_active_sources, save_item, update_source_status
+from src.db.models import get_active_sources, get_db, save_item, update_source_status
 from src.dispatcher.sender import send_to
 from src.processor.deduplicator import is_duplicate, make_message_id
 
@@ -20,6 +20,7 @@ def _strip_html(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 POLL_INTERVAL = 900
+_BOOTSTRAP_LIMIT = 10
 
 
 _PERMANENT_HTTP_ERRORS = {404, 410}
@@ -43,7 +44,15 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
         )
         return 0
 
-    for entry in feed.entries:
+    async with get_db() as db:
+        async with db.execute("SELECT COUNT(*) FROM items WHERE source_id = ?", (source_id,)) as cur:
+            row = await cur.fetchone()
+            is_new = row[0] == 0
+
+    entries = feed.entries[:_BOOTSTRAP_LIMIT] if is_new else feed.entries
+    log.info("RSS '%s': %d feed entries (bootstrap=%s)", name, len(entries), is_new)
+
+    for entry in entries:
         entry_url = entry.get("link", "")
         message_id = make_message_id("rss", url, entry_url or entry.get("id", url))
 

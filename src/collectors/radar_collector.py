@@ -4,7 +4,7 @@ import logging
 import aiosqlite
 
 from src.collectors.telegram_collector import userbot
-from src.db.models import get_db, get_radar_chats
+from src.db.models import get_db, get_radar_chats, update_radar_last_message_at
 from src.radar.handlers import process_radar_message
 
 log = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ async def _poll_chat(row: aiosqlite.Row) -> int:
     if last_seen is None:
         if max_id:
             await _set_last_seen(row["id"], max_id)
+            await update_radar_last_message_at(row["id"])
         return 0
 
     if new_messages:
@@ -60,6 +61,8 @@ async def _poll_chat(row: aiosqlite.Row) -> int:
 
     if max_id:
         await _set_last_seen(row["id"], max_id)
+    if new_messages:
+        await update_radar_last_message_at(row["id"])
     return alerts
 
 

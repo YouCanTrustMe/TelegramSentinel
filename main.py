@@ -21,6 +21,9 @@ logging.basicConfig(
 # Temporary: verbose radar diagnostics — remove once channel-message issue is confirmed
 logging.getLogger("src.radar").setLevel(logging.DEBUG)
 logging.getLogger("src.collectors.radar_collector").setLevel(logging.DEBUG)
+# Temporary: merge diagnostics — remove after verifying group_by_topic quality
+logging.getLogger("src.processor.classifier").setLevel(logging.DEBUG)
+logging.getLogger("src.dispatcher.digest_builder").setLevel(logging.DEBUG)
 
 _log_dir = Path("data/logs")
 _log_dir.mkdir(parents=True, exist_ok=True)

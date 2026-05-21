@@ -689,6 +689,48 @@ async def count_links_for_chat(chat_id: int) -> int:
             return int(row["n"]) if row else 0
 
 
+async def get_silent_sources(threshold_hours: int = 120) -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute(
+            """SELECT s.id, s.name, s.type,
+                      MAX(i.processed_at) AS last_item_at,
+                      CAST((julianday('now') - julianday(MAX(i.processed_at))) * 24 AS INTEGER) AS hours_silent
+               FROM sources s
+               LEFT JOIN items i ON i.source_id = s.id
+               WHERE s.status = 'active'
+               GROUP BY s.id
+               HAVING last_item_at IS NULL
+                  OR last_item_at < datetime('now', ?)
+               ORDER BY last_item_at ASC""",
+            (f"-{threshold_hours} hours",),
+        ) as cur:
+            return await cur.fetchall()
+
+
+async def get_silent_radar_chats(threshold_hours: int = 120) -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute(
+            """SELECT id, chat_ref, title, last_message_at,
+                      CAST((julianday('now') - julianday(last_message_at)) * 24 AS INTEGER) AS hours_silent
+               FROM radar_chats
+               WHERE status = 'active'
+                 AND last_message_at IS NOT NULL
+                 AND last_message_at < datetime('now', ?)
+               ORDER BY last_message_at ASC""",
+            (f"-{threshold_hours} hours",),
+        ) as cur:
+            return await cur.fetchall()
+
+
+async def update_radar_last_message_at(entry_id: int) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE radar_chats SET last_message_at = datetime('now') WHERE id = ?",
+            (entry_id,),
+        )
+        await db.commit()
+
+
 async def reorder_source(source_id: int, cat_name: str, direction: str) -> None:
     async with get_db() as db:
         async with db.execute(

@@ -4,7 +4,6 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from src.bot.state import _DEFAULT_DIGEST_TIME
 from src.config import settings
 from src.db.models import activate_source, get_categories, get_pending_sources, set_source_pending_msg_id, update_source_url
 from src.dispatcher.digest_builder import send_digest
@@ -79,6 +78,8 @@ def _parse_times(time_str: str) -> list[tuple[int, int]]:
     result = []
     for t in time_str.split(","):
         t = t.strip()
+        if not t:
+            continue
         try:
             h, m = map(int, t.split(":"))
             result.append((h, m))
@@ -127,8 +128,6 @@ async def _rebuild_jobs() -> None:
         coalesce=True,
     )
 
-    default_times = _parse_times(_DEFAULT_DIGEST_TIME)
-    default_time_set = frozenset(f"{h:02d}:{m:02d}" for h, m in default_times)
     scheduled_pre_collect: set[str] = set()
 
     def _add_pre_collect(h: int, m: int) -> None:
@@ -143,38 +142,26 @@ async def _rebuild_jobs() -> None:
             )
             scheduled_pre_collect.add(job_id)
 
-    for h, m in default_times:
-        time_str = f"{h:02d}:{m:02d}"
+    # One digest job per distinct category time. No catch-all default schedule:
+    # the schedule is driven entirely by each category's digest_time.
+    categories = await get_categories()
+    by_time: dict[str, list[str]] = {}
+    for cat in categories:
+        for h, m in _parse_times(cat["digest_time"]):
+            by_time.setdefault(f"{h:02d}:{m:02d}", []).append(cat["name"])
+
+    # Quiet-sources block goes to the last digest of the day (HH:MM is
+    # zero-padded, so lexical max == chronological latest).
+    last_time = max(by_time) if by_time else None
+
+    for time_str, cat_names in by_time.items():
+        h, m = map(int, time_str.split(":"))
         _scheduler.add_job(
             send_digest,
             CronTrigger(hour=h, minute=m, timezone=settings.digest_timezone),
             id=f"digest_{time_str}",
             replace_existing=True,
-        )
-        _add_pre_collect(h, m)
-
-    # Extra jobs for categories with a custom (non-default) digest time
-    categories = await get_categories()
-    custom: dict[str, list[str]] = {}
-    for cat in categories:
-        cat_time_set = frozenset(x.strip() for x in cat["digest_time"].split(","))
-        if cat_time_set != default_time_set:
-            for time_part in cat_time_set:
-                if time_part not in default_time_set:
-                    custom.setdefault(time_part, []).append(cat["name"])
-
-    for time_str, cat_names in custom.items():
-        try:
-            h, m = map(int, time_str.split(":"))
-        except ValueError:
-            log.warning("Skipping invalid custom digest time: %r", time_str)
-            continue
-        _scheduler.add_job(
-            send_digest,
-            CronTrigger(hour=h, minute=m, timezone=settings.digest_timezone),
-            id=f"digest_{time_str}_cats",
-            replace_existing=True,
-            kwargs={"categories": cat_names},
+            kwargs={"categories": cat_names, "include_quiet": time_str == last_time},
         )
         _add_pre_collect(h, m)
 

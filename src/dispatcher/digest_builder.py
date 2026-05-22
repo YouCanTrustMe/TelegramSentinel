@@ -232,17 +232,19 @@ def _split_into_messages(lines: list[str]) -> list[str]:
 
 async def send_digest(
     categories: list[str] | None = None,
+    include_quiet: bool = False,
     status_fn: Callable[[str], Awaitable[None]] | None = None,
 ) -> bool | None:
     if _digest_lock.locked():
         log.warning("Digest already in progress, skipping duplicate run | filter=%s", categories)
         return None
     async with _digest_lock:
-        return await _send_digest_locked(categories, status_fn)
+        return await _send_digest_locked(categories, include_quiet, status_fn)
 
 
 async def _send_digest_locked(
     categories: list[str] | None = None,
+    include_quiet: bool = False,
     status_fn: Callable[[str], Awaitable[None]] | None = None,
 ) -> bool:
     async def _update(text: str) -> None:
@@ -402,7 +404,7 @@ async def _send_digest_locked(
         filtered_categories=categories,
         all_categories=all_categories,
     )
-    if categories is None:
+    if include_quiet:
         silent_block = await _build_silent_block()
         if silent_block:
             lines.append(silent_block)

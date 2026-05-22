@@ -16,9 +16,22 @@ _client = AsyncGroq(api_key=settings.groq_api_key)
 _MEDIA_PREFIX_RE = re.compile(r"^\[(?:Photo|Video|Audio|Document|Sticker|GIF|Animation)\]\s*", re.IGNORECASE)
 _TRIVIAL_MAX_LEN = 60
 
+# Only the first N chars of a post are fed to the model; longer posts are
+# truncated, so their summary covers just the beginning.
+_SINGLE_INPUT_CAP = 1500
+_BATCH_INPUT_CAP = 700
+_BIG_NEWS_MARK = "…"
+
 
 def _strip_media_prefix(text: str) -> str:
     return _MEDIA_PREFIX_RE.sub("", text).strip()
+
+
+def _mark_big(summary: str, text: str, cap: int) -> str:
+    """Append an ellipsis when the source text was truncated before summarising."""
+    if summary and len(text) > cap and not summary.rstrip().endswith(_BIG_NEWS_MARK):
+        return summary.rstrip() + " " + _BIG_NEWS_MARK
+    return summary
 
 _RATE = 25.0 / 60.0
 _CAPACITY = 3.0
@@ -202,7 +215,7 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
     data = await _groq_call(
         messages=[
             {"role": "system", "content": system},
-            {"role": "user", "content": text[:1500]},
+            {"role": "user", "content": text[:_SINGLE_INPUT_CAP]},
         ],
         max_retries=max_retries,
     )
@@ -215,7 +228,7 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
         retry_data = await _groq_call(
             messages=[
                 {"role": "system", "content": "Translate the given text into Ukrainian. Return JSON only: {\"summary\": \"...\", \"key_phrase\": \"...\"}. Summary must be Cyrillic Ukrainian, up to 20 words, keep proper nouns and numbers exact. key_phrase: 1-3 words."},
-                {"role": "user", "content": text[:1500]},
+                {"role": "user", "content": text[:_SINGLE_INPUT_CAP]},
             ],
             max_retries=2,
         )
@@ -226,6 +239,7 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
                 key_phrase=retry_data.get("key_phrase", "") or result.key_phrase,
             )
             log.info("classify: re-translated to Ukrainian | summary=%s", result.summary[:80])
+    result.summary = _mark_big(result.summary, text, _SINGLE_INPUT_CAP)
     log.debug("Classified: %s | key=%s", result.summary, result.key_phrase)
     return result
 
@@ -238,7 +252,8 @@ async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
     """
     if not items:
         return {}
-    numbered = "\n".join(f"{item['id']}: {item['text'][:700]}" for item in items)
+    text_by_id = {item["id"]: item["text"] or "" for item in items}
+    numbered = "\n".join(f"{item['id']}: {item['text'][:_BATCH_INPUT_CAP]}" for item in items)
     data = await _groq_call(
         messages=[
             {"role": "system", "content": _MULTI_SYSTEM_PROMPT},
@@ -253,7 +268,7 @@ async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
         except (KeyError, TypeError, ValueError):
             continue
         out[rid] = ClassificationResult(
-            summary=row.get("summary", "") or "",
+            summary=_mark_big(row.get("summary", "") or "", text_by_id.get(rid, ""), _BATCH_INPUT_CAP),
             key_phrase=row.get("key_phrase", "") or "",
         )
     log.debug("Batch classified %d/%d items", len(out), len(items))
@@ -304,10 +319,11 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
     Falls back to one group per item on error.
     """
     all_ids = {item["id"] for item in items}
+    text_by_id = {item["id"]: item["text"] or "" for item in items}
 
     if _wants_no_merge(prompt_extra):
         log.info("group_by_topic: no-merge instruction in prompt_extra, using multi-summarise")
-        numbered = "\n".join(f"{item['id']}: {item['text'][:700]}" for item in items)
+        numbered = "\n".join(f"{item['id']}: {item['text'][:_BATCH_INPUT_CAP]}" for item in items)
         system = _MULTI_SYSTEM_PROMPT
         if prompt_extra:
             system = f"{_MULTI_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
@@ -328,7 +344,7 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
             covered.add(rid)
             result.append({
                 "ids": [rid],
-                "summary": row.get("summary", "") or "",
+                "summary": _mark_big(row.get("summary", "") or "", text_by_id.get(rid, ""), _BATCH_INPUT_CAP),
                 "key_phrase": row.get("key_phrase", "") or "",
             })
         for mid in all_ids - covered:
@@ -336,7 +352,7 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
         log.debug("No-merge summarised %d items into %d entries", len(items), len(result))
         return result
 
-    numbered = "\n".join(f"{item['id']}: {item['text'][:700]}" for item in items)
+    numbered = "\n".join(f"{item['id']}: {item['text'][:_BATCH_INPUT_CAP]}" for item in items)
     system = _BATCH_SYSTEM_PROMPT
     if prompt_extra and not _wants_no_merge(prompt_extra):
         system = f"{_BATCH_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
@@ -359,9 +375,12 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
         ids = [int(i) for i in g["ids"]]
         for i in ids:
             covered_ids.add(i)
+        summary = g.get("summary", "") or ""
+        if any(len(text_by_id.get(i, "")) > _BATCH_INPUT_CAP for i in ids):
+            summary = _mark_big(summary, "x" * (_BATCH_INPUT_CAP + 1), _BATCH_INPUT_CAP)
         result.append({
             "ids": ids,
-            "summary": g.get("summary", ""),
+            "summary": summary,
             "key_phrase": g.get("key_phrase", ""),
         })
 

@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 
 async def process_radar_message(message, chat_row) -> bool:
-    text = message.text or message.caption or ""
+    text = str(message.text or message.caption or "")
     sender_chat = getattr(message, "sender_chat", None)
     from_user = message.from_user
     auto_fwd = getattr(message, "is_automatic_forward", None)

@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 
 _client = AsyncGroq(api_key=settings.groq_api_key)
 
-_MEDIA_PREFIX_RE = re.compile(r"^\[(?:Photo|Video|Audio|Document|Sticker|GIF|Animation)\]\s*", re.IGNORECASE)
+_MEDIA_PREFIX_RE = re.compile(r"^\[(?:Photo|Video|Video note|Audio|Voice|Doc|Document|Sticker|GIF|Animation|Media)\]\s*", re.IGNORECASE)
 _TRIVIAL_MAX_LEN = 60
 
 # Only the first N chars of a post are fed to the model; longer posts are
@@ -411,53 +411,74 @@ _CLASSIFY_MAX_ATTEMPTS = 3
 
 
 async def classify_pending_items(limit: int = 3) -> None:
-    from src.db.models import get_unsent_items, increment_classify_attempts, update_item_classification
+    from src.db.models import (
+        get_sent_empty_items,
+        get_unsent_items,
+        increment_classify_attempts,
+        update_item_classification,
+    )
+
+    def _split(rows: list) -> tuple[list, list]:
+        short, long_items = [], []
+        for item in rows:
+            raw = (item["raw_text"] or "").strip()
+            target = short if len(_strip_media_prefix(raw)) < _TRIVIAL_MAX_LEN else long_items
+            target.append((item, raw))
+        return short, long_items
+
+    async def _classify_store(batch: list, label: str) -> int:
+        results = await classify_batch([{"id": item["id"], "text": raw} for item, raw in batch])
+        done = 0
+        for item, raw in batch:
+            result = results.get(item["id"])
+            if result and result.summary:
+                await update_item_classification(item["id"], result.summary, result.key_phrase)
+                log.info("%s: item id=%d | summary=%s", label, item["id"], result.summary)
+                done += 1
+            else:
+                attempts = await increment_classify_attempts(item["id"])
+                if attempts >= _CLASSIFY_MAX_ATTEMPTS:
+                    fallback = "⚠️ " + (raw or "")[:80].split("\n")[0]
+                    await update_item_classification(item["id"], fallback, "")
+                    log.info("%s: gave up on item id=%d after %d attempts, using fallback", label, item["id"], attempts)
+                else:
+                    log.debug("%s: no result for item id=%d (attempt %d/%d)", label, item["id"], attempts, _CLASSIFY_MAX_ATTEMPTS)
+        return done
+
     items = await get_unsent_items()
     pending = [
         item for item in items
         if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip()
     ]
-    if not pending:
-        log.debug("Background classify: no pending items with empty summary")
-        return
-
-    short, long_items = [], []
-    for item in pending:
-        raw = (item["raw_text"] or "").strip()
-        if len(_strip_media_prefix(raw)) < _TRIVIAL_MAX_LEN:
-            short.append((item, raw))
-        else:
-            long_items.append((item, raw))
-
+    short, long_items = _split(pending)
     for item, raw in short:
         await update_item_classification(item["id"], raw, "")
-        log.info("Background classify: short text used as summary for item id=%d", item["id"])
+    if short:
+        log.info("Background classify: %d short text(s) used as summary", len(short))
 
-    if not long_items:
-        log.info("Background classify done: %d short / 0 long", len(short))
-        return
     if is_quota_dead():
-        log.info("Background classify: quota dead, skipping %d long items", len(long_items))
+        if long_items:
+            log.info("Background classify: quota dead, skipping %d long items", len(long_items))
         return
 
-    batch = long_items[:limit]
-    log.info("Background classify: %d pending (taking batch of %d, %d short done)", len(long_items), len(batch), len(short))
-    batch_input = [{"id": item["id"], "text": raw} for item, raw in batch]
-    results = await classify_batch(batch_input)
-    classified = 0
-    for item, _raw in batch:
-        result = results.get(item["id"])
-        if result and result.summary:
-            await update_item_classification(item["id"], result.summary, result.key_phrase)
-            log.info("Background classify: item id=%d | summary=%s", item["id"], result.summary)
-            classified += 1
-        else:
-            attempts = await increment_classify_attempts(item["id"])
-            if attempts >= _CLASSIFY_MAX_ATTEMPTS:
-                raw = (_raw or "").strip()
-                fallback = "⚠️ " + raw[:80].split("\n")[0]
-                await update_item_classification(item["id"], fallback, "")
-                log.info("Background classify: gave up on item id=%d after %d attempts, using fallback", item["id"], attempts)
-            else:
-                log.debug("Background classify: no result for item id=%d (attempt %d/%d)", item["id"], attempts, _CLASSIFY_MAX_ATTEMPTS)
-    log.info("Background classify done: %d/%d classified in batch", classified, len(batch))
+    if long_items:
+        batch = long_items[:limit]
+        log.info("Background classify: %d pending long (taking batch of %d, %d short done)", len(long_items), len(batch), len(short))
+        classified = await _classify_store(batch, "Background classify")
+        log.info("Background classify done: %d/%d classified in batch", classified, len(batch))
+        return  # leave backfill for a run when the live queue is clear
+
+    # Live queue empty + quota alive → backfill already-sent items still empty
+    # (e.g. bootstrap residue frozen before classification). Small batch only.
+    backlog = await get_sent_empty_items(limit)
+    if not backlog:
+        log.debug("Background classify: no pending items, nothing to backfill")
+        return
+    bshort, blong = _split(backlog)
+    for item, raw in bshort:
+        await update_item_classification(item["id"], raw, "")
+    if blong:
+        filled = await _classify_store(blong, "Background backfill")
+        log.info("Background backfill: %d/%d sent-empty items re-classified (%d short)", filled, len(blong), len(bshort))
+    elif bshort:
+        log.info("Background backfill: %d short sent-empty items filled", len(bshort))

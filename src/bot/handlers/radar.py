@@ -42,7 +42,7 @@ def _radar_main_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📋 Keywords", callback_data="radar_keywords:0"),
-            InlineKeyboardButton("💬 Chats", callback_data="radar_chats:0"),
+            InlineKeyboardButton("🎯 Watchlist", callback_data="radar_chats:0"),
         ],
         [
             InlineKeyboardButton("🚫 Blacklist", callback_data="radar_blacklist:0"),
@@ -309,7 +309,8 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
         uid = query.from_user.id
         _pending[uid] = {"action": "add_radar_chat", "step": 0, "data": {}}
         await query.message.edit_text(
-            "Send chat_id (integer) or @username:",
+            "Send a chat or channel: @username, chat_id, public t.me link, "
+            "or a private +invite link:",
             reply_markup=_back_kb("radar_chats:0"),
         )
 
@@ -470,33 +471,59 @@ def register_radar_bot_handlers(bot, admin_msg, admin_cb) -> None:
 
         elif action == "add_radar_chat":
             raw = text.strip()
+            invite = None
             if "t.me/" in raw:
                 path = raw.split("t.me/")[1].split("?")[0].rstrip("/")
-                raw = f"@{path}" if not path.startswith("+") else raw
-            if not (raw.startswith("@") or raw.lstrip("-").isdigit()):
-                await message.reply(
-                    "Invalid input. Send @username, chat_id, or t.me/username link:",
-                    reply_markup=_back_kb("radar_chats:0"),
-                )
-                return
+                if path.startswith("+") or path.startswith("joinchat/"):
+                    invite = raw
+                else:
+                    raw = f"@{path}"
+            elif raw.startswith("+"):
+                invite = f"https://t.me/{raw}"
+
             title = None
             resolved_id: int | None = None
-            try:
-                chat = await userbot.get_chat(raw if raw.startswith("@") else int(raw))
-                title = chat.title or chat.first_name or raw
-                resolved_id = chat.id
-                ref = f"@{chat.username}" if chat.username else str(chat.id)
-            except Exception as exc:
-                ref = raw
-                log.warning("Could not resolve radar chat %s: %s", raw, exc)
+            ref = raw
+            if invite:
+                try:
+                    chat = await userbot.join_chat(invite)
+                    title = chat.title or getattr(chat, "first_name", None) or invite
+                    resolved_id = chat.id
+                    ref = str(chat.id)
+                    log.info("Radar: joined private chat via invite link, id=%s", resolved_id)
+                except Exception as exc:
+                    await message.reply(
+                        f"Could not join via invite link: <code>{escape(str(exc))}</code>\n"
+                        "If you are already a member, add it by chat_id instead.",
+                        reply_markup=_back_kb("radar_chats:0"),
+                    )
+                    return
+            else:
+                if not (raw.startswith("@") or raw.lstrip("-").isdigit()):
+                    await message.reply(
+                        "Invalid input. Send @username, chat_id, or a t.me link "
+                        "(public @name or private +invite):",
+                        reply_markup=_back_kb("radar_chats:0"),
+                    )
+                    return
+                try:
+                    chat = await userbot.get_chat(raw if raw.startswith("@") else int(raw))
+                    title = chat.title or chat.first_name or raw
+                    resolved_id = chat.id
+                    ref = f"@{chat.username}" if chat.username else str(chat.id)
+                except Exception as exc:
+                    ref = raw
+                    log.warning("Could not resolve radar chat %s: %s", raw, exc)
+
             added = await add_radar_chat(ref, title, chat_id=resolved_id)
             del _pending[uid]
             if added:
-                try:
-                    await userbot.join_chat(ref if ref.startswith("@") else int(ref))
-                    log.info("Radar: joined chat %s", ref)
-                except Exception as exc:
-                    log.warning("Radar: could not join chat %s: %s", ref, exc)
+                if not invite:
+                    try:
+                        await userbot.join_chat(ref if ref.startswith("@") else int(ref))
+                        log.info("Radar: joined chat %s", ref)
+                    except Exception as exc:
+                        log.warning("Radar: could not join chat %s: %s", ref, exc)
                 await add_to_folder(ref, RADAR_FOLDER)
             items = await get_radar_chats()
             if added:

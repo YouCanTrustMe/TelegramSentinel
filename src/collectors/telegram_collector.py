@@ -159,17 +159,23 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
             media_prefix = "[Video] "
         elif message.animation:
             media_prefix = "[GIF] "
+        elif message.video_note:
+            media_prefix = "[Video note] "
+        elif message.sticker:
+            media_prefix = "[Sticker] "
         elif message.document:
             media_prefix = "[Doc] "
         elif message.audio:
             media_prefix = "[Audio] "
         elif message.voice:
             media_prefix = "[Voice] "
+        elif getattr(message, "media", None) and not message.web_page:
+            media_prefix = "[Media] "
         else:
             media_prefix = ""
 
         raw_text = (media_prefix + caption).strip()
-        if not raw_text or raw_text in ("[Photo]", "[Video]", "[GIF]", "[Doc]", "[Audio]", "[Voice]"):
+        if not raw_text or raw_text in ("[Photo]", "[Video]", "[GIF]", "[Video note]", "[Sticker]", "[Doc]", "[Audio]", "[Voice]", "[Media]"):
             if not media_prefix:
                 return False
             raw_text = media_prefix.strip()

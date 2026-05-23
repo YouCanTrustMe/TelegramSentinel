@@ -303,6 +303,19 @@ async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlit
             return await cur.fetchall()
 
 
+async def get_sent_empty_items(limit: int = 5) -> list[aiosqlite.Row]:
+    async with get_db() as db:
+        async with db.execute(
+            """SELECT * FROM items
+               WHERE sent = 1
+                 AND (summary IS NULL OR trim(summary) = '')
+                 AND trim(raw_text) <> ''
+               ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        ) as cur:
+            return await cur.fetchall()
+
+
 async def update_item_classification(item_id: int, summary: str, key_phrase: str) -> None:
     async with get_db() as db:
         await db.execute(

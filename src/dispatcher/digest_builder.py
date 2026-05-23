@@ -19,6 +19,7 @@ _digest_lock = asyncio.Lock()
 _TELEGRAM_LIMIT = 4000
 _MAX_ITEMS_PER_SOURCE = 50
 _MEDIA_EMOJI = {"[Photo]": "📷", "[Video]": "🎬", "[GIF]": "🎞️"}
+_DEFER_MAX_DAYS = 3
 
 
 def _progress_bar(done: int, total: int, width: int = 8) -> str:
@@ -309,6 +310,38 @@ async def _send_digest_locked(
                     else:
                         log.warning("Re-classify gave up on item id=%d, will show as link", item["id"])
                 done += 1
+
+    now = datetime.now(timezone.utc)
+    kept, deferred = [], 0
+    for item in items:
+        if (item["summary"] or "").strip() or not (item["raw_text"] or "").strip():
+            kept.append(item)
+            continue
+        ts = item["processed_at"] or item["published_at"]
+        age_days = None
+        if ts:
+            try:
+                age_days = (now - datetime.fromisoformat(ts)).total_seconds() / 86400
+            except ValueError:
+                age_days = None
+        if age_days is not None and age_days < _DEFER_MAX_DAYS:
+            deferred += 1
+            continue
+        raw = (item["raw_text"] or "").strip()
+        fallback = "⚠️ " + raw[:80].split("\n")[0]
+        await update_item_classification(item["id"], fallback, "")
+        kept.append({**dict(item), "summary": fallback})
+    if deferred:
+        log.info("Deferred %d empty item(s) past digest (younger than %dd), will retry later", deferred, _DEFER_MAX_DAYS)
+    items = kept
+    if not items:
+        log.info("Digest triggered: nothing to send after deferring %d empty item(s) | filter=%s", deferred, categories)
+        if building_msg_id:
+            try:
+                await delete_message(building_msg_id)
+            except Exception:
+                pass
+        return False
 
     blocked_words = await get_blocked_words()
     if blocked_words:

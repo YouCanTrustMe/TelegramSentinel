@@ -1,17 +1,10 @@
-import asyncio
-import json
 import logging
 import re
-import time
 from dataclasses import dataclass, field
 
-from groq import AsyncGroq, RateLimitError
-
-from src.config import settings
+from src.processor.groq_client import groq_json, is_quota_dead
 
 log = logging.getLogger(__name__)
-
-_client = AsyncGroq(api_key=settings.groq_api_key)
 
 _MEDIA_PREFIX_RE = re.compile(r"^\[(?:Photo|Video|Video note|Audio|Voice|Doc|Document|Sticker|GIF|Animation|Media)\]\s*", re.IGNORECASE)
 _TRIVIAL_MAX_LEN = 60
@@ -33,75 +26,6 @@ def _mark_big(summary: str, text: str, cap: int) -> str:
         return summary.rstrip() + " " + _BIG_NEWS_MARK
     return summary
 
-_RATE = 25.0 / 60.0
-_CAPACITY = 3.0
-_tokens: float = _CAPACITY
-_last_refill: float = time.monotonic()
-_call_lock = asyncio.Lock()
-_backoff_until: float = 0.0
-_quota_dead_until: float = 0.0
-_last_alert_time: float = 0.0
-_ALERT_COOLDOWN = 1800.0
-_QUOTA_DEAD_THRESHOLD = 300.0
-
-
-def _signal_backoff(seconds: float = 65.0) -> None:
-    global _backoff_until, _tokens
-    _backoff_until = time.monotonic() + seconds
-    _tokens = 0.0
-    log.warning("Groq rate limit: signalling %gs backoff, bucket drained", seconds)
-
-
-def _parse_reset(value: str | None) -> float | None:
-    """Parse Groq reset header like '2m59.56s', '15s', '1h30m'."""
-    if not value:
-        return None
-    try:
-        total = 0.0
-        num = ""
-        for ch in value.strip():
-            if ch.isdigit() or ch == ".":
-                num += ch
-            elif ch == "h" and num:
-                total += float(num) * 3600
-                num = ""
-            elif ch == "m" and num:
-                total += float(num) * 60
-                num = ""
-            elif ch == "s" and num:
-                total += float(num)
-                num = ""
-        if num:
-            total += float(num)
-        return total if total > 0 else None
-    except (ValueError, AttributeError):
-        return None
-
-
-def _extract_retry_after(exc) -> float | None:
-    response = getattr(exc, "response", None)
-    headers = getattr(response, "headers", None) if response is not None else None
-    if not headers:
-        return None
-    candidates = [
-        headers.get("retry-after"),
-        headers.get("x-ratelimit-reset-tokens"),
-        headers.get("x-ratelimit-reset-requests"),
-    ]
-    values = [v for v in (_parse_reset(c) if c else None for c in candidates) if v is not None]
-    return max(values) if values else None
-
-
-def is_quota_dead() -> bool:
-    return _quota_dead_until > time.monotonic()
-
-
-def _signal_quota_dead(seconds: float) -> None:
-    global _quota_dead_until, _backoff_until, _tokens
-    _quota_dead_until = time.monotonic() + seconds
-    _backoff_until = _quota_dead_until
-    _tokens = 0.0
-    log.warning("Groq quota exhausted: dead for %.0fs (until reset)", seconds)
 
 _TRANSLATE_RULE = """LANGUAGE RULE — STRICT: summary MUST be in Ukrainian (Cyrillic). If the source text is in English, Croatian, Polish, Czech, Serbian, Russian, German or any other non-Ukrainian language, TRANSLATE it to Ukrainian. Never copy the original language verbatim — even if the language looks similar to Ukrainian (Croatian, Polish, Russian). The only Latin-letter tokens allowed in the summary are proper nouns kept in their original form (Bitcoin, Tesla, Zagreb, BOSQAR INVEST, Trump). All verbs, nouns, adjectives and connectors must be Ukrainian.
 Examples:
@@ -152,56 +76,6 @@ class ClassificationResult:
     key_phrase: str = field(default="")
 
 
-def _refill_tokens() -> None:
-    global _tokens, _last_refill
-    now = time.monotonic()
-    _tokens = min(_CAPACITY, _tokens + (now - _last_refill) * _RATE)
-    _last_refill = now
-
-
-async def _groq_call(messages: list[dict], max_retries: int) -> dict:
-    global _tokens
-    if is_quota_dead():
-        log.debug("Groq quota dead, short-circuiting call (%.0fs remaining)", _quota_dead_until - time.monotonic())
-        return {}
-    for attempt in range(max_retries):
-        async with _call_lock:
-            now = time.monotonic()
-            if _backoff_until > now:
-                await asyncio.sleep(_backoff_until - now)
-            _refill_tokens()
-            if _tokens < 1.0:
-                wait = (1.0 - _tokens) / _RATE
-                await asyncio.sleep(wait)
-                _refill_tokens()
-            _tokens -= 1.0
-            try:
-                response = await _client.chat.completions.create(
-                    model=settings.groq_model,
-                    messages=messages,
-                    response_format={"type": "json_object"},
-                    temperature=0.1,
-                )
-                parsed = json.loads(response.choices[0].message.content)
-                return parsed if isinstance(parsed, dict) else {}
-            except RateLimitError as exc:
-                retry_after = _extract_retry_after(exc)
-                if retry_after is not None and retry_after >= _QUOTA_DEAD_THRESHOLD:
-                    _signal_quota_dead(retry_after)
-                    await _maybe_send_rate_limit_alert()
-                    return {}
-                _signal_backoff(retry_after if retry_after else 65.0)
-                if attempt < max_retries - 1:
-                    log.warning("Groq rate limit hit, retrying after backoff (attempt %d/%d)", attempt + 1, max_retries)
-                else:
-                    log.warning("Groq rate limit persistent after %d attempts, using fallback", max_retries)
-                    await _maybe_send_rate_limit_alert()
-            except Exception as exc:
-                log.warning("Groq call error: %s", exc)
-                return {}
-    return {}
-
-
 async def classify(text: str, prompt_extra: str | None = None, max_retries: int = 5) -> ClassificationResult:
     stripped = _strip_media_prefix(text)
     if len(stripped) < _TRIVIAL_MAX_LEN:
@@ -212,7 +86,7 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
     if prompt_extra:
         system = f"{_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
 
-    data = await _groq_call(
+    data = await groq_json(
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": text[:_SINGLE_INPUT_CAP]},
@@ -225,7 +99,7 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
     )
     if result.summary and not _wants_no_translate(prompt_extra) and not _looks_ukrainian(result.summary):
         log.info("classify: summary not in Ukrainian, retrying with translate-only directive | got=%s", result.summary[:80])
-        retry_data = await _groq_call(
+        retry_data = await groq_json(
             messages=[
                 {"role": "system", "content": "Translate the given text into Ukrainian. Return JSON only: {\"summary\": \"...\", \"key_phrase\": \"...\"}. Summary must be Cyrillic Ukrainian, up to 20 words, keep proper nouns and numbers exact. key_phrase: 1-3 words."},
                 {"role": "user", "content": text[:_SINGLE_INPUT_CAP]},
@@ -254,7 +128,7 @@ async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
         return {}
     text_by_id = {item["id"]: item["text"] or "" for item in items}
     numbered = "\n".join(f"{item['id']}: {item['text'][:_BATCH_INPUT_CAP]}" for item in items)
-    data = await _groq_call(
+    data = await groq_json(
         messages=[
             {"role": "system", "content": _MULTI_SYSTEM_PROMPT},
             {"role": "user", "content": numbered},
@@ -327,7 +201,7 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
         system = _MULTI_SYSTEM_PROMPT
         if prompt_extra:
             system = f"{_MULTI_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
-        data = await _groq_call(
+        data = await groq_json(
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": numbered},
@@ -357,7 +231,7 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
     if prompt_extra and not _wants_no_merge(prompt_extra):
         system = f"{_BATCH_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
 
-    data = await _groq_call(
+    data = await groq_json(
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": numbered},
@@ -392,19 +266,6 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
 
     log.debug("Grouped %d items into %d groups", len(items), len(result))
     return result
-
-
-async def _maybe_send_rate_limit_alert() -> None:
-    global _last_alert_time
-    now = time.monotonic()
-    if now - _last_alert_time < _ALERT_COOLDOWN:
-        return
-    _last_alert_time = now
-    try:
-        from src.dispatcher.sender import send_alert
-        await send_alert("Groq rate limit exhausted — summaries will fall back to raw text until quota resets")
-    except Exception:
-        pass
 
 
 _CLASSIFY_MAX_ATTEMPTS = 3

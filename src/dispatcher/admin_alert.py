@@ -11,7 +11,7 @@ _THROTTLE_SECONDS = 3600
 _WHITELIST_PREFIXES = (
     "src.collectors.",
     "src.radar.",
-    "src.processor.classifier",
+    "src.processor.",
     "src.dispatcher.",
     "src.scheduler",
 )

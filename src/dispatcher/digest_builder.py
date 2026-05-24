@@ -18,6 +18,9 @@ log = logging.getLogger(__name__)
 
 _digest_lock = asyncio.Lock()
 _TELEGRAM_LIMIT = 4000
+# A blockquote is indivisible once built, so cap it under Telegram's 4096 limit
+# and split a source across several blocks. Counting raw length is conservative.
+_MAX_BLOCK_LEN = 3800
 _MAX_ITEMS_PER_SOURCE = 50
 _MEDIA_EMOJI = {"[Photo]": "📷", "[Video]": "🎬", "[GIF]": "🎞️"}
 _DEFER_MAX_DAYS = 3
@@ -30,6 +33,17 @@ def _progress_bar(done: int, total: int, width: int = 8) -> str:
 
 def _get_tz() -> ZoneInfo:
     return ZoneInfo(settings.digest_timezone)
+
+
+def _ids_of(item) -> list[int]:
+    """Item id(s) a rendered line stands for: merged groups carry the ids they
+    collapsed, un-merged rows carry their own."""
+    keys = item.keys()
+    if "_item_ids" in keys:
+        return list(item["_item_ids"])
+    if "id" in keys:
+        return [item["id"]]
+    return []
 
 
 def _format_item(item: dict) -> str:
@@ -102,6 +116,7 @@ def _items_as_plain(items: list) -> list[dict]:
             "original_url": item["original_url"],
             "published_at": item["published_at"],
             "raw_text": item["raw_text"],
+            "_item_ids": [item["id"]],
         }
         for item in items
     ]
@@ -139,6 +154,7 @@ async def _merge_source_items(items: list, prompt_extra: str | None = None) -> l
                 "original_url": url,
                 "published_at": pub,
                 "raw_text": None,
+                "_item_ids": [gi["id"] for gi in group_items],
             })
         return merged
     except Exception as exc:
@@ -146,13 +162,35 @@ async def _merge_source_items(items: list, prompt_extra: str | None = None) -> l
         return _items_as_plain(items)
 
 
-def _source_block(source_name: str, source_items: list) -> str:
-    item_lines = [_format_item(item) for item in source_items]
-    item_lines = [l for l in item_lines if l]
-    if not item_lines:
-        return ""
+def _source_blocks(source_name: str, source_items: list) -> list[tuple[str, list[int]]]:
+    """Render a source's items into one or more expandable blockquotes, each
+    under _MAX_BLOCK_LEN, paired with the item ids they render."""
+    rendered: list[tuple[str, list[int]]] = []
+    for item in source_items:
+        line = _format_item(item)
+        if line:
+            rendered.append((line, _ids_of(item)))
+    if not rendered:
+        return []
+
     header = f"<b>{escape(source_name)}</b>"
-    return "<blockquote expandable>" + "\n".join([header] + item_lines) + "</blockquote>"
+
+    def _wrap(lines: list[str]) -> str:
+        return "<blockquote expandable>" + "\n".join([header] + lines) + "</blockquote>"
+
+    blocks: list[tuple[str, list[int]]] = []
+    cur_lines: list[str] = []
+    cur_ids: list[int] = []
+    for line, ids in rendered:
+        if cur_lines and len(_wrap(cur_lines + [line])) > _MAX_BLOCK_LEN:
+            blocks.append((_wrap(cur_lines), cur_ids))
+            cur_lines, cur_ids = [line], list(ids)
+        else:
+            cur_lines.append(line)
+            cur_ids = cur_ids + list(ids)
+    if cur_lines:
+        blocks.append((_wrap(cur_lines), cur_ids))
+    return blocks
 
 
 def _build_digest_text(
@@ -161,8 +199,10 @@ def _build_digest_text(
     blocked_items: list | None = None,
     filtered_categories: list[str] | None = None,
     all_categories: list | None = None,
-) -> list[str]:
-    lines = [f"<b>📋 Digest — {date_str}</b>"]
+) -> list[tuple[str, list[int]]]:
+    """Build the digest as (text, item_ids) segments so delivery can be
+    confirmed per message. Headers and already-marked blocked items carry no ids."""
+    segments: list[tuple[str, list[int]]] = [(f"<b>📋 Digest — {date_str}</b>", [])]
     if filtered_categories is not None and all_categories:
         cat_info = {r["name"]: r["emoji"] for r in all_categories}
         tags = " · ".join(
@@ -171,32 +211,32 @@ def _build_digest_text(
             if c in cat_info
         )
         if tags:
-            lines.append(f"<i>{tags}</i>")
+            segments.append((f"<i>{tags}</i>", []))
 
     for cat_name, data in cat_meta.items():
         sources = data["sources"]
         if not any(sources.values()):
             continue
 
-        lines.append(f"\n<b>{data['emoji']} {cat_name.capitalize()}</b>")
+        segments.append((f"\n<b>{data['emoji']} {cat_name.capitalize()}</b>", []))
 
         for source_name, source_items in sources.items():
             if not source_items:
                 continue
-            block = _source_block(source_name, source_items)
-            if block:
-                lines.append(block)
+            for block_text, block_ids in _source_blocks(source_name, source_items):
+                segments.append((block_text, block_ids))
 
     if blocked_items:
-        lines.append("\n<b>🚫 Filtered</b>")
+        segments.append(("\n<b>🚫 Filtered</b>", []))
         filtered_by_word: dict[str, list] = defaultdict(list)
         for item in blocked_items:
             word = item.get("blocked_by") or "?"
             filtered_by_word[word].append(item)
         for word, word_items in filtered_by_word.items():
-            lines.append(_source_block(escape(word), word_items))
+            for block_text, _ in _source_blocks(word, word_items):
+                segments.append((block_text, []))
 
-    return lines
+    return segments
 
 
 async def _build_silent_block() -> str:
@@ -217,18 +257,20 @@ async def _build_silent_block() -> str:
     return "\n".join(lines)
 
 
-def _split_into_messages(lines: list[str]) -> list[str]:
-    messages, current = [], ""
-    for line in lines:
-        candidate = (current + "\n" + line).lstrip("\n")
+def _split_into_messages(segments: list[tuple[str, list[int]]]) -> list[tuple[str, list[int]]]:
+    messages: list[tuple[str, list[int]]] = []
+    cur_text, cur_ids = "", []
+    for text, ids in segments:
+        candidate = (cur_text + "\n" + text).lstrip("\n")
         if len(candidate) > _TELEGRAM_LIMIT:
-            if current:
-                messages.append(current)
-            current = line
+            if cur_text:
+                messages.append((cur_text, cur_ids))
+            cur_text, cur_ids = text, list(ids)
         else:
-            current = candidate
-    if current:
-        messages.append(current)
+            cur_text = candidate
+            cur_ids = cur_ids + list(ids)
+    if cur_text:
+        messages.append((cur_text, cur_ids))
     return messages
 
 
@@ -409,17 +451,17 @@ async def _send_digest_locked(
         for source_name, source_items in data["sources"].items()
         if len(source_items) >= _MERGE_MIN_ITEMS and not _wants_no_merge(source_prompt_extra.get(source_name))
     ]
-    total = len(sources_to_merge)
-    done = 0
-    if total:
-        await _update(f"⏳ {_progress_bar(0, total)} 0/{total}")
+    merge_total = len(sources_to_merge)
+    merge_done = 0
+    if merge_total:
+        await _update(f"⏳ {_progress_bar(0, merge_total)} 0/{merge_total}")
     for cat_name, source_name in sources_to_merge:
         cat_meta[cat_name]["sources"][source_name] = await _merge_source_items(
             cat_meta[cat_name]["sources"][source_name],
             prompt_extra=source_prompt_extra.get(source_name),
         )
-        done += 1
-        await _update(f"⏳ {_progress_bar(done, total)} {done}/{total} — {source_name}")
+        merge_done += 1
+        await _update(f"⏳ {_progress_bar(merge_done, merge_total)} {merge_done}/{merge_total} — {source_name}")
 
     for data in cat_meta.values():
         for source_name, source_items in data["sources"].items():
@@ -431,7 +473,7 @@ async def _send_digest_locked(
                 data["sources"][source_name] = source_items[:_MAX_ITEMS_PER_SOURCE]
 
     date_str = datetime.now(_get_tz()).strftime("%d %B %Y")
-    lines = _build_digest_text(
+    segments = _build_digest_text(
         cat_meta,
         date_str,
         blocked_items=blocked_items,
@@ -441,9 +483,9 @@ async def _send_digest_locked(
     if include_quiet:
         silent_block = await _build_silent_block()
         if silent_block:
-            lines.append(silent_block)
+            segments.append((silent_block, []))
             log.info("Appended quiet-sources block to digest")
-    messages = _split_into_messages(lines)
+    messages = _split_into_messages(segments)
 
     await _update("⏳ Sending...")
     if building_msg_id:
@@ -453,40 +495,45 @@ async def _send_digest_locked(
             pass
         building_msg_id = None
 
-    sent_ids = [item["id"] for item in items]
+    # Mark only items whose message actually reached Telegram; on failure the
+    # rest stay sent=0 for the next digest — no duplicates, no silent loss.
+    total_messages = len(messages)
+    confirmed_ids: list[int] = []
     sent_count = 0
-    failed_count = 0
     first_message_id: int | None = None
-    for msg in messages:
+    for msg_text, msg_ids in messages:
         try:
-            msg_id = await send_message(msg, disable_notification=first_message_id is not None)
+            msg_id = await send_message(msg_text, disable_notification=first_message_id is not None)
             if first_message_id is None:
                 first_message_id = msg_id
+            confirmed_ids.extend(msg_ids)
             sent_count += 1
         except Exception as exc:
-            failed_count = len(messages) - sent_count
+            lost = total_messages - sent_count
             log.error(
-                "Digest send failed at message %d/%d (%d message(s) lost, %d items marked anyway): %s",
-                sent_count + 1, len(messages), failed_count, len(sent_ids), exc,
+                "Digest send failed at message %d/%d (%d message(s) and their items left unsent for retry): %s",
+                sent_count + 1, total_messages, lost, exc,
             )
             break
 
-    await mark_sent(sent_ids)
+    failed = sent_count < total_messages
+    if confirmed_ids:
+        await mark_sent(confirmed_ids)
 
-    if first_message_id and failed_count == 0:
+    if first_message_id and not failed:
         prev_id = await get_app_setting("pinned_digest_message_id")
         if prev_id:
             await unpin_message(int(prev_id))
         await pin_message(first_message_id)
         await set_app_setting("pinned_digest_message_id", str(first_message_id))
 
-    status = "ok" if failed_count == 0 else "partial"
-    total = len(items) + len(blocked_items)
-    await log_digest(total=total, status=status)
+    status = "ok" if not failed else "partial"
+    logged_total = len(items) + len(blocked_items)
+    await log_digest(total=logged_total, status=status)
     log.info(
-        "Digest done: %d items (%d filtered) | %d/%d message(s) sent | filter=%s | status=%s",
-        len(items), len(blocked_items), sent_count, len(messages), categories, status,
+        "Digest done: %d items (%d filtered) | %d/%d message(s) sent | %d items confirmed | filter=%s | status=%s",
+        len(items), len(blocked_items), sent_count, total_messages, len(confirmed_ids), categories, status,
     )
     log.info(format_groq_stats())
     reset_groq_stats()
-    return failed_count == 0
+    return not failed

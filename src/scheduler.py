@@ -12,6 +12,17 @@ log = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
 
+# Nightly prune horizon for sent items; see prune_old_items for the RSS-dedup trade-off.
+_RETENTION_DAYS = 30
+
+
+async def _prune_items_job() -> None:
+    from src.db.models import prune_old_items
+
+    deleted = await prune_old_items(_RETENTION_DAYS)
+    if deleted:
+        log.info("Retention: pruned %d sent item(s) older than %d days", deleted, _RETENTION_DAYS)
+
 
 async def start_scheduler() -> None:
     global _scheduler
@@ -123,6 +134,15 @@ async def _rebuild_jobs() -> None:
         verify_radar_chats,
         CronTrigger(hour=3, minute=30, timezone=settings.digest_timezone),
         id="radar_verify",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    _scheduler.add_job(
+        _prune_items_job,
+        CronTrigger(hour=4, minute=0, timezone=settings.digest_timezone),
+        id="prune_items",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

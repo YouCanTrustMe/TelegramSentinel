@@ -108,3 +108,17 @@ async def log_digest(total: int, status: str = "ok") -> None:
             (total, status),
         )
         await db.commit()
+
+
+async def prune_old_items(retention_days: int) -> int:
+    """Delete already-sent items older than retention_days to bound table
+    growth. Trade-off: RSS dedup relies on these rows (is_seen checks
+    message_id), so an entry a feed still serves past the window can re-surface;
+    Telegram sources are protected by last_message_id instead."""
+    async with get_db() as db:
+        cur = await db.execute(
+            "DELETE FROM items WHERE sent = 1 AND processed_at < datetime('now', ?)",
+            (f"-{retention_days} days",),
+        )
+        await db.commit()
+        return cur.rowcount

@@ -16,6 +16,8 @@ async def get_db():
     async with aiosqlite.connect(settings.database_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA foreign_keys = ON")
+        # collectors + scheduler write concurrently through their own connections
+        await db.execute("PRAGMA busy_timeout = 5000")
         yield db
 
 
@@ -74,6 +76,15 @@ async def _schema_has_migration(db, migration) -> bool:
             ) as cur:
                 if (await cur.fetchone())[0] != 0:
                     return False
+            continue
+        m = re.search(r"CREATE INDEX\s+(?:IF NOT EXISTS\s+)?(\w+)", stmt_up)
+        if m:
+            async with db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
+                (m.group(1).lower(),),
+            ) as cur:
+                if not await cur.fetchone():
+                    return False
     return True
 
 
@@ -81,6 +92,7 @@ async def init_db() -> None:
     Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
     migrations_dir = Path(__file__).parent / "migrations"
     async with aiosqlite.connect(settings.database_path) as db:
+        await db.execute("PRAGMA journal_mode = WAL")
         await db.execute(
             "CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY)"
         )

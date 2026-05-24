@@ -2,6 +2,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from src.config import settings
 from src.processor.groq_client import groq_json, is_quota_dead
 
 log = logging.getLogger(__name__)
@@ -78,8 +79,10 @@ class ClassificationResult:
 
 async def classify(text: str, prompt_extra: str | None = None, max_retries: int = 5) -> ClassificationResult:
     stripped = _strip_media_prefix(text)
-    if len(stripped) < _TRIVIAL_MAX_LEN:
-        log.debug("classify: trivial text (%d chars after strip), using raw as summary", len(stripped))
+    # Short text is its own summary only when it is already Ukrainian (or translation
+    # is disabled); a short non-Ukrainian post still needs the model to translate it.
+    if len(stripped) < _TRIVIAL_MAX_LEN and (_wants_no_translate(prompt_extra) or _looks_ukrainian(stripped)):
+        log.debug("classify: trivial Ukrainian/short text (%d chars after strip), using raw as summary", len(stripped))
         return ClassificationResult(summary=text.strip(), key_phrase="")
 
     system = _SYSTEM_PROMPT
@@ -92,27 +95,15 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
             {"role": "user", "content": text[:_SINGLE_INPUT_CAP]},
         ],
         max_retries=max_retries,
+        model=settings.groq_model_classify,
+        fallback_model=settings.groq_model_fallback,
     )
     result = ClassificationResult(
         summary=data.get("summary", ""),
         key_phrase=data.get("key_phrase", ""),
     )
-    if result.summary and not _wants_no_translate(prompt_extra) and not _looks_ukrainian(result.summary):
-        log.info("classify: summary not in Ukrainian, retrying with translate-only directive | got=%s", result.summary[:80])
-        retry_data = await groq_json(
-            messages=[
-                {"role": "system", "content": "Translate the given text into Ukrainian. Return JSON only: {\"summary\": \"...\", \"key_phrase\": \"...\"}. Summary must be Cyrillic Ukrainian, up to 20 words, keep proper nouns and numbers exact. key_phrase: 1-3 words."},
-                {"role": "user", "content": text[:_SINGLE_INPUT_CAP]},
-            ],
-            max_retries=2,
-        )
-        new_summary = retry_data.get("summary", "") or ""
-        if new_summary and _looks_ukrainian(new_summary):
-            result = ClassificationResult(
-                summary=new_summary,
-                key_phrase=retry_data.get("key_phrase", "") or result.key_phrase,
-            )
-            log.info("classify: re-translated to Ukrainian | summary=%s", result.summary[:80])
+    if not _wants_no_translate(prompt_extra):
+        result.summary, result.key_phrase = await _ensure_ukrainian(result.summary, result.key_phrase)
     result.summary = _mark_big(result.summary, text, _SINGLE_INPUT_CAP)
     log.debug("Classified: %s | key=%s", result.summary, result.key_phrase)
     return result
@@ -134,6 +125,8 @@ async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
             {"role": "user", "content": numbered},
         ],
         max_retries=3,
+        model=settings.groq_model_batch,
+        fallback_model=settings.groq_model_fallback,
     )
     out: dict[int, ClassificationResult] = {}
     for row in data.get("items", []):
@@ -141,9 +134,10 @@ async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
             rid = int(row["id"])
         except (KeyError, TypeError, ValueError):
             continue
+        summary, key_phrase = await _ensure_ukrainian(row.get("summary", "") or "", row.get("key_phrase", "") or "")
         out[rid] = ClassificationResult(
-            summary=_mark_big(row.get("summary", "") or "", text_by_id.get(rid, ""), _BATCH_INPUT_CAP),
-            key_phrase=row.get("key_phrase", "") or "",
+            summary=_mark_big(summary, text_by_id.get(rid, ""), _BATCH_INPUT_CAP),
+            key_phrase=key_phrase,
         )
     log.debug("Batch classified %d/%d items", len(out), len(items))
     return out
@@ -186,6 +180,36 @@ def _looks_ukrainian(summary: str) -> bool:
     return cyrillic / len(letters) >= 0.4
 
 
+_TRANSLATE_ONLY_PROMPT = (
+    "Translate the given text into Ukrainian. Return JSON only: "
+    "{\"summary\": \"...\", \"key_phrase\": \"...\"}. Summary must be Cyrillic Ukrainian, "
+    "up to 20 words, keep proper nouns and numbers exact. key_phrase: 1-3 words."
+)
+
+
+async def _ensure_ukrainian(summary: str, key_phrase: str) -> tuple[str, str]:
+    """If `summary` is not Ukrainian, re-translate it on the reliable batch model.
+    Shared by the single, batch and grouping paths so a non-Ukrainian summary never
+    reaches the digest. Returns the (possibly fixed) summary and key_phrase."""
+    if not summary or _looks_ukrainian(summary):
+        return summary, key_phrase
+    log.info("Summary not in Ukrainian, re-translating | got=%s", summary[:80])
+    data = await groq_json(
+        messages=[
+            {"role": "system", "content": _TRANSLATE_ONLY_PROMPT},
+            {"role": "user", "content": summary},
+        ],
+        max_retries=2,
+        model=settings.groq_model_batch,
+        fallback_model=settings.groq_model_fallback,
+    )
+    new_summary = data.get("summary", "") or ""
+    if new_summary and _looks_ukrainian(new_summary):
+        log.info("Re-translated to Ukrainian | summary=%s", new_summary[:80])
+        return new_summary, (data.get("key_phrase", "") or key_phrase)
+    return summary, key_phrase
+
+
 async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> list[dict]:
     """
     items: list of {"id": int, "text": str}
@@ -194,6 +218,7 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
     """
     all_ids = {item["id"] for item in items}
     text_by_id = {item["id"]: item["text"] or "" for item in items}
+    translate = not _wants_no_translate(prompt_extra)
 
     if _wants_no_merge(prompt_extra):
         log.info("group_by_topic: no-merge instruction in prompt_extra, using multi-summarise")
@@ -207,6 +232,8 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
                 {"role": "user", "content": numbered},
             ],
             max_retries=3,
+            model=settings.groq_model_batch,
+            fallback_model=settings.groq_model_fallback,
         )
         result = []
         covered: set[int] = set()
@@ -216,10 +243,13 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
             except (KeyError, TypeError, ValueError):
                 continue
             covered.add(rid)
+            summary, key_phrase = row.get("summary", "") or "", row.get("key_phrase", "") or ""
+            if translate:
+                summary, key_phrase = await _ensure_ukrainian(summary, key_phrase)
             result.append({
                 "ids": [rid],
-                "summary": _mark_big(row.get("summary", "") or "", text_by_id.get(rid, ""), _BATCH_INPUT_CAP),
-                "key_phrase": row.get("key_phrase", "") or "",
+                "summary": _mark_big(summary, text_by_id.get(rid, ""), _BATCH_INPUT_CAP),
+                "key_phrase": key_phrase,
             })
         for mid in all_ids - covered:
             result.append({"ids": [mid], "summary": "", "key_phrase": ""})
@@ -237,6 +267,8 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
             {"role": "user", "content": numbered},
         ],
         max_retries=3,
+        model=settings.groq_model_batch,
+        fallback_model=settings.groq_model_fallback,
     )
     groups = data.get("groups", [])
     if not groups:
@@ -250,12 +282,15 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
         for i in ids:
             covered_ids.add(i)
         summary = g.get("summary", "") or ""
+        key_phrase = g.get("key_phrase", "") or ""
+        if translate:
+            summary, key_phrase = await _ensure_ukrainian(summary, key_phrase)
         if any(len(text_by_id.get(i, "")) > _BATCH_INPUT_CAP for i in ids):
             summary = _mark_big(summary, "x" * (_BATCH_INPUT_CAP + 1), _BATCH_INPUT_CAP)
         result.append({
             "ids": ids,
             "summary": summary,
-            "key_phrase": g.get("key_phrase", ""),
+            "key_phrase": key_phrase,
         })
 
     missing = all_ids - covered_ids
@@ -317,9 +352,9 @@ async def classify_pending_items(limit: int = 3) -> None:
     if short:
         log.info("Background classify: %d short text(s) used as summary", len(short))
 
-    if is_quota_dead():
+    if is_quota_dead(settings.groq_model_batch) and is_quota_dead(settings.groq_model_fallback):
         if long_items:
-            log.info("Background classify: quota dead, skipping %d long items", len(long_items))
+            log.info("Background classify: batch model and fallback both quota dead, skipping %d long items", len(long_items))
         return
 
     if long_items:

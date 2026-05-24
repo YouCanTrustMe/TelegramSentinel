@@ -12,6 +12,7 @@ from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_radar_chats, get_silent_sources, get_unsent_items, log_digest, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
 from src.processor.classifier import ClassificationResult, classify, group_by_topic, is_quota_dead, _wants_no_merge, _wants_no_filter
+from src.processor.groq_client import format_groq_stats, reset_groq_stats
 
 log = logging.getLogger(__name__)
 
@@ -110,8 +111,8 @@ async def _merge_source_items(items: list, prompt_extra: str | None = None) -> l
     if len(items) < _MERGE_MIN_ITEMS or _wants_no_merge(prompt_extra):
         return _items_as_plain(items)
 
-    if is_quota_dead():
-        log.info("Skipping group_by_topic for source: Groq quota dead, returning items as-is")
+    if is_quota_dead(settings.groq_model_batch) and is_quota_dead(settings.groq_model_fallback):
+        log.info("Skipping group_by_topic for source: batch model and fallback both quota dead, returning items as-is")
         return _items_as_plain(items)
 
     raw_inputs = [{"id": i, "text": item["raw_text"] or ""} for i, item in enumerate(items)]
@@ -281,9 +282,9 @@ async def _send_digest_locked(
         done = 0
         for i, item in enumerate(items):
             if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip():
-                if is_quota_dead():
+                if is_quota_dead(settings.groq_model_classify) and is_quota_dead(settings.groq_model_fallback):
                     remaining = sum(1 for x in items[i:] if not (x["summary"] or "").strip())
-                    log.warning("Re-classify aborted: Groq quota dead, %d items will show as link", remaining)
+                    log.warning("Re-classify aborted: classify model and fallback both quota dead, %d items will show as link", remaining)
                     break
                 elapsed = time.monotonic() - reclassify_start
                 if elapsed > _RECLASSIFY_TIMEOUT:
@@ -486,4 +487,6 @@ async def _send_digest_locked(
         "Digest done: %d items (%d filtered) | %d/%d message(s) sent | filter=%s | status=%s",
         len(items), len(blocked_items), sent_count, len(messages), categories, status,
     )
+    log.info(format_groq_stats())
+    reset_groq_stats()
     return failed_count == 0

@@ -13,7 +13,12 @@ class Settings(BaseSettings):
     telegram_admin_id: int
 
     groq_api_key: str
-    groq_model: str = "llama-3.3-70b-versatile"
+    # single-item summaries (high volume, plain {summary,key_phrase} JSON, no id arrays)
+    groq_model_classify: str = "openai/gpt-oss-120b"
+    # batch summarise + topic grouping (returns id arrays — needs a model that emits them reliably)
+    groq_model_batch: str = "llama-3.3-70b-versatile"
+    # shared safety net: whichever model's daily quota dies, calls fall over to this
+    groq_model_fallback: str = "llama-3.1-8b-instant"
 
     digest_timezone: str = "Europe/Berlin"
 

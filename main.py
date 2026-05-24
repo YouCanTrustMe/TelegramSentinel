@@ -11,7 +11,7 @@ from src.collectors.rss_collector import run_rss_collector
 from src.collectors.telegram_collector import keep_userbot_online, run_telegram_collector, userbot
 from src.db.models import init_db
 from src.dispatcher.admin_alert import AdminAlertLogHandler, set_loop
-from src.dispatcher.sender import bot
+from src.dispatcher.sender import bot, close_session
 from src.scheduler import start_scheduler
 
 logging.basicConfig(
@@ -74,6 +74,7 @@ async def main() -> None:
 
     await bot.stop()
     await userbot.stop()
+    await close_session()
 
 
 if __name__ == "__main__":

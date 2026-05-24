@@ -9,7 +9,6 @@ from pyrogram.types import Message
 from src.config import settings
 from src.db.models import find_sources_by_chat_id, get_active_sources, increment_source_fail_count, reset_source_fail_count, save_item, set_source_chat_id, set_source_last_message_id, update_source_status, update_source_url
 from src.dispatcher.admin_alert import admin_alert
-from src.dispatcher.sender import send_to
 from src.processor.deduplicator import is_duplicate, make_message_id
 
 log = logging.getLogger(__name__)

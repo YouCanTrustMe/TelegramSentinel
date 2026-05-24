@@ -2,19 +2,21 @@ import logging
 from html import escape
 
 from src.config import settings
-from src.db.models import (
-    get_keyword_ids_for_chat,
-    get_radar_blacklist,
-    get_radar_keywords,
-    log_radar_alert,
-)
+from src.db.models import log_radar_alert
 from src.dispatcher.sender import send_to
 from src.radar.matcher import match_keywords
 
 log = logging.getLogger(__name__)
 
 
-async def process_radar_message(message, chat_row) -> bool:
+async def process_radar_message(
+    message,
+    chat_row,
+    *,
+    blacklisted_ids: set[int],
+    keywords: list,
+    linked_kw_ids: set[int],
+) -> bool:
     text = str(message.text or message.caption or "")
     sender_chat = getattr(message, "sender_chat", None)
     from_user = message.from_user
@@ -35,8 +37,6 @@ async def process_radar_message(message, chat_row) -> bool:
         log.debug("Radar: msg=%s skipped — no text/caption", message.id)
         return False
 
-    blacklist = await get_radar_blacklist()
-    blacklisted_ids = {row["user_id"] for row in blacklist}
     silent = bool(
         (from_user and from_user.id in blacklisted_ids)
         or (sender_chat and sender_chat.id in blacklisted_ids)
@@ -49,8 +49,6 @@ async def process_radar_message(message, chat_row) -> bool:
             sender_chat.id if sender_chat else None,
         )
 
-    keywords = await get_radar_keywords()
-    linked_kw_ids = await get_keyword_ids_for_chat(chat_row["id"])
     chat_keywords = [row["keyword"] for row in keywords if row["id"] in linked_kw_ids]
     if not chat_keywords:
         log.debug("Radar: msg=%s skipped — no keywords linked to chat db_id=%s", message.id, chat_row["id"])

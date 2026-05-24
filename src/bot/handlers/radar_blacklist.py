@@ -1,5 +1,6 @@
 """Radar blacklist: list/add/delete handlers plus the blacklist add-flow text
-input. Blacklisted user ids are skipped when matching keywords."""
+input. Messages from blacklisted user ids still match keywords, but their alert
+is delivered silently (disable_notification)."""
 import logging
 from html import escape
 

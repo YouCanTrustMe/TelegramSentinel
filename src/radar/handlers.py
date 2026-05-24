@@ -37,12 +37,17 @@ async def process_radar_message(message, chat_row) -> bool:
 
     blacklist = await get_radar_blacklist()
     blacklisted_ids = {row["user_id"] for row in blacklist}
-    if from_user and from_user.id in blacklisted_ids:
-        log.debug("Radar: msg=%s skipped — from_user %s is blacklisted", message.id, from_user.id)
-        return False
-    if sender_chat and sender_chat.id in blacklisted_ids:
-        log.debug("Radar: msg=%s skipped — sender_chat %s is blacklisted", message.id, sender_chat.id)
-        return False
+    silent = bool(
+        (from_user and from_user.id in blacklisted_ids)
+        or (sender_chat and sender_chat.id in blacklisted_ids)
+    )
+    if silent:
+        log.debug(
+            "Radar: msg=%s from blacklisted sender (from_user=%s sender_chat=%s) — alert will be silent",
+            message.id,
+            from_user.id if from_user else None,
+            sender_chat.id if sender_chat else None,
+        )
 
     keywords = await get_radar_keywords()
     linked_kw_ids = await get_keyword_ids_for_chat(chat_row["id"])
@@ -92,7 +97,7 @@ async def process_radar_message(message, chat_row) -> bool:
         f"🔗 <a href=\"{escape(msg_link, quote=True)}\">Open message</a> · ⏱️ {ts} UTC\n"
         f"<blockquote expandable>{escape(short_text)}</blockquote>"
     )
-    await send_to(settings.telegram_admin_id, alert_body)
+    await send_to(settings.telegram_admin_id, alert_body, disable_notification=silent)
     for kw in matched:
         await log_radar_alert(
             kw,
@@ -102,9 +107,10 @@ async def process_radar_message(message, chat_row) -> bool:
             msg_link,
         )
     log.info(
-        "Radar alert sent: keywords=%s chat=%s author_id=%s",
+        "Radar alert sent: keywords=%s chat=%s author_id=%s silent=%s",
         matched,
         chat_title,
         author_id,
+        silent,
     )
     return True

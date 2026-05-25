@@ -77,6 +77,15 @@ async def _schema_has_migration(db, migration) -> bool:
                 if (await cur.fetchone())[0] != 0:
                     return False
             continue
+        m = re.search(r"ALTER TABLE\s+(\w+)\s+RENAME COLUMN\s+(\w+)\s+TO\s+(\w+)", stmt_up)
+        if m:
+            table, old_col = m.group(1).lower(), m.group(2).lower()
+            async with db.execute(
+                f"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name=?", (old_col,)
+            ) as cur:
+                if (await cur.fetchone())[0] != 0:
+                    return False
+            continue
         m = re.search(r"CREATE INDEX\s+(?:IF NOT EXISTS\s+)?(\w+)", stmt_up)
         if m:
             async with db.execute(

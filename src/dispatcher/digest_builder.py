@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_radar_chats, get_silent_sources, get_unsent_items, log_digest, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
-from src.processor.classifier import ClassificationResult, classify, group_by_topic, is_quota_dead, _wants_no_merge, _wants_no_filter
+from src.processor.classifier import ClassificationResult, classify, check_blocked_filters, group_by_topic, is_quota_dead, _wants_no_merge, _wants_no_filter
 from src.processor.groq_client import format_groq_stats, reset_groq_stats
 
 log = logging.getLogger(__name__)
@@ -386,44 +386,40 @@ async def _send_digest_locked(
                 pass
         return False
 
-    blocked_words = await get_blocked_words()
-    if blocked_words:
-        blocked_patterns = []
-        for b in blocked_words:
-            w = b["word"].lower()
-            if w.endswith("*"):
-                blocked_patterns.append(re.compile(rf"\b{re.escape(w[:-1])}", re.UNICODE))
-            else:
-                blocked_patterns.append(re.compile(rf"\b{re.escape(w)}\b", re.UNICODE))
-        filtered, blocked_items = [], []
-        for item in items:
-            if _wants_no_filter(item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None):
-                filtered.append(item)
-                continue
-            text_to_check = ((item["summary"] or "") + " " + (item["raw_text"] or "")).lower()
-            matched_word = next(
-                (b["word"] for p, b in zip(blocked_patterns, blocked_words) if p.search(text_to_check)),
-                None,
-            )
-            if matched_word is not None:
-                blocked_items.append({**item, "blocked_by": matched_word})
-            else:
-                filtered.append(item)
-        if blocked_items:
-            blocked_ids = [item["id"] for item in blocked_items]
-            await mark_sent(blocked_ids)
-            log.info("Blocked %d item(s) by keyword filter", len(blocked_ids))
-        items = filtered
-        if not items and not blocked_items:
-            log.info("Digest triggered: all items filtered by blocked words | filter=%s", categories)
+    filter_rules_rows = await get_blocked_words()
+    blocked_items = []
+    if filter_rules_rows:
+        filterable = [
+            item for item in items
+            if not _wants_no_filter(item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None)
+        ]
+        no_filter = [
+            item for item in items
+            if _wants_no_filter(item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None)
+        ]
+        rules = [r["rule"] for r in filter_rules_rows]
+        check_input = [
+            {"id": item["id"], "text": (item["summary"] or "") + " " + (item["raw_text"] or "")}
+            for item in filterable
+        ]
+        blocked_map = await check_blocked_filters(check_input, rules)
+        if blocked_map:
+            for item in filterable:
+                matched_rule = blocked_map.get(item["id"])
+                if matched_rule is not None:
+                    blocked_items.append({**item, "blocked_by": matched_rule})
+                    log.info("Blocked item id=%d | rule=%r | summary=%s", item["id"], matched_rule, (item["summary"] or "")[:80])
+            await mark_sent([item["id"] for item in blocked_items])
+            log.info("Blocked %d item(s) by semantic filter", len(blocked_items))
+        items = no_filter + [item for item in filterable if item["id"] not in blocked_map]
+        if not items:
+            log.info("Digest triggered: all items filtered by semantic filter | filter=%s", categories)
             if building_msg_id:
                 try:
                     await delete_message(building_msg_id)
                 except Exception:
                     pass
             return False
-    else:
-        blocked_items = []
 
     all_categories = await get_categories()
     cat_meta = {

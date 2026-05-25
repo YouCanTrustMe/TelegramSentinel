@@ -9,8 +9,8 @@ from src.db.models import get_blocked_words, remove_blocked_word
 
 log = logging.getLogger(__name__)
 
-_BLOCKED_TITLE = "🚫 <b>Blocked words</b>"
-_BLOCKED_EMPTY = "🚫 <b>Blocked words</b>\n\nNo words blocked yet."
+_BLOCKED_TITLE = "🚫 <b>Content filters</b>"
+_BLOCKED_EMPTY = "🚫 <b>Content filters</b>\n\nNo filter rules yet."
 
 
 def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
@@ -39,7 +39,7 @@ def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
         uid = query.from_user.id
         _pending[uid] = {"action": "add_blocked_word", "step": 0, "data": {}}
         await query.message.edit_text(
-            "Enter a word or phrase to block:",
+            "Enter a filter rule description (e.g. 'space launches and commercial rockets'):",
             reply_markup=_back_kb("blocked_list"),
         )
 
@@ -49,10 +49,10 @@ def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
         words = await get_blocked_words()
         word = next((w for w in words if w["id"] == word_id), None)
         if not word:
-            await query.answer("Word not found.", show_alert=True)
+            await query.answer("Filter rule not found.", show_alert=True)
             return
         await query.message.edit_text(
-            f"🔴 <b>{word['word']}</b>",
+            f"🔴 {word['rule']}",
             reply_markup=_blocked_word_keyboard(word_id),
         )
 
@@ -61,7 +61,7 @@ def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
         word_id = int(query.data.split(":", 1)[1])
         removed = await remove_blocked_word(word_id)
         if removed:
-            log.info("Blocked word removed: id=%s", word_id)
+            log.info("Filter rule removed: id=%s", word_id)
         words = await get_blocked_words()
         await query.message.edit_text(
             _BLOCKED_TITLE if words else _BLOCKED_EMPTY,

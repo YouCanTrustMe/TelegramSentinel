@@ -378,3 +378,56 @@ async def classify_pending_items(limit: int = 3) -> None:
         log.info("Background backfill: %d/%d sent-empty items re-classified (%d short)", filled, len(blong), len(bshort))
     elif bshort:
         log.info("Background backfill: %d short sent-empty items filled", len(bshort))
+
+
+_FILTER_SYSTEM_PROMPT = """You are a content filter. Given a list of news items and filter rules (descriptions of content that must be excluded), identify which items primarily match any rule.
+
+STRICT RULES:
+- Block an item only when the item is PRIMARILY about the described content.
+- A brief mention or passing reference does NOT count — only primary topic.
+- When the item is short and ambiguous, do NOT block it (err on the side of keeping).
+- Each rule is a description of content to exclude; match by meaning, not keywords.
+
+Output JSON only: {"blocked": [{"id": <int>, "rule": <rule_index_0based>}]}
+If nothing matches: {"blocked": []}"""
+
+
+async def check_blocked_filters(
+    items: list[dict],
+    rules: list[str],
+) -> dict[int, str]:
+    """Check items against semantic filter rules via LLM.
+
+    items: list of {"id": int, "text": str}
+    rules: list of rule description strings
+    Returns: {item_id: matched_rule_text} for items that should be blocked.
+    Returns {} on quota exhaustion or error (pass-through, no blocking).
+    """
+    if not items or not rules:
+        return {}
+
+    numbered_rules = "\n".join(f"{i}. {r}" for i, r in enumerate(rules))
+    numbered_items = "\n".join(
+        f"{item['id']}: {(item['text'] or '')[:400]}" for item in items
+    )
+    user_msg = f"Filter rules:\n{numbered_rules}\n\nItems:\n{numbered_items}"
+
+    data = await groq_json(
+        messages=[
+            {"role": "system", "content": _FILTER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+        max_retries=3,
+        model=settings.groq_model_batch,
+        fallback_model=settings.groq_model_fallback,
+    )
+    if not data or not isinstance(data.get("blocked"), list):
+        return {}
+
+    result: dict[int, str] = {}
+    for entry in data["blocked"]:
+        item_id = entry.get("id")
+        rule_idx = entry.get("rule")
+        if isinstance(item_id, int) and isinstance(rule_idx, int) and 0 <= rule_idx < len(rules):
+            result[item_id] = rules[rule_idx]
+    return result

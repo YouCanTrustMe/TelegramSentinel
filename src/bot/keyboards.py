@@ -156,7 +156,7 @@ def _blocked_keyboard(words, page: int = 0) -> InlineKeyboardMarkup:
     buttons = []
     for w in page_words:
         buttons.append([
-            InlineKeyboardButton(f"🔴 {w['word']}", callback_data=f"blocked_view:{w['id']}"),
+            InlineKeyboardButton(f"🔴 {w['rule']}", callback_data=f"blocked_view:{w['id']}"),
         ])
 
     if total_pages > 1:
@@ -168,7 +168,7 @@ def _blocked_keyboard(words, page: int = 0) -> InlineKeyboardMarkup:
             nav.append(InlineKeyboardButton("▶", callback_data=f"blocked_list:{page + 1}"))
         buttons.append(nav)
 
-    buttons.append([InlineKeyboardButton("➕ Add word", callback_data="blocked_add")])
+    buttons.append([InlineKeyboardButton("➕ Add filter", callback_data="blocked_add")])
     return InlineKeyboardMarkup(buttons)
 
 

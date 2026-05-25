@@ -77,19 +77,18 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                 await _finalize_add_category(uid, data, message)
 
         elif action == "add_blocked_word":
-            word = text.lower()
-            added = await add_blocked_word(word)
+            added = await add_blocked_word(text)
             del _pending[uid]
             words = await get_blocked_words()
             if added:
-                log.info("Blocked word added: %s", word)
+                log.info("Filter rule added: %s", text)
                 await message.reply(
-                    f"✅ Added: <code>{escape(word)}</code>\n\n🚫 <b>Blocked words</b>",
+                    f"✅ Added filter rule: <code>{escape(text)}</code>\n\n🚫 <b>Content filters</b>",
                     reply_markup=_blocked_keyboard(words),
                 )
             else:
                 await message.reply(
-                    f"⚠️ Already blocked: <code>{escape(word)}</code>",
+                    f"⚠️ Already exists: <code>{escape(text)}</code>",
                     reply_markup=_blocked_keyboard(words),
                 )
 

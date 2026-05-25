@@ -407,27 +407,28 @@ async def check_blocked_filters(
         return {}
 
     numbered_rules = "\n".join(f"{i}. {r}" for i, r in enumerate(rules))
-    numbered_items = "\n".join(
-        f"{item['id']}: {(item['text'] or '')[:400]}" for item in items
-    )
-    user_msg = f"Filter rules:\n{numbered_rules}\n\nItems:\n{numbered_items}"
-
-    data = await groq_json(
-        messages=[
-            {"role": "system", "content": _FILTER_SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        max_retries=3,
-        model=settings.groq_model_batch,
-        fallback_model=settings.groq_model_fallback,
-    )
-    if not data or not isinstance(data.get("blocked"), list):
-        return {}
-
+    _CHUNK = 25
     result: dict[int, str] = {}
-    for entry in data["blocked"]:
-        item_id = entry.get("id")
-        rule_idx = entry.get("rule")
-        if isinstance(item_id, int) and isinstance(rule_idx, int) and 0 <= rule_idx < len(rules):
-            result[item_id] = rules[rule_idx]
+    for i in range(0, len(items), _CHUNK):
+        chunk = items[i:i + _CHUNK]
+        numbered_items = "\n".join(
+            f"{item['id']}: {(item['text'] or '')[:150]}" for item in chunk
+        )
+        user_msg = f"Filter rules:\n{numbered_rules}\n\nItems:\n{numbered_items}"
+        data = await groq_json(
+            messages=[
+                {"role": "system", "content": _FILTER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            max_retries=3,
+            model=settings.groq_model_batch,
+            fallback_model=settings.groq_model_fallback,
+        )
+        if not data or not isinstance(data.get("blocked"), list):
+            continue
+        for entry in data["blocked"]:
+            item_id = entry.get("id")
+            rule_idx = entry.get("rule")
+            if isinstance(item_id, int) and isinstance(rule_idx, int) and 0 <= rule_idx < len(rules):
+                result[item_id] = rules[rule_idx]
     return result

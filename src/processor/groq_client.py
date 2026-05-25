@@ -20,7 +20,7 @@ _CAPACITY = 3.0
 _tokens: float = _CAPACITY
 _last_refill: float = time.monotonic()
 _call_lock = asyncio.Lock()
-_backoff_until: float = 0.0
+_backoff_until: dict[str, float] = {}
 _quota_dead_until: dict[str, float] = {}
 _last_alert_time: float = 0.0
 _ALERT_COOLDOWN = 1800.0
@@ -57,11 +57,9 @@ def reset_groq_stats() -> None:
     _failover_count = 0
 
 
-def _signal_backoff(seconds: float = 65.0) -> None:
-    global _backoff_until, _tokens
-    _backoff_until = time.monotonic() + seconds
-    _tokens = 0.0
-    log.warning("Groq rate limit: signalling %gs backoff, bucket drained", seconds)
+def _signal_backoff(model: str, seconds: float = 65.0) -> None:
+    _backoff_until[model] = time.monotonic() + seconds
+    log.debug("Groq rate limit: %s backoff %gs", model, seconds)
 
 
 def _parse_reset(value: str | None) -> float | None:
@@ -166,8 +164,9 @@ async def groq_json(messages: list[dict], max_retries: int, model: str | None = 
     for attempt in range(max_retries):
         async with _call_lock:
             now = time.monotonic()
-            if _backoff_until > now:
-                await asyncio.sleep(_backoff_until - now)
+            wait_until = _backoff_until.get(effective, 0.0)
+            if wait_until > now:
+                await asyncio.sleep(wait_until - now)
             _refill_tokens()
             if _tokens < 1.0:
                 wait = (1.0 - _tokens) / _RATE
@@ -198,9 +197,9 @@ async def groq_json(messages: list[dict], max_retries: int, model: str | None = 
                     await _maybe_send_rate_limit_alert()
                     return {}
                 _bump(effective, "rate_limited")
-                _signal_backoff(retry_after if retry_after else 65.0)
+                _signal_backoff(effective, retry_after if retry_after else 65.0)
                 if attempt < max_retries - 1:
-                    log.warning("Groq rate limit hit on %s, retrying after backoff (attempt %d/%d)", effective, attempt + 1, max_retries)
+                    log.info("Groq rate limit on %s, retrying after backoff (attempt %d/%d)", effective, attempt + 1, max_retries)
                 else:
                     log.warning("Groq rate limit persistent on %s after %d attempts, using raw-text fallback", effective, max_retries)
                     await _maybe_send_rate_limit_alert()

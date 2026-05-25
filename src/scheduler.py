@@ -122,7 +122,7 @@ async def _rebuild_jobs() -> None:
     from src.processor.classifier import classify_pending_items
     _scheduler.add_job(
         classify_pending_items,
-        CronTrigger(minute="*/10"),
+        CronTrigger(minute="*/20"),
         id="classify_pending",
         replace_existing=True,
         max_instances=1,

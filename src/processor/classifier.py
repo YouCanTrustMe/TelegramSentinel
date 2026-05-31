@@ -380,16 +380,24 @@ async def classify_pending_items(limit: int = 3) -> None:
         log.info("Background backfill: %d short sent-empty items filled", len(bshort))
 
 
-_FILTER_SYSTEM_PROMPT = """You are a content filter. Given a list of news items and filter rules (descriptions of content that must be excluded), identify which items primarily match any rule.
+_FILTER_SYSTEM_PROMPT = """You are a content filter. Given news items (each tagged [source/category]) and rules describing junk to exclude, decide which items to block.
 
-STRICT RULES:
-- Block an item only when the item is PRIMARILY about the described content.
-- A brief mention or passing reference does NOT count — only primary topic.
-- When the item is short and ambiguous, do NOT block it (err on the side of keeping).
-- Each rule is a description of content to exclude; match by meaning, not keywords.
+Rate each potential match with a confidence score 1-10:
+- 9-10: unmistakably matches the rule
+- 7-8: clearly matches, minor doubt
+- 5-6: borderline — lean toward keeping
+- 1-4: does not match, keep
 
-Output JSON only: {"blocked": [{"id": <int>, "rule": <rule_index_0based>}]}
-If nothing matches: {"blocked": []}"""
+WHAT IS NEVER JUNK (do not block regardless of rule wording):
+- Reporting by a news outlet on company deals, earnings, market moves, product launches, or industry plans — this is journalism, not advertising, even if it mentions prices or brand names.
+- War/conflict news with concrete outcomes: destroyed equipment, strikes with confirmed results, territorial changes — this is hard news, not a "short real-time signal."
+- Analysis, commentary, or op-eds from known media sources — not "collections of recommendations."
+- Any item that is short or ambiguous: default confidence ≤ 5 (keep).
+
+Output JSON only: {"blocked": [{"id": <int>, "rule": <rule_index_0based>, "confidence": <int 1-10>}]}
+If nothing should be blocked: {"blocked": []}"""
+
+_FILTER_BLOCK_THRESHOLD = 7
 
 
 async def check_blocked_filters(
@@ -398,7 +406,7 @@ async def check_blocked_filters(
 ) -> dict[int, str]:
     """Check items against semantic filter rules via LLM.
 
-    items: list of {"id": int, "text": str}
+    items: list of {"id": int, "text": str, "source": str, "category": str}
     rules: list of rule description strings
     Returns: {item_id: matched_rule_text} for items that should be blocked.
     Returns {} on quota exhaustion or error (pass-through, no blocking).
@@ -412,7 +420,8 @@ async def check_blocked_filters(
     for i in range(0, len(items), _CHUNK):
         chunk = items[i:i + _CHUNK]
         numbered_items = "\n".join(
-            f"{item['id']}: {(item['text'] or '')[:150]}" for item in chunk
+            f"{item['id']} [{item.get('source', '?')}/{item.get('category', '?')}]: {(item['text'] or '')[:150]}"
+            for item in chunk
         )
         user_msg = f"Filter rules:\n{numbered_rules}\n\nItems:\n{numbered_items}"
         data = await groq_json(
@@ -429,6 +438,16 @@ async def check_blocked_filters(
         for entry in data["blocked"]:
             item_id = entry.get("id")
             rule_idx = entry.get("rule")
-            if isinstance(item_id, int) and isinstance(rule_idx, int) and 0 <= rule_idx < len(rules):
+            confidence = entry.get("confidence", 10)
+            if (
+                isinstance(item_id, int)
+                and isinstance(rule_idx, int)
+                and 0 <= rule_idx < len(rules)
+                and isinstance(confidence, int)
+                and confidence >= _FILTER_BLOCK_THRESHOLD
+            ):
                 result[item_id] = rules[rule_idx]
+                log.info("Filter: blocked item id=%d | rule=%r | confidence=%d", item_id, rules[rule_idx], confidence)
+            elif isinstance(item_id, int) and isinstance(rule_idx, int) and 0 <= rule_idx < len(rules):
+                log.info("Filter: kept item id=%d | rule=%r | confidence=%d (below threshold %d)", item_id, rules[rule_idx], confidence, _FILTER_BLOCK_THRESHOLD)
     return result

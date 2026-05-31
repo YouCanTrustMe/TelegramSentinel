@@ -130,7 +130,7 @@ async def _merge_source_items(items: list, prompt_extra: str | None = None) -> l
         log.info("Skipping group_by_topic for source: batch model and fallback both quota dead, returning items as-is")
         return _items_as_plain(items)
 
-    raw_inputs = [{"id": i, "text": item["raw_text"] or ""} for i, item in enumerate(items)]
+    raw_inputs = [{"id": i, "text": item["summary"] or item["raw_text"] or ""} for i, item in enumerate(items)]
     try:
         groups = await group_by_topic(raw_inputs, prompt_extra=prompt_extra)
         merged = []
@@ -399,7 +399,12 @@ async def _send_digest_locked(
         ]
         rules = [r["rule"] for r in filter_rules_rows]
         check_input = [
-            {"id": item["id"], "text": (item["summary"] or "") + " " + (item["raw_text"] or "")}
+            {
+                "id": item["id"],
+                "text": (item["summary"] or "") + " " + (item["raw_text"] or ""),
+                "source": item.get("source_name") or "unknown",
+                "category": item.get("category") or "other",
+            }
             for item in filterable
         ]
         blocked_map = await check_blocked_filters(check_input, rules)

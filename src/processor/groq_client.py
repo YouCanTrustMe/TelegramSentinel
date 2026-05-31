@@ -162,49 +162,51 @@ async def groq_json(messages: list[dict], max_retries: int, model: str | None = 
     if effective != primary:
         _failover_count += 1
     for attempt in range(max_retries):
+        now = time.monotonic()
+        wait_until = _backoff_until.get(effective, 0.0)
+        if wait_until > now:
+            await asyncio.sleep(wait_until - now)
+
         async with _call_lock:
-            now = time.monotonic()
-            wait_until = _backoff_until.get(effective, 0.0)
-            if wait_until > now:
-                await asyncio.sleep(wait_until - now)
             _refill_tokens()
             if _tokens < 1.0:
                 wait = (1.0 - _tokens) / _RATE
                 await asyncio.sleep(wait)
                 _refill_tokens()
             _tokens -= 1.0
-            try:
-                response = await _client.chat.completions.create(
-                    model=effective,
-                    messages=messages,
-                    response_format={"type": "json_object"},
-                    temperature=0.1,
-                )
-                parsed = json.loads(response.choices[0].message.content)
-                _bump(effective, "ok")
-                log.debug("Groq call ok | model=%s", effective)
-                return parsed if isinstance(parsed, dict) else {}
-            except RateLimitError as exc:
-                retry_after = _extract_retry_after(exc)
-                if retry_after is not None and retry_after >= _QUOTA_DEAD_THRESHOLD:
-                    _bump(effective, "quota_dead")
-                    _signal_quota_dead(effective, retry_after)
-                    if effective != fallback_model and fallback_model and not is_quota_dead(fallback_model):
-                        log.info("Groq: %s quota dead mid-call, failing over to %s", effective, fallback_model)
-                        _failover_count += 1
-                        effective = fallback_model
-                        continue
-                    await _maybe_send_rate_limit_alert()
-                    return {}
-                _bump(effective, "rate_limited")
-                _signal_backoff(effective, retry_after if retry_after else 65.0)
-                if attempt < max_retries - 1:
-                    log.info("Groq rate limit on %s, retrying after backoff (attempt %d/%d)", effective, attempt + 1, max_retries)
-                else:
-                    log.warning("Groq rate limit persistent on %s after %d attempts, using raw-text fallback", effective, max_retries)
-                    await _maybe_send_rate_limit_alert()
-            except Exception as exc:
-                _bump(effective, "error")
-                log.warning("Groq call error on %s: %s", effective, exc)
+
+        try:
+            response = await _client.chat.completions.create(
+                model=effective,
+                messages=messages,
+                response_format={"type": "json_object"},
+                temperature=0.1,
+            )
+            parsed = json.loads(response.choices[0].message.content)
+            _bump(effective, "ok")
+            log.debug("Groq call ok | model=%s", effective)
+            return parsed if isinstance(parsed, dict) else {}
+        except RateLimitError as exc:
+            retry_after = _extract_retry_after(exc)
+            if retry_after is not None and retry_after >= _QUOTA_DEAD_THRESHOLD:
+                _bump(effective, "quota_dead")
+                _signal_quota_dead(effective, retry_after)
+                if effective != fallback_model and fallback_model and not is_quota_dead(fallback_model):
+                    log.info("Groq: %s quota dead mid-call, failing over to %s", effective, fallback_model)
+                    _failover_count += 1
+                    effective = fallback_model
+                    continue
+                await _maybe_send_rate_limit_alert()
                 return {}
+            _bump(effective, "rate_limited")
+            _signal_backoff(effective, retry_after if retry_after else 65.0)
+            if attempt < max_retries - 1:
+                log.info("Groq rate limit on %s, retrying after backoff (attempt %d/%d)", effective, attempt + 1, max_retries)
+            else:
+                log.warning("Groq rate limit persistent on %s after %d attempts, using raw-text fallback", effective, max_retries)
+                await _maybe_send_rate_limit_alert()
+        except Exception as exc:
+            _bump(effective, "error")
+            log.warning("Groq call error on %s: %s", effective, exc)
+            return {}
     return {}

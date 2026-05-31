@@ -117,7 +117,7 @@ async def prune_old_items(retention_days: int) -> int:
     Telegram sources are protected by last_message_id instead."""
     async with get_db() as db:
         cur = await db.execute(
-            "DELETE FROM items WHERE sent = 1 AND processed_at < datetime('now', ?)",
+            "DELETE FROM items WHERE sent = 1 AND julianday(processed_at) < julianday('now', ?)",
             (f"-{retention_days} days",),
         )
         await db.commit()

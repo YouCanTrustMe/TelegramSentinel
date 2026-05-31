@@ -389,34 +389,38 @@ async def _send_digest_locked(
     filter_rules_rows = await get_blocked_words()
     blocked_items = []
     if filter_rules_rows:
-        filterable = [
-            item for item in items
-            if not _wants_no_filter(item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None)
-        ]
-        no_filter = [
-            item for item in items
-            if _wants_no_filter(item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None)
-        ]
-        rules = [r["rule"] for r in filter_rules_rows]
-        check_input = [
-            {
-                "id": item["id"],
-                "text": (item["summary"] or "") + " " + (item["raw_text"] or ""),
-                "source": item.get("source_name") or "unknown",
-                "category": item.get("category") or "other",
-            }
-            for item in filterable
-        ]
-        blocked_map = await check_blocked_filters(check_input, rules)
-        if blocked_map:
-            for item in filterable:
-                matched_rule = blocked_map.get(item["id"])
-                if matched_rule is not None:
-                    blocked_items.append({**item, "blocked_by": matched_rule})
-                    log.info("Blocked item id=%d | rule=%r | summary=%s", item["id"], matched_rule, (item["summary"] or "")[:80])
-            await mark_sent([item["id"] for item in blocked_items])
-            log.info("Blocked %d item(s) by semantic filter", len(blocked_items))
-        items = no_filter + [item for item in filterable if item["id"] not in blocked_map]
+        try:
+            filterable = [
+                item for item in items
+                if not _wants_no_filter(item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None)
+            ]
+            no_filter = [
+                item for item in items
+                if _wants_no_filter(item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None)
+            ]
+            rules = [r["rule"] for r in filter_rules_rows]
+            check_input = [
+                {
+                    "id": item["id"],
+                    "text": (item["summary"] or "") + " " + (item["raw_text"] or ""),
+                    "source": item["source_name"] or "unknown",
+                    "category": item["category"] or "other",
+                }
+                for item in filterable
+            ]
+            blocked_map = await check_blocked_filters(check_input, rules)
+            if blocked_map:
+                for item in filterable:
+                    matched_rule = blocked_map.get(item["id"])
+                    if matched_rule is not None:
+                        blocked_items.append({**item, "blocked_by": matched_rule})
+                        log.info("Blocked item id=%d | rule=%r | summary=%s", item["id"], matched_rule, (item["summary"] or "")[:80])
+                await mark_sent([item["id"] for item in blocked_items])
+                log.info("Blocked %d item(s) by semantic filter", len(blocked_items))
+            items = no_filter + [item for item in filterable if item["id"] not in blocked_map]
+        except Exception:
+            log.exception("Semantic filter failed, sending digest unfiltered")
+            blocked_items = []
         if not items:
             log.info("Digest triggered: all items filtered by semantic filter | filter=%s", categories)
             if building_msg_id:

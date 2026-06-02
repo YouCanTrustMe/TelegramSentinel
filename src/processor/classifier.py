@@ -15,6 +15,7 @@ _TRIVIAL_MAX_LEN = 60
 _SINGLE_INPUT_CAP = 1500
 _BATCH_INPUT_CAP = 700
 _BIG_NEWS_MARK = "…"
+_CLASSIFY_CHUNK = 25
 
 
 def _strip_media_prefix(text: str) -> str:
@@ -359,9 +360,10 @@ async def classify_pending_items(limit: int = 3) -> None:
 
     if long_items:
         batch = long_items[:limit]
-        log.info("Background classify: %d pending long (taking batch of %d, %d short done)", len(long_items), len(batch), len(short))
-        classified = await _classify_store(batch, "Background classify")
-        log.info("Background classify done: %d/%d classified in batch", classified, len(batch))
+        total_classified = 0
+        for i in range(0, len(batch), _CLASSIFY_CHUNK):
+            total_classified += await _classify_store(batch[i:i + _CLASSIFY_CHUNK], "Background classify")
+        log.info("Background classify done: %d/%d classified (%d chunk(s))", total_classified, len(batch), -(-len(batch) // _CLASSIFY_CHUNK))
         return  # leave backfill for a run when the live queue is clear
 
     # Live queue empty + quota alive → backfill already-sent items still empty

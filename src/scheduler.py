@@ -37,6 +37,14 @@ async def rebuild_digest_jobs() -> None:
     await _rebuild_jobs()
 
 
+async def _pre_digest_classify() -> None:
+    from src.processor.classifier import classify_pending_items
+
+    log.info("Pre-digest classify started")
+    await classify_pending_items(limit=999)
+    log.info("Pre-digest classify done")
+
+
 async def _pre_digest_collect() -> None:
     from src.collectors.rss_collector import poll_rss_once
     from src.collectors.telegram_collector import poll_telegram_once
@@ -107,9 +115,17 @@ def _pre_collect_time(h: int, m: int) -> tuple[int, int]:
     return h, m
 
 
+def _pre_classify_time(h: int, m: int) -> tuple[int, int]:
+    m -= 2
+    if m < 0:
+        m += 60
+        h = (h - 1) % 24
+    return h, m
+
+
 async def _rebuild_jobs() -> None:
     for job in _scheduler.get_jobs():
-        if job.id.startswith("digest_") or job.id.startswith("pre_collect_"):
+        if job.id.startswith("digest_") or job.id.startswith("pre_collect_") or job.id.startswith("pre_classify_"):
             _scheduler.remove_job(job.id)
 
     _scheduler.add_job(
@@ -149,6 +165,7 @@ async def _rebuild_jobs() -> None:
     )
 
     scheduled_pre_collect: set[str] = set()
+    scheduled_pre_classify: set[str] = set()
 
     def _add_pre_collect(h: int, m: int) -> None:
         ph, pm = _pre_collect_time(h, m)
@@ -161,6 +178,18 @@ async def _rebuild_jobs() -> None:
                 replace_existing=True,
             )
             scheduled_pre_collect.add(job_id)
+
+    def _add_pre_classify(h: int, m: int) -> None:
+        ph, pm = _pre_classify_time(h, m)
+        job_id = f"pre_classify_{ph:02d}:{pm:02d}"
+        if job_id not in scheduled_pre_classify:
+            _scheduler.add_job(
+                _pre_digest_classify,
+                CronTrigger(hour=ph, minute=pm, timezone=settings.digest_timezone),
+                id=job_id,
+                replace_existing=True,
+            )
+            scheduled_pre_classify.add(job_id)
 
     # One digest job per distinct category time. No catch-all default schedule:
     # the schedule is driven entirely by each category's digest_time.
@@ -184,6 +213,7 @@ async def _rebuild_jobs() -> None:
             kwargs={"categories": cat_names, "include_quiet": time_str == last_time},
         )
         _add_pre_collect(h, m)
+        _add_pre_classify(h, m)
 
     job_ids = [j.id for j in _scheduler.get_jobs()]
     log.info("Digest jobs: %s", job_ids)

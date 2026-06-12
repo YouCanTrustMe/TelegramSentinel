@@ -67,8 +67,12 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
     saved = 0
 
     http_status = getattr(feed, "status", None)
-    if (isinstance(http_status, int) and http_status >= 400) or (not feed.entries and getattr(feed, "bozo", False)):
-        reason = f"HTTP {http_status}" if isinstance(http_status, int) and http_status >= 400 else "no parseable entries"
+    http_failed = isinstance(http_status, int) and http_status >= 400
+    # bozo + zero entries only counts as a failure when we did NOT get a clean 200:
+    # a 200 with a benign parse warning and no items is just an empty feed, not a broken one.
+    unreachable = not feed.entries and getattr(feed, "bozo", False) and http_status != 200
+    if http_failed or unreachable:
+        reason = f"HTTP {http_status}" if http_failed else "unreachable / no parseable entries"
         await _mark_failure(source_id, name, url, reason)
         return 0
 

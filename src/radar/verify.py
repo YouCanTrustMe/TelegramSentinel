@@ -19,6 +19,10 @@ from src.dispatcher.admin_alert import admin_alert
 
 log = logging.getLogger(__name__)
 
+# Above this FLOOD_WAIT we abort the whole run (retried next daily cycle) rather than
+# sleeping and continuing to poke the API, which would only prolong the flood.
+_FLOOD_ABORT_SECS = 30
+
 
 async def verify_radar_chats() -> None:
     chats = await get_radar_chats()
@@ -40,8 +44,11 @@ async def verify_radar_chats() -> None:
         try:
             chat = await userbot.get_chat(probe)
         except FloodWait as exc:
+            if exc.value > _FLOOD_ABORT_SECS:
+                log.warning("Radar verify: FLOOD_WAIT %ss resolving entry id=%d, aborting run (retry next cycle)", exc.value, entry_id)
+                return
             log.warning("Radar verify: FLOOD_WAIT %ss resolving entry id=%d ref=%s, backing off", exc.value, entry_id, ref)
-            await asyncio.sleep(min(exc.value, 30))
+            await asyncio.sleep(exc.value)
             continue
         except (UsernameNotOccupied, UsernameInvalid) as exc:
             log.warning("Radar verify: username gone for entry id=%d ref=%s: %s", entry_id, ref, exc)
@@ -92,8 +99,11 @@ async def verify_radar_chats() -> None:
             )
             continue
         except FloodWait as exc:
+            if exc.value > _FLOOD_ABORT_SECS:
+                log.warning("Radar verify: FLOOD_WAIT %ss on membership probe id=%d, aborting run (retry next cycle)", exc.value, entry_id)
+                return
             log.warning("Radar verify: FLOOD_WAIT %ss on membership probe id=%d ref=%s, backing off", exc.value, entry_id, new_ref)
-            await asyncio.sleep(min(exc.value, 30))
+            await asyncio.sleep(exc.value)
             continue
         except Exception as exc:
             log.warning("Radar verify: membership probe failed id=%d ref=%s: %s", entry_id, new_ref, exc)

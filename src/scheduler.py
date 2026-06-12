@@ -24,6 +24,14 @@ async def _prune_items_job() -> None:
         log.info("Retention: pruned %d sent item(s) older than %d days", deleted, _RETENTION_DAYS)
 
 
+async def _revive_rss_job() -> None:
+    from src.db.models import revive_error_rss_sources
+
+    revived = await revive_error_rss_sources()
+    if revived:
+        log.info("RSS revive: re-activated %d error source(s) for re-probe: %s", len(revived), ", ".join(revived))
+
+
 async def start_scheduler() -> None:
     global _scheduler
     _scheduler = AsyncIOScheduler(timezone=settings.digest_timezone)
@@ -159,6 +167,15 @@ async def _rebuild_jobs() -> None:
         _prune_items_job,
         CronTrigger(hour=4, minute=0, timezone=settings.digest_timezone),
         id="prune_items",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    _scheduler.add_job(
+        _revive_rss_job,
+        CronTrigger(hour=4, minute=15, timezone=settings.digest_timezone),
+        id="revive_rss",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

@@ -107,7 +107,8 @@ async def increment_source_fail_count(source_id: int) -> int:
 
 async def reset_source_fail_count(source_id: int) -> None:
     async with get_db() as db:
-        await db.execute("UPDATE sources SET fail_count = 0 WHERE id = ?", (source_id,))
+        # `fail_count != 0` keeps the common healthy-poll case a no-op (no WAL write).
+        await db.execute("UPDATE sources SET fail_count = 0 WHERE id = ? AND fail_count != 0", (source_id,))
         await db.commit()
 
 
@@ -116,6 +117,30 @@ async def update_source_status(source_id: int, status: str) -> None:
         await db.execute("UPDATE sources SET status = ? WHERE id = ?", (status, source_id))
         await db.commit()
     log.info("Source id=%d status → %s", source_id, status)
+
+
+async def revive_error_rss_sources(max_fail_count: int = 6) -> list[str]:
+    """Flip transiently-failed RSS sources back to 'active' so they get re-probed.
+
+    A feed that recovered (transient 404, UA block) starts collecting again and a
+    successful poll resets its fail_count. A genuinely dead feed keeps re-failing,
+    so its fail_count climbs past `max_fail_count` and we stop reviving it — it stays
+    'error' permanently instead of flapping and re-alerting forever. fail_count is
+    intentionally not reset here (that escalation is the whole point).
+    """
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT name FROM sources WHERE type = 'rss' AND status = 'error' AND fail_count < ?",
+            (max_fail_count,),
+        ) as cur:
+            names = [row["name"] for row in await cur.fetchall()]
+        if names:
+            await db.execute(
+                "UPDATE sources SET status = 'active' WHERE type = 'rss' AND status = 'error' AND fail_count < ?",
+                (max_fail_count,),
+            )
+            await db.commit()
+    return names
 
 
 async def remove_source(source_id: int) -> bool:

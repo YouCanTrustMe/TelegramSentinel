@@ -7,7 +7,14 @@ from datetime import datetime, timezone
 import feedparser
 
 from src.config import settings
-from src.db.models import get_active_sources, get_db, save_item, update_source_status
+from src.db.models import (
+    get_active_sources,
+    get_db,
+    increment_source_fail_count,
+    reset_source_fail_count,
+    save_item,
+    update_source_status,
+)
 from src.dispatcher.sender import send_to
 from src.processor.deduplicator import is_duplicate, make_message_id
 
@@ -22,27 +29,50 @@ def _strip_html(text: str) -> str:
 POLL_INTERVAL = 900
 _BOOTSTRAP_LIMIT = 10
 
+# Some feeds (Cloudflare-fronted, e.g. CoinTelegraph) reject feedparser's default UA with 403/404.
+_FEED_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
-_PERMANENT_HTTP_ERRORS = {404, 410}
+# A single bad response is usually transient; only disable a feed after this many consecutive failures.
+_FAIL_THRESHOLD = 3
+
+
+async def _mark_failure(source_id: int, name: str, url: str, reason: str) -> None:
+    """Count a consecutive failure; disable the source once it crosses the threshold.
+
+    fail_count is NOT reset here: it keeps climbing so the daily revive job can tell
+    a transient hiccup (recovers on revive, reset to 0 by a successful poll) from a
+    genuinely dead feed (keeps re-failing) and eventually stop reviving it. The admin
+    alert fires only on the first crossing so a dead feed does not spam daily."""
+    fails = await increment_source_fail_count(source_id)
+    log.warning("RSS source '%s' failed (%d/%d): %s", name, fails, _FAIL_THRESHOLD, reason)
+    if fails >= _FAIL_THRESHOLD:
+        await update_source_status(source_id, "error")
+        if fails == _FAIL_THRESHOLD:
+            await send_to(
+                settings.telegram_admin_id,
+                f"⚠️ <b>Source error</b>\n"
+                f"<b>{name}</b> failed {fails} times ({reason}).\n"
+                f"Status set to <b>error</b>.\n"
+                f"<i>{url}</i>",
+            )
 
 
 async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_extra: str | None = None) -> int:
     log.info("Polling RSS source '%s' (%s)", name, url)
-    feed = await asyncio.to_thread(feedparser.parse, url)
+    try:
+        feed = await asyncio.to_thread(feedparser.parse, url, agent=_FEED_AGENT)
+    except Exception as exc:
+        await _mark_failure(source_id, name, url, f"parse error: {exc}")
+        return 0
     saved = 0
 
     http_status = getattr(feed, "status", None)
-    if http_status in _PERMANENT_HTTP_ERRORS:
-        log.error("RSS source '%s' returned HTTP %d | marking error", name, http_status)
-        await update_source_status(source_id, "error")
-        await send_to(
-            settings.telegram_admin_id,
-            f"⚠️ <b>Source error</b>\n"
-            f"<b>{name}</b> returned HTTP {http_status}.\n"
-            f"Status set to <b>error</b>.\n"
-            f"<i>{url}</i>",
-        )
+    if (isinstance(http_status, int) and http_status >= 400) or (not feed.entries and getattr(feed, "bozo", False)):
+        reason = f"HTTP {http_status}" if isinstance(http_status, int) and http_status >= 400 else "no parseable entries"
+        await _mark_failure(source_id, name, url, reason)
         return 0
+
+    await reset_source_fail_count(source_id)
 
     async with get_db() as db:
         async with db.execute("SELECT COUNT(*) FROM items WHERE source_id = ?", (source_id,)) as cur:

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from html import escape
 
@@ -5,6 +6,7 @@ from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import (
     ChannelInvalid,
     ChannelPrivate,
+    FloodWait,
     PeerIdInvalid,
     UserNotParticipant,
     UsernameInvalid,
@@ -21,7 +23,14 @@ log = logging.getLogger(__name__)
 async def verify_radar_chats() -> None:
     chats = await get_radar_chats()
     log.info("Radar verify: checking %d chat(s)", len(chats))
-    for row in chats:
+    try:
+        me = await userbot.get_me()
+    except Exception as exc:
+        log.warning("Radar verify: get_me() failed, skipping this run: %s", exc)
+        return
+    for idx, row in enumerate(chats):
+        if idx:
+            await asyncio.sleep(2)  # space out users.GetFullUser probes to avoid FLOOD_WAIT
         entry_id = row["id"]
         ref = row["chat_ref"]
         keys = row.keys()
@@ -30,6 +39,10 @@ async def verify_radar_chats() -> None:
         probe = stored_id if stored_id is not None else (ref if ref.startswith("@") else _maybe_int(ref))
         try:
             chat = await userbot.get_chat(probe)
+        except FloodWait as exc:
+            log.warning("Radar verify: FLOOD_WAIT %ss resolving entry id=%d ref=%s, backing off", exc.value, entry_id, ref)
+            await asyncio.sleep(min(exc.value, 30))
+            continue
         except (UsernameNotOccupied, UsernameInvalid) as exc:
             log.warning("Radar verify: username gone for entry id=%d ref=%s: %s", entry_id, ref, exc)
             await update_radar_chat_status(entry_id, "error")
@@ -58,7 +71,6 @@ async def verify_radar_chats() -> None:
         new_title = chat.title or chat.first_name or None
 
         try:
-            me = await userbot.get_me()
             member = await userbot.get_chat_member(chat.id, me.id)
             bad_statuses = {ChatMemberStatus.LEFT, ChatMemberStatus.BANNED, ChatMemberStatus.RESTRICTED}
             if member.status in bad_statuses:
@@ -78,6 +90,10 @@ async def verify_radar_chats() -> None:
                 f"<code>{escape(new_ref)}</code> — join request likely still pending approval.",
                 key=f"radar_chat_pending:{entry_id}",
             )
+            continue
+        except FloodWait as exc:
+            log.warning("Radar verify: FLOOD_WAIT %ss on membership probe id=%d ref=%s, backing off", exc.value, entry_id, new_ref)
+            await asyncio.sleep(min(exc.value, 30))
             continue
         except Exception as exc:
             log.warning("Radar verify: membership probe failed id=%d ref=%s: %s", entry_id, new_ref, exc)

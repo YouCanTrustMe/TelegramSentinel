@@ -244,7 +244,7 @@ async def _build_silent_block() -> str:
     radar = await get_silent_radar_chats(120)
     if not sources and not radar:
         return ""
-    lines = ["\n<b>⏸ Quiet sources</b> (5+ days without new items)"]
+    lines = ["<b>⏸ Quiet sources</b> (5+ days without new items)"]
     for row in sources:
         hours = row["hours_silent"]
         age = f"{hours // 24}d" if hours is not None else "never"
@@ -254,7 +254,7 @@ async def _build_silent_block() -> str:
         age = f"{hours // 24}d" if hours is not None else "?"
         label = row["title"] or row["chat_ref"]
         lines.append(f"• {escape(label)} [radar] — {age}")
-    return "\n".join(lines)
+    return "<blockquote expandable>" + "\n".join(lines) + "</blockquote>"
 
 
 def _split_into_messages(segments: list[tuple[str, list[int]]]) -> list[tuple[str, list[int]]]:

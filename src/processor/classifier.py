@@ -421,11 +421,20 @@ async def check_blocked_filters(
         return {}
 
     item_category = {item["id"]: (item.get("category") or "other") for item in items}
-    numbered_rules = "\n".join(f"{i}. {r}" for i, r in enumerate(rules))
+    scopes = rule_scopes if rule_scopes is not None else [None] * len(rules)
     _CHUNK = 25
     result: dict[int, str] = {}
     for i in range(0, len(items), _CHUNK):
         chunk = items[i:i + _CHUNK]
+        # Show the model only rules that can apply to the categories in this chunk
+        # (items are category-ordered, so a chunk is usually one category): fewer
+        # input tokens and fewer chances to mis-match an irrelevant rule. Original
+        # rule indices are preserved so rule_scopes/rules stay aligned for validation.
+        chunk_cats = {item_category[item["id"]] for item in chunk}
+        applicable = [j for j, sc in enumerate(scopes) if sc is None or (sc & chunk_cats)]
+        if not applicable:
+            continue
+        numbered_rules = "\n".join(f"{j}. {rules[j]}" for j in applicable)
         numbered_items = "\n".join(
             f"{item['id']} [{item.get('source', '?')}/{item.get('category', '?')}]: {(item['text'] or '')[:150]}"
             for item in chunk

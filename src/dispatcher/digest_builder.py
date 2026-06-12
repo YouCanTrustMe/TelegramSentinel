@@ -9,7 +9,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_radar_chats, get_silent_sources, get_unsent_items, log_digest, mark_sent, set_app_setting, update_item_classification
+from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_radar_chats, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
 from src.processor.classifier import ClassificationResult, classify, check_blocked_filters, group_by_topic, is_quota_dead, _wants_no_merge, _wants_no_filter
 from src.processor.groq_client import format_groq_stats, reset_groq_stats
@@ -390,15 +390,23 @@ async def _send_digest_locked(
     blocked_items = []
     if filter_rules_rows:
         try:
-            filterable = [
-                item for item in items
-                if not _wants_no_filter(item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None)
-            ]
-            no_filter = [
-                item for item in items
-                if _wants_no_filter(item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None)
-            ]
             rules = [r["rule"] for r in filter_rules_rows]
+            scope_map = await get_word_category_map()
+            # Aligned with `rules`: None means the rule applies to every category.
+            rule_scopes = [scope_map.get(r["id"]) or None for r in filter_rules_rows]
+
+            def _has_applicable_rule(cat: str) -> bool:
+                return any(scope is None or cat in scope for scope in rule_scopes)
+
+            filterable, no_filter = [], []
+            for item in items:
+                prompt_extra = item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None
+                cat = item["category"] or "other"
+                # Skip the LLM filter for items no rule targets (saves tokens) and for opted-out sources.
+                if _wants_no_filter(prompt_extra) or not _has_applicable_rule(cat):
+                    no_filter.append(item)
+                else:
+                    filterable.append(item)
             check_input = [
                 {
                     "id": item["id"],
@@ -408,7 +416,7 @@ async def _send_digest_locked(
                 }
                 for item in filterable
             ]
-            blocked_map = await check_blocked_filters(check_input, rules)
+            blocked_map = await check_blocked_filters(check_input, rules, rule_scopes)
             if blocked_map:
                 for item in filterable:
                     matched_rule = blocked_map.get(item["id"])

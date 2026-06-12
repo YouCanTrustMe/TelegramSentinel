@@ -405,17 +405,22 @@ _FILTER_BLOCK_THRESHOLD = 7
 async def check_blocked_filters(
     items: list[dict],
     rules: list[str],
+    rule_scopes: list[set[str] | None] | None = None,
 ) -> dict[int, str]:
     """Check items against semantic filter rules via LLM.
 
     items: list of {"id": int, "text": str, "source": str, "category": str}
     rules: list of rule description strings
+    rule_scopes: aligned with `rules`; each entry is the set of categories a rule
+        applies to, or None for "all categories". A blocked match is discarded if
+        the rule does not cover the item's category (guards against model drift).
     Returns: {item_id: matched_rule_text} for items that should be blocked.
     Returns {} on quota exhaustion or error (pass-through, no blocking).
     """
     if not items or not rules:
         return {}
 
+    item_category = {item["id"]: (item.get("category") or "other") for item in items}
     numbered_rules = "\n".join(f"{i}. {r}" for i, r in enumerate(rules))
     _CHUNK = 25
     result: dict[int, str] = {}
@@ -441,15 +446,20 @@ async def check_blocked_filters(
             item_id = entry.get("id")
             rule_idx = entry.get("rule")
             confidence = entry.get("confidence", 10)
+            scope = rule_scopes[rule_idx] if (rule_scopes and isinstance(rule_idx, int) and 0 <= rule_idx < len(rule_scopes)) else None
+            out_of_scope = bool(scope) and item_category.get(item_id) not in scope
             if (
                 isinstance(item_id, int)
                 and isinstance(rule_idx, int)
                 and 0 <= rule_idx < len(rules)
                 and isinstance(confidence, int)
                 and confidence >= _FILTER_BLOCK_THRESHOLD
+                and not out_of_scope
             ):
                 result[item_id] = rules[rule_idx]
                 log.info("Filter: blocked item id=%d | rule=%r | confidence=%d", item_id, rules[rule_idx], confidence)
+            elif out_of_scope and isinstance(item_id, int) and isinstance(rule_idx, int) and 0 <= rule_idx < len(rules):
+                log.info("Filter: kept item id=%d | rule=%r matched but out of scope for category=%s", item_id, rules[rule_idx], item_category.get(item_id))
             elif isinstance(item_id, int) and isinstance(rule_idx, int) and 0 <= rule_idx < len(rules):
                 log.info("Filter: kept item id=%d | rule=%r | confidence=%d (below threshold %d)", item_id, rules[rule_idx], confidence, _FILTER_BLOCK_THRESHOLD)
     return result

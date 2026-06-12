@@ -172,13 +172,6 @@ def _blocked_keyboard(words, page: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def _blocked_word_keyboard(word_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗑 Remove", callback_data=f"blocked_del:{word_id}")],
-        [InlineKeyboardButton("◀ Back", callback_data="blocked_list")],
-    ])
-
-
 async def _cat_view_text(cat_name: str) -> tuple[str, list]:
     cats = await get_categories()
     active = [s for s in await get_active_sources() if s["category"] == cat_name]

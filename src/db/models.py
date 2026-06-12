@@ -61,6 +61,10 @@ from src.db.blocked import (
     get_blocked_words,
     add_blocked_word,
     remove_blocked_word,
+    get_categories_for_word,
+    link_word_category,
+    unlink_word_category,
+    get_word_category_map,
 )
 from src.db.radar import (
     get_radar_keywords,
@@ -102,6 +106,7 @@ __all__ = [
     "move_sources_to_category", "delete_sources_by_category", "remove_category",
     "reorder_category", "bulk_set_category_prompt_extra",
     "get_blocked_words", "add_blocked_word", "remove_blocked_word",
+    "get_categories_for_word", "link_word_category", "unlink_word_category", "get_word_category_map",
     "get_radar_keywords", "add_radar_keyword", "remove_radar_keyword", "get_radar_chats",
     "add_radar_chat", "remove_radar_chat", "update_radar_chat_status", "update_radar_chat_resolved",
     "get_radar_blacklist", "add_radar_blacklist", "remove_radar_blacklist", "log_radar_alert",

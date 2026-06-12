@@ -50,6 +50,9 @@ async def update_category(
         if name != old_name:
             await db.execute("UPDATE sources SET category = ? WHERE category = ?", (name, old_name))
             await db.execute("UPDATE items SET category = ? WHERE category = ?", (name, old_name))
+            # Filter-rule scope keys on category name; cascade the rename or it orphans.
+            await db.execute("UPDATE OR IGNORE blocked_word_categories SET category = ? WHERE category = ?", (name, old_name))
+            await db.execute("DELETE FROM blocked_word_categories WHERE category = ?", (old_name,))
         await db.commit()
         return True
 
@@ -58,6 +61,8 @@ async def move_sources_to_category(from_cat: str, to_cat: str) -> None:
     async with get_db() as db:
         await db.execute("UPDATE sources SET category = ? WHERE category = ?", (to_cat, from_cat))
         await db.execute("UPDATE items SET category = ? WHERE category = ?", (to_cat, from_cat))
+        await db.execute("UPDATE OR IGNORE blocked_word_categories SET category = ? WHERE category = ?", (to_cat, from_cat))
+        await db.execute("DELETE FROM blocked_word_categories WHERE category = ?", (from_cat,))
         await db.commit()
 
 
@@ -68,12 +73,14 @@ async def delete_sources_by_category(cat_name: str) -> None:
             (cat_name,),
         )
         await db.execute("DELETE FROM sources WHERE category = ?", (cat_name,))
+        await db.execute("DELETE FROM blocked_word_categories WHERE category = ?", (cat_name,))
         await db.commit()
 
 
 async def remove_category(name: str) -> bool:
     async with get_db() as db:
         cur = await db.execute("DELETE FROM categories WHERE name = ?", (name,))
+        await db.execute("DELETE FROM blocked_word_categories WHERE category = ?", (name,))
         await db.commit()
         return cur.rowcount > 0
 

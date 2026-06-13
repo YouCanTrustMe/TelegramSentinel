@@ -153,16 +153,6 @@ async def _rebuild_jobs() -> None:
         coalesce=True,
     )
 
-    from src.radar.verify import verify_radar_chats
-    _scheduler.add_job(
-        verify_radar_chats,
-        CronTrigger(hour=3, minute=30, timezone=settings.digest_timezone),
-        id="radar_verify",
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-    )
-
     _scheduler.add_job(
         _prune_items_job,
         CronTrigger(hour=4, minute=0, timezone=settings.digest_timezone),

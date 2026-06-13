@@ -297,7 +297,7 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
 
 
 async def keep_userbot_online() -> None:
-    """Ping Telegram every 4 min so the userbot account shows as online while collectors/radar run."""
+    """Ping Telegram every 4 min so the userbot account shows as online while collectors run."""
     from pyrogram.raw.functions.account import UpdateStatus
     log.info("Userbot online keepalive started (interval=240s)")
     while True:

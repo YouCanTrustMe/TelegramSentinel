@@ -10,7 +10,6 @@ log = logging.getLogger(__name__)
 _THROTTLE_SECONDS = 3600
 _WHITELIST_PREFIXES = (
     "src.collectors.",
-    "src.radar.",
     "src.processor.",
     "src.dispatcher.",
     "src.scheduler",

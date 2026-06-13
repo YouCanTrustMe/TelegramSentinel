@@ -7,7 +7,6 @@ from src.collectors.telegram_collector import userbot
 log = logging.getLogger(__name__)
 
 SENTINEL_FOLDER = "Sentinel"
-RADAR_FOLDER = "Radar"
 
 
 async def _get_folder(title: str) -> raw.types.DialogFilter | None:

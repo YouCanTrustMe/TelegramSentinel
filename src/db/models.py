@@ -66,31 +66,6 @@ from src.db.blocked import (
     unlink_word_category,
     get_word_category_map,
 )
-from src.db.radar import (
-    get_radar_keywords,
-    add_radar_keyword,
-    remove_radar_keyword,
-    get_radar_chats,
-    add_radar_chat,
-    remove_radar_chat,
-    update_radar_chat_status,
-    update_radar_chat_resolved,
-    get_radar_blacklist,
-    add_radar_blacklist,
-    remove_radar_blacklist,
-    log_radar_alert,
-    get_recent_radar_alerts,
-    link_keyword_chat,
-    unlink_keyword_chat,
-    get_keyword_chat_links,
-    get_chats_for_keyword,
-    get_keyword_ids_for_chat,
-    count_links_for_keyword,
-    count_links_for_chat,
-    get_silent_radar_chats,
-    update_radar_last_message_at,
-)
-
 __all__ = [
     "get_db", "init_db", "get_app_setting", "set_app_setting",
     "source_exists", "add_source", "get_pending_sources", "set_source_pending_msg_id",
@@ -107,10 +82,4 @@ __all__ = [
     "reorder_category", "bulk_set_category_prompt_extra",
     "get_blocked_words", "add_blocked_word", "remove_blocked_word",
     "get_categories_for_word", "link_word_category", "unlink_word_category", "get_word_category_map",
-    "get_radar_keywords", "add_radar_keyword", "remove_radar_keyword", "get_radar_chats",
-    "add_radar_chat", "remove_radar_chat", "update_radar_chat_status", "update_radar_chat_resolved",
-    "get_radar_blacklist", "add_radar_blacklist", "remove_radar_blacklist", "log_radar_alert",
-    "get_recent_radar_alerts", "link_keyword_chat", "unlink_keyword_chat", "get_keyword_chat_links",
-    "get_chats_for_keyword", "get_keyword_ids_for_chat", "count_links_for_keyword",
-    "count_links_for_chat", "get_silent_radar_chats", "update_radar_last_message_at",
 ]

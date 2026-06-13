@@ -9,7 +9,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_radar_chats, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_sent, set_app_setting, update_item_classification
+from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
 from src.processor.classifier import ClassificationResult, classify, check_blocked_filters, group_by_topic, is_quota_dead, _wants_no_merge, _wants_no_filter
 from src.processor.groq_client import format_groq_stats, reset_groq_stats
@@ -241,19 +241,13 @@ def _build_digest_text(
 
 async def _build_silent_block() -> str:
     sources = await get_silent_sources(120)
-    radar = await get_silent_radar_chats(120)
-    if not sources and not radar:
+    if not sources:
         return ""
     lines = ["<b>⏸ Quiet sources</b> (5+ days without new items)"]
     for row in sources:
         hours = row["hours_silent"]
         age = f"{hours // 24}d" if hours is not None else "never"
         lines.append(f"• {escape(row['name'])} [{row['type']}] — {age}")
-    for row in radar:
-        hours = row["hours_silent"]
-        age = f"{hours // 24}d" if hours is not None else "?"
-        label = row["title"] or row["chat_ref"]
-        lines.append(f"• {escape(label)} [radar] — {age}")
     return "<blockquote expandable>" + "\n".join(lines) + "</blockquote>"
 
 

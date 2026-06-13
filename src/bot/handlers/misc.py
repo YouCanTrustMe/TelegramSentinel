@@ -135,8 +135,7 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
         await message.reply(
             "<b>TelegramSentinel</b>\n\n"
             "/categories — manage categories &amp; sources\n"
-            "/blocked — blocked words filter\n"
-            "/radar — keyword alerts\n\n"
+            "/blocked — blocked words filter\n\n"
             "/digest — send digest now\n"
             "/stats — statistics\n"
             "/logs — recent log entries"

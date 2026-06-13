@@ -94,6 +94,15 @@ async def _schema_has_migration(db, migration) -> bool:
             ) as cur:
                 if not await cur.fetchone():
                     return False
+            continue
+        m = re.search(r"DROP TABLE\s+(?:IF EXISTS\s+)?(\w+)", stmt_up)
+        if m:
+            async with db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (m.group(1).lower(),),
+            ) as cur:
+                if await cur.fetchone():
+                    return False
     return True
 
 

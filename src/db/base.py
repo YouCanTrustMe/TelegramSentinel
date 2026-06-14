@@ -1,6 +1,6 @@
 """Database foundation: the shared connection context manager, migration
 runner and generic app-settings access. Domain modules (sources, items,
-categories, blocked, radar) build on top of get_db()."""
+categories, blocked) build on top of get_db()."""
 import logging
 import aiosqlite
 from contextlib import asynccontextmanager

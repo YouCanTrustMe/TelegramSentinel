@@ -1,7 +1,7 @@
 """Backwards-compatible façade over the per-domain DB modules.
 
-The DB layer is physically split into base/sources/items/categories/blocked/
-radar, but callers still import everything from ``src.db.models``. Re-export
+The DB layer is physically split into base/sources/items/categories/blocked,
+but callers still import everything from ``src.db.models``. Re-export
 the full public surface here so those imports keep working.
 """
 from src.db.base import (

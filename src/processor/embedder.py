@@ -3,7 +3,9 @@ embedding API over REST (own aiohttp session, separate from the Telegram Bot
 API session in dispatcher/sender.py). Fail-open by design: any error, missing
 key or quota issue yields None embeddings so the caller skips dedup rather than
 losing items. Kept separate from clustering logic in cross_dedup.py."""
+import asyncio
 import logging
+import time
 from array import array
 
 import aiohttp
@@ -14,11 +16,39 @@ from src.config import settings
 log = logging.getLogger(__name__)
 
 _ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:batchEmbedContents"
-_BATCH_LIMIT = 100  # Gemini caps batchEmbedContents requests per call
+# Keep a chunk at/below the per-minute budget so one chunk never alone exceeds it.
+_BATCH_LIMIT = 90
 _OUTPUT_DIMS = 768
 _TIMEOUT = aiohttp.ClientTimeout(total=60)
+_MAX_RATE_WAIT = 65.0  # cap a single throttle wait; beyond this, let it fail-open
 
 _session: aiohttp.ClientSession | None = None
+
+# Token-bucket rate limiter (a small async queue with backpressure) so embedding
+# bursts stay under the Gemini free per-minute budget instead of hitting 429s.
+_rl_tokens: float = 0.0
+_rl_last: float = 0.0
+_rl_lock = asyncio.Lock()
+
+
+async def _rate_acquire(n: int) -> None:
+    global _rl_tokens, _rl_last
+    rpm = max(1, settings.embed_rpm)
+    refill = rpm / 60.0
+    n = min(n, rpm)
+    async with _rl_lock:
+        if _rl_last == 0.0:
+            _rl_tokens, _rl_last = float(rpm), time.monotonic()
+        while True:
+            now = time.monotonic()
+            _rl_tokens = min(float(rpm), _rl_tokens + (now - _rl_last) * refill)
+            _rl_last = now
+            if _rl_tokens >= n:
+                _rl_tokens -= n
+                return
+            wait = min((n - _rl_tokens) / refill, _MAX_RATE_WAIT)
+            log.info("Embedding rate limit: waiting %.0fs for capacity (%d texts)", wait, n)
+            await asyncio.sleep(wait)
 
 
 def _get_session() -> aiohttp.ClientSession:
@@ -98,6 +128,7 @@ async def embed_texts(texts: list[str]) -> list[list[float] | None]:
     for i in range(0, len(texts), _BATCH_LIMIT):
         chunk = texts[i:i + _BATCH_LIMIT]
         try:
+            await _rate_acquire(len(chunk))
             out.extend(await _embed_chunk(chunk))
         except Exception as exc:
             log.warning("Gemini embed error on chunk %d: %s", i // _BATCH_LIMIT, exc)

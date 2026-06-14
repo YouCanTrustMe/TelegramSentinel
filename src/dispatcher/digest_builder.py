@@ -12,6 +12,7 @@ from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
 from src.processor.classifier import ClassificationResult, classify, check_blocked_filters, group_by_topic, is_quota_dead, _wants_no_merge, _wants_no_filter
+from src.processor.cross_dedup import deduplicate
 from src.processor.groq_client import format_groq_stats, reset_groq_stats
 
 log = logging.getLogger(__name__)
@@ -46,7 +47,23 @@ def _ids_of(item) -> list[int]:
     return []
 
 
-def _format_item(item: dict) -> str:
+def _format_item(item: dict, dup_links: dict[int, list[tuple[str, str]]] | None = None) -> str:
+    """Render an item line, appending clickable source links for any cross-source
+    duplicates muted under it."""
+    line = _format_item_base(item)
+    if not line or not dup_links:
+        return line
+    links = []
+    for iid in _ids_of(item):
+        for name, url in dup_links.get(iid, []):
+            if url:
+                links.append(f'<a href="{escape(url, quote=True)}">{escape(name)}</a>')
+    if links:
+        return f"{line} {', '.join(links)}"
+    return line
+
+
+def _format_item_base(item: dict) -> str:
     url = item["original_url"] or ""
     summary_text = item["summary"] or ""
     if not summary_text:
@@ -162,12 +179,16 @@ async def _merge_source_items(items: list, prompt_extra: str | None = None) -> l
         return _items_as_plain(items)
 
 
-def _source_blocks(source_name: str, source_items: list) -> list[tuple[str, list[int]]]:
+def _source_blocks(
+    source_name: str,
+    source_items: list,
+    dup_links: dict[int, list[tuple[str, str]]] | None = None,
+) -> list[tuple[str, list[int]]]:
     """Render a source's items into one or more expandable blockquotes, each
     under _MAX_BLOCK_LEN, paired with the item ids they render."""
     rendered: list[tuple[str, list[int]]] = []
     for item in source_items:
-        line = _format_item(item)
+        line = _format_item(item, dup_links)
         if line:
             rendered.append((line, _ids_of(item)))
     if not rendered:
@@ -199,6 +220,7 @@ def _build_digest_text(
     blocked_items: list | None = None,
     filtered_categories: list[str] | None = None,
     all_categories: list | None = None,
+    dup_links: dict[int, list[tuple[str, str]]] | None = None,
 ) -> list[tuple[str, list[int]]]:
     """Build the digest as (text, item_ids) segments so delivery can be
     confirmed per message. Headers and already-marked blocked items carry no ids."""
@@ -223,7 +245,7 @@ def _build_digest_text(
         for source_name, source_items in sources.items():
             if not source_items:
                 continue
-            for block_text, block_ids in _source_blocks(source_name, source_items):
+            for block_text, block_ids in _source_blocks(source_name, source_items, dup_links):
                 segments.append((block_text, block_ids))
 
     if blocked_items:
@@ -432,6 +454,18 @@ async def _send_digest_locked(
                     pass
             return False
 
+    dup_link_map: dict[int, list[tuple[str, str]]] = {}
+    if settings.dedup_enabled:
+        items, dup_link_map = await deduplicate(items)
+        if not items:
+            log.info("Digest triggered: all items deduplicated away | filter=%s", categories)
+            if building_msg_id:
+                try:
+                    await delete_message(building_msg_id)
+                except Exception:
+                    pass
+            return False
+
     all_categories = await get_categories()
     cat_meta = {
         row["name"]: {"emoji": row["emoji"], "sources": defaultdict(list)}
@@ -486,6 +520,7 @@ async def _send_digest_locked(
         blocked_items=blocked_items,
         filtered_categories=categories,
         all_categories=all_categories,
+        dup_links=dup_link_map,
     )
     if include_quiet:
         silent_block = await _build_silent_block()

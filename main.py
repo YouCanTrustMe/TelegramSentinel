@@ -11,6 +11,7 @@ from src.collectors.telegram_collector import keep_userbot_online, run_telegram_
 from src.db.models import init_db
 from src.dispatcher.admin_alert import AdminAlertLogHandler, set_loop
 from src.dispatcher.sender import bot, close_session
+from src.processor.embedder import close_session as close_embed_session
 from src.scheduler import start_scheduler
 
 logging.basicConfig(
@@ -68,6 +69,7 @@ async def main() -> None:
     await bot.stop()
     await userbot.stop()
     await close_session()
+    await close_embed_session()
 
 
 if __name__ == "__main__":

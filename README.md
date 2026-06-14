@@ -9,6 +9,7 @@ Personal AI news digest bot. Collects posts from Telegram channels and RSS feeds
 - **Per-source prompt instructions** — custom AI hints per source (e.g. "keep proper nouns", "focus on numbers", "no merge", "no translate")
 - **Digest** — sent on a per-category schedule, grouped by category → source; same-topic follow-ups within a source are AI-merged into one entry
 - **Blocked words filter** — items matching any blocked word are silently excluded from the digest
+- **Cross-source dedup** — when several sources report the same story, only the highest-priority one is shown; the others become clickable source links beside it (Gemini embeddings, `GEMINI_API_KEY`; starts in shadow mode and is fail-open, so nothing is hidden until validated)
 - **Radar** — keyword alerts: a collector polls monitored chats every 60s and fires an alert to the admin the moment a keyword is matched; a daily job verifies the monitored chats are still reachable
 - **Pending sources** — channels that can't be joined immediately are saved and retried automatically every hour
 - **Full inline-keyboard admin UI** — manage everything from within Telegram, no terminal needed after deploy

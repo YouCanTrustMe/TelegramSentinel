@@ -27,6 +27,19 @@ from src.processor.embedder import cosine, embed_texts, from_blob, to_blob
 log = logging.getLogger(__name__)
 
 
+_PLACEHOLDER_SUMMARIES = {"no text", "no caption", "media"}
+
+
+def _is_placeholder(text: str) -> bool:
+    """Media-only / empty-caption summaries (e.g. 'no text') are identical across
+    unrelated posts, so they embed to cosine 1.0 and would be falsely clustered.
+    Exclude them from embedding entirely."""
+    t = text.strip().lower()
+    if t in _PLACEHOLDER_SUMMARIES:
+        return True
+    return t.startswith("[") and t.endswith("]") and len(t) <= 20
+
+
 def _field(item, key, default=None):
     """Read a field from either an aiosqlite.Row or a plain dict (the digest
     pipeline turns some rows into dicts during reclassify)."""
@@ -62,35 +75,25 @@ class _UnionFind:
             self.parent[ra] = rb
 
 
-async def deduplicate(items: list) -> tuple[list, dict[int, list[tuple[str, str]]]]:
-    """Return (surviving_items, dup_link_map). dup_link_map maps a surviving
-    primary's id to the (source_name, url) of duplicates muted under it."""
-    try:
-        return await _deduplicate(items)
-    except Exception:
-        log.exception("Cross-source dedup failed, sending all items unchanged")
-        return list(items), {}
-
-
-async def _deduplicate(items: list) -> tuple[list, dict[int, list[tuple[str, str]]]]:
-    items = list(items)
-    if len(items) < 2:
-        return items, {}
-
-    # 1. Embed items that have no stored vector yet (on the finalized summary).
+async def ensure_embeddings(items: list) -> dict[int, np.ndarray]:
+    """Return {item_id: vector} for the given items, embedding (and persisting)
+    any that lack a stored vector. Computed once per digest and shared by both
+    cross-source dedup and within-source merge. Fail-open: items that can't be
+    embedded are simply absent from the map."""
     vec: dict[int, np.ndarray] = {}
     to_embed: list[tuple[int, str]] = []
     for item in items:
         iid = _field(item, "id")
         if iid is None:
             continue
+        text = (_field(item, "summary", "") or _field(item, "raw_text", "") or "").strip()
+        if not text or _is_placeholder(text):
+            continue
         existing = from_blob(_field(item, "embedding"))
         if existing is not None:
             vec[iid] = existing
             continue
-        text = (_field(item, "summary", "") or _field(item, "raw_text", "") or "").strip()
-        if text:
-            to_embed.append((iid, text))
+        to_embed.append((iid, text))
     if to_embed:
         vectors = await embed_texts([t for _, t in to_embed])
         new_blobs: list[tuple[int, bytes]] = []
@@ -100,8 +103,45 @@ async def _deduplicate(items: list) -> tuple[list, dict[int, list[tuple[str, str
                 vec[iid] = arr
                 new_blobs.append((iid, to_blob(arr)))
         await set_item_embeddings(new_blobs)
+    return vec
 
-    if len(vec) < 2:
+
+def cluster_within_source(items: list, vectors: dict[int, np.ndarray], threshold: float) -> list[list]:
+    """Group one source's items into same-event clusters by embedding cosine.
+    Returns a list of clusters (each a list of items); items without a vector
+    are returned as their own singleton cluster."""
+    with_vec = [it for it in items if _field(it, "id") in vectors]
+    without = [it for it in items if _field(it, "id") not in vectors]
+    uf = _UnionFind()
+    for a in range(len(with_vec)):
+        ida = _field(with_vec[a], "id")
+        uf.find(ida)
+        va = vectors[ida]
+        for b in range(a + 1, len(with_vec)):
+            idb = _field(with_vec[b], "id")
+            if cosine(va, vectors[idb]) >= threshold:
+                uf.union(ida, idb)
+    groups: dict[int, list] = defaultdict(list)
+    for it in with_vec:
+        groups[uf.find(_field(it, "id"))].append(it)
+    clusters = list(groups.values()) + [[it] for it in without]
+    return clusters
+
+
+async def deduplicate(items: list, vectors: dict[int, np.ndarray]) -> tuple[list, dict[int, list[tuple[str, str]]]]:
+    """Return (surviving_items, dup_link_map). dup_link_map maps a surviving
+    primary's id to the (source_name, url) of duplicates muted under it.
+    `vectors` is the shared embedding map from ensure_embeddings()."""
+    try:
+        return await _deduplicate(items, vectors)
+    except Exception:
+        log.exception("Cross-source dedup failed, sending all items unchanged")
+        return list(items), {}
+
+
+async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, dict[int, list[tuple[str, str]]]]:
+    items = list(items)
+    if len(items) < 2 or len(vec) < 2:
         return items, {}
 
     item_by_id = {_field(item, "id"): item for item in items}
@@ -111,6 +151,8 @@ async def _deduplicate(items: list) -> tuple[list, dict[int, list[tuple[str, str
     # new item can match one shown in a previous digest (not only this batch).
     window = await get_recent_embedded_items(settings.dedup_window_hours)
     sent_pool: dict[str, list[tuple[int, np.ndarray, object, object]]] = defaultdict(list)
+    sent_vec: dict[int, np.ndarray] = {}
+    sent_summary: dict[int, str] = {}
     for row in window:
         if row["id"] in current_ids or not row["sent"]:
             continue
@@ -119,6 +161,10 @@ async def _deduplicate(items: list) -> tuple[list, dict[int, list[tuple[str, str
             sent_pool[row["category"] or "other"].append(
                 (row["id"], v, row["source_sort_order"], row["published_at"])
             )
+            sent_vec[row["id"]] = v
+            sent_summary[row["id"]] = (row["summary"] if "summary" in row.keys() else "") or ""
+
+    floor = settings.dedup_log_floor
 
     # 3. Cluster per category (a cross-source duplicate is always same-category).
     by_cat: dict[str, list] = defaultdict(list)
@@ -136,12 +182,21 @@ async def _deduplicate(items: list) -> tuple[list, dict[int, list[tuple[str, str
             uf.find(ida)
             for b in range(a + 1, len(cur)):
                 idb, vb = cur[b]
-                if cosine(va, vb) >= settings.dedup_threshold:
+                c = cosine(va, vb)
+                ia, ib = item_by_id[ida], item_by_id[idb]
+                if c >= floor and _field(ia, "source_id") != _field(ib, "source_id"):
+                    log.info("DEDUP-CANDIDATE cosine=%.3f x-src same-digest [%s] | %s || %s",
+                             c, cat, (_field(ia, "summary", "") or "")[:60], (_field(ib, "summary", "") or "")[:60])
+                if c >= settings.dedup_threshold:
                     uf.union(ida, idb)
         sent_nodes: set[int] = set()
         for ida, va in cur:
             for sid, vs, _so, _pub in pool:
-                if cosine(va, vs) >= settings.dedup_threshold:
+                c = cosine(va, vs)
+                if c >= floor:
+                    log.info("DEDUP-CANDIDATE cosine=%.3f x-digest [%s] | %s || (sent) %s",
+                             c, cat, (_field(item_by_id[ida], "summary", "") or "")[:60], sent_summary.get(sid, "")[:60])
+                if c >= settings.dedup_threshold:
                     uf.union(ida, sid)
                     sent_nodes.add(sid)
 
@@ -178,10 +233,14 @@ async def _deduplicate(items: list) -> tuple[list, dict[int, list[tuple[str, str
 
     for mid, pid in muted.items():
         it = item_by_id.get(mid)
+        primary_vec = vec.get(pid)
+        if primary_vec is None:
+            primary_vec = sent_vec.get(pid)
+        score = f"{cosine(vec[mid], primary_vec):.3f}" if (mid in vec and primary_vec is not None) else "n/a"
         log.info(
-            "%s cross-source duplicate: item id=%d (%s) -> primary id=%d | summary=%s",
+            "%s cross-source duplicate: item id=%d (%s) -> primary id=%d | cosine=%s | summary=%s",
             "WOULD-MUTE" if settings.dedup_shadow else "Muting",
-            mid, _field(it, "source_name", "?"), pid, (_field(it, "summary", "") or "")[:80],
+            mid, _field(it, "source_name", "?"), pid, score, (_field(it, "summary", "") or "")[:80],
         )
 
     if settings.dedup_shadow:

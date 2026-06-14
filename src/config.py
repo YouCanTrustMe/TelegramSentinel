@@ -29,6 +29,23 @@ class Settings(BaseSettings):
     dedup_shadow: bool = True
     dedup_threshold: float = 0.86
     dedup_window_hours: int = 24
+    # Tuning window: log every cross-source candidate pair at/above this cosine
+    # (wider than dedup_threshold) so a week of logs can pin the ideal threshold.
+    dedup_log_floor: float = 0.80
+    # Gemini free embedding tier allows ~100 texts/min; cap to stay under it.
+    embed_rpm: int = 90
+
+    # Within-source merge: embeddings (reusing dedup vectors) pre-filter candidate
+    # clusters, then the LLM decides the real same-event grouping. Embeddings alone
+    # over-merge in high-overlap domains (e.g. different strikes share vocabulary),
+    # so the LLM stays the arbiter. Flip off to fall back to the old all-source path.
+    merge_via_embeddings: bool = True
+    # Items below this are never even candidates (no LLM call); the LLM only sees
+    # plausibly-related pairs.
+    merge_prefilter_threshold: float = 0.85
+    # Near-identical items (>= this) are merged without an LLM call — safe because
+    # only true paraphrases/reposts reach this similarity.
+    merge_near_dup_threshold: float = 0.95
 
     digest_timezone: str = "Europe/Berlin"
 

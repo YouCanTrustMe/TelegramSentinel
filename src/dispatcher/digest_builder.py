@@ -12,7 +12,8 @@ from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
 from src.processor.classifier import ClassificationResult, classify, check_blocked_filters, group_by_topic, is_quota_dead, _wants_no_merge, _wants_no_filter
-from src.processor.cross_dedup import deduplicate
+from src.processor.cross_dedup import cluster_within_source, deduplicate, ensure_embeddings
+from src.processor.embedder import cosine
 from src.processor.groq_client import format_groq_stats, reset_groq_stats
 
 log = logging.getLogger(__name__)
@@ -139,8 +140,107 @@ def _items_as_plain(items: list) -> list[dict]:
     ]
 
 
-async def _merge_source_items(items: list, prompt_extra: str | None = None) -> list[dict]:
-    if len(items) < _MERGE_MIN_ITEMS or _wants_no_merge(prompt_extra):
+async def _merge_source_items(
+    items: list,
+    prompt_extra: str | None = None,
+    vectors: dict | None = None,
+    stats: dict | None = None,
+) -> list[dict]:
+    if _wants_no_merge(prompt_extra):
+        return _items_as_plain(items)
+    if settings.merge_via_embeddings and vectors is not None:
+        return await _merge_via_embeddings(items, vectors, prompt_extra, stats)
+    return await _merge_via_group_by_topic(items, prompt_extra)
+
+
+def _cluster_summary_fields(cluster: list) -> tuple[str, str]:
+    """Most-detailed existing summary of a cluster (fallback when no LLM call)."""
+    best = max(cluster, key=lambda it: len((it["summary"] or "")))
+    return (best["summary"] or "", (best["key_phrase"] if "key_phrase" in best.keys() else "") or "")
+
+
+def _build_merged(cluster: list, summary: str, key_phrase: str) -> dict:
+    if summary and len(cluster) > 1:
+        summary = f"{summary} · merged {len(cluster)}"
+    return {
+        "summary": summary,
+        "key_phrase": key_phrase,
+        "original_url": next((it["original_url"] for it in cluster if it["original_url"]), None),
+        "published_at": max((it["published_at"] for it in cluster if it["published_at"]), default=None),
+        "raw_text": None,
+        "_item_ids": [it["id"] for it in cluster],
+    }
+
+
+async def _llm_subgroup(cluster: list, prompt_extra: str | None) -> list[tuple[list, str, str]]:
+    """Let the LLM split an embedding candidate cluster into real same-event
+    groups (embeddings over-merge in high-overlap domains, so the LLM is the
+    arbiter). Returns (items, summary, key_phrase) per resulting group."""
+    raw_inputs = [{"id": i, "text": it["summary"] or it["raw_text"] or ""} for i, it in enumerate(cluster)]
+    groups = await group_by_topic(raw_inputs, prompt_extra=prompt_extra)
+    out = []
+    for g in groups:
+        sub = [cluster[i] for i in g["ids"]]
+        out.append((sub, g["summary"] or "", g.get("key_phrase") or ""))
+    return out
+
+
+async def _merge_via_embeddings(
+    items: list,
+    vectors: dict,
+    prompt_extra: str | None,
+    stats: dict | None,
+) -> list[dict]:
+    if len(items) < 2:
+        return _items_as_plain(items)
+    # Embeddings only PRE-FILTER plausibly-related items; the LLM decides whether
+    # a candidate cluster is actually one event (different strikes share vocabulary
+    # and would otherwise be wrongly merged).
+    clusters = cluster_within_source(items, vectors, settings.merge_prefilter_threshold)
+    out: list[dict] = []
+    for cluster in clusters:
+        if len(cluster) == 1:
+            out.extend(_items_as_plain(cluster))
+            continue
+        ids = [it["id"] for it in cluster]
+        min_cos = min(
+            cosine(vectors[ids[i]], vectors[ids[j]])
+            for i in range(len(ids)) for j in range(i + 1, len(ids))
+        )
+        if min_cos >= settings.merge_near_dup_threshold:
+            # Near-identical (reposts/paraphrases): safe to merge without the LLM.
+            log.info("MERGE-CANDIDATE min_cos=%.3f size=%d -> near-dup auto-merge", min_cos, len(cluster))
+            summary, key_phrase = _cluster_summary_fields(cluster)
+            out.append(_build_merged(cluster, summary, key_phrase))
+            if stats is not None:
+                stats["near_dup"] += 1
+            continue
+        try:
+            subgroups = await _llm_subgroup(cluster, prompt_extra)
+        except Exception as exc:
+            log.warning("LLM subgrouping failed, keeping items separate: %s", exc)
+            out.extend(_items_as_plain(cluster))
+            continue
+        merged_sizes = [len(sub) for sub, _, _ in subgroups if len(sub) > 1]
+        log.info("MERGE-CANDIDATE min_cos=%.3f size=%d -> LLM verdict: %s",
+                 min_cos, len(cluster),
+                 f"merged {merged_sizes}" if merged_sizes else "split (all separate)")
+        if stats is not None:
+            stats["llm"] += 1
+        for sub, summ, kp in subgroups:
+            if len(sub) == 1:
+                out.extend(_items_as_plain(sub))
+                continue
+            if not summ:
+                summ, kp = _cluster_summary_fields(sub)
+            out.append(_build_merged(sub, summ, kp))
+            if stats is not None:
+                stats["clusters"] += 1
+    return out
+
+
+async def _merge_via_group_by_topic(items: list, prompt_extra: str | None = None) -> list[dict]:
+    if len(items) < _MERGE_MIN_ITEMS:
         return _items_as_plain(items)
 
     if is_quota_dead(settings.groq_model_batch) and is_quota_dead(settings.groq_model_fallback):
@@ -454,9 +554,15 @@ async def _send_digest_locked(
                     pass
             return False
 
+    # Embeddings are computed once here and shared by cross-source dedup and
+    # within-source merge (both cluster on the same vectors).
+    vectors: dict = {}
+    if settings.dedup_enabled or settings.merge_via_embeddings:
+        vectors = await ensure_embeddings(items)
+
     dup_link_map: dict[int, list[tuple[str, str]]] = {}
     if settings.dedup_enabled:
-        items, dup_link_map = await deduplicate(items)
+        items, dup_link_map = await deduplicate(items, vectors)
         if not items:
             log.info("Digest triggered: all items deduplicated away | filter=%s", categories)
             if building_msg_id:
@@ -486,12 +592,16 @@ async def _send_digest_locked(
             keys = item.keys()
             source_prompt_extra[sname] = item["source_prompt_extra"] if "source_prompt_extra" in keys else None
 
+    # Embedding-based merge clusters cheaply, so it is worth running from 2 items;
+    # the old LLM path only paid off in bulk (>= _MERGE_MIN_ITEMS).
+    merge_min = 2 if settings.merge_via_embeddings else _MERGE_MIN_ITEMS
     sources_to_merge = [
         (cat_name, source_name)
         for cat_name, data in cat_meta.items()
         for source_name, source_items in data["sources"].items()
-        if len(source_items) >= _MERGE_MIN_ITEMS and not _wants_no_merge(source_prompt_extra.get(source_name))
+        if len(source_items) >= merge_min and not _wants_no_merge(source_prompt_extra.get(source_name))
     ]
+    merge_stats = {"clusters": 0, "llm": 0, "near_dup": 0}
     merge_total = len(sources_to_merge)
     merge_done = 0
     if merge_total:
@@ -500,9 +610,17 @@ async def _send_digest_locked(
         cat_meta[cat_name]["sources"][source_name] = await _merge_source_items(
             cat_meta[cat_name]["sources"][source_name],
             prompt_extra=source_prompt_extra.get(source_name),
+            vectors=vectors,
+            stats=merge_stats,
         )
         merge_done += 1
         await _update(f"⏳ {_progress_bar(merge_done, merge_total)} {merge_done}/{merge_total} — {source_name}")
+    if merge_total:
+        log.info(
+            "Within-source merge: sources=%d clusters_merged=%d llm_calls=%d near-dup-skip=%d | mode=%s",
+            merge_total, merge_stats["clusters"], merge_stats["llm"], merge_stats["near_dup"],
+            "embeddings" if settings.merge_via_embeddings else "group_by_topic",
+        )
 
     for data in cat_meta.values():
         for source_name, source_items in data["sources"].items():

@@ -60,9 +60,16 @@ async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlit
             return await cur.fetchall()
 
 
-async def set_item_embedding(item_id: int, embedding: bytes) -> None:
+async def set_item_embeddings(pairs: list[tuple[int, bytes]]) -> None:
+    """Store many item embeddings in one connection/commit (called per digest for
+    every freshly embedded item)."""
+    if not pairs:
+        return
     async with get_db() as db:
-        await db.execute("UPDATE items SET embedding = ? WHERE id = ?", (embedding, item_id))
+        await db.executemany(
+            "UPDATE items SET embedding = ? WHERE id = ?",
+            [(blob, item_id) for item_id, blob in pairs],
+        )
         await db.commit()
 
 

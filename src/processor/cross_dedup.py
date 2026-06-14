@@ -20,7 +20,7 @@ from src.db.models import (
     get_duplicate_links,
     get_recent_embedded_items,
     mark_duplicate,
-    set_item_embedding,
+    set_item_embeddings,
 )
 from src.processor.embedder import cosine, embed_texts, from_blob, to_blob
 
@@ -93,11 +93,13 @@ async def _deduplicate(items: list) -> tuple[list, dict[int, list[tuple[str, str
             to_embed.append((iid, text))
     if to_embed:
         vectors = await embed_texts([t for _, t in to_embed])
+        new_blobs: list[tuple[int, bytes]] = []
         for (iid, _), v in zip(to_embed, vectors):
             if v is not None:
                 arr = np.asarray(v, dtype=np.float32)
                 vec[iid] = arr
-                await set_item_embedding(iid, to_blob(arr))
+                new_blobs.append((iid, to_blob(arr)))
+        await set_item_embeddings(new_blobs)
 
     if len(vec) < 2:
         return items, {}
@@ -162,8 +164,12 @@ async def _deduplicate(items: list) -> tuple[list, dict[int, list[tuple[str, str
                     muted[mid] = primary
             else:
                 primary = min(members, key=lambda i: _sort_key(item_by_id[i]))
+                primary_src = _field(item_by_id[primary], "source_id")
                 for mid in members:
-                    if mid != primary:
+                    # Leave same-source duplicates to the within-source AI merge,
+                    # which folds them into one richer summary; cross-source dedup
+                    # only collapses the SAME story across DIFFERENT sources.
+                    if mid != primary and _field(item_by_id[mid], "source_id") != primary_src:
                         muted[mid] = primary
 
     if not muted:

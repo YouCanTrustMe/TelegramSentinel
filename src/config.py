@@ -20,6 +20,16 @@ class Settings(BaseSettings):
     # shared safety net: whichever model's daily quota dies, calls fall over to this
     groq_model_fallback: str = "llama-3.1-8b-instant"
 
+    # Cross-source deduplication (separate provider/endpoint from Groq — see docs).
+    gemini_api_key: str = ""
+    gemini_embed_model: str = "gemini-embedding-001"
+    dedup_enabled: bool = True
+    # Shadow mode logs would-be duplicates without hiding anything; flip off once
+    # the threshold is validated against real digests.
+    dedup_shadow: bool = True
+    dedup_threshold: float = 0.86
+    dedup_window_hours: int = 24
+
     digest_timezone: str = "Europe/Berlin"
 
     database_path: str = "data/sentinel.db"

@@ -6,4 +6,5 @@ pydantic-settings==2.3.4
 groq==1.2.0
 apscheduler==3.10.4
 aiohttp==3.13.5
+numpy==2.2.1
 python-dateutil==2.9.0

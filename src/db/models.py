@@ -45,6 +45,10 @@ from src.db.items import (
     mark_sent,
     log_digest,
     prune_old_items,
+    set_item_embedding,
+    mark_duplicate,
+    get_recent_embedded_items,
+    get_duplicate_links,
 )
 from src.db.categories import (
     category_exists,
@@ -76,7 +80,8 @@ __all__ = [
     "place_source_at_bottom", "set_source_prompt_extra", "get_silent_sources", "reorder_source",
     "is_seen", "save_item", "get_unsent_items", "get_sent_empty_items",
     "update_item_classification", "increment_classify_attempts", "mark_sent", "log_digest",
-    "prune_old_items",
+    "prune_old_items", "set_item_embedding", "mark_duplicate", "get_recent_embedded_items",
+    "get_duplicate_links",
     "category_exists", "get_categories", "add_category", "update_category",
     "move_sources_to_category", "delete_sources_by_category", "remove_category",
     "reorder_category", "bulk_set_category_prompt_extra",

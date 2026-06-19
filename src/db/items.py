@@ -25,8 +25,12 @@ async def save_item(
     key_phrase: str | None = None,
 ) -> int:
     async with get_db() as db:
+        # OR IGNORE: the regular poll loop and the pre-digest collect job can run
+        # poll_telegram_once concurrently; both may pass the is_duplicate check for
+        # the same new message and race to insert. The message_id UNIQUE constraint
+        # makes the loser a no-op instead of an IntegrityError that aborts the poll.
         cur = await db.execute(
-            """INSERT INTO items
+            """INSERT OR IGNORE INTO items
                (source_id, message_id, raw_text, original_url, published_at,
                 summary, category, processed_at, key_phrase)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",

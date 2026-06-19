@@ -116,17 +116,20 @@ def _parse_times(time_str: str) -> list[tuple[int, int]]:
 
 
 def _pre_collect_time(h: int, m: int) -> tuple[int, int]:
-    m -= 1
+    # Collect first (T-2) so the pre-classify pass (T-1) can summarise the fresh
+    # items before the digest, instead of leaving them to the slower inline
+    # reclassify inside send_digest (which risks the reclassify timeout).
+    m -= 2
     if m < 0:
-        m = 59
+        m += 60
         h = (h - 1) % 24
     return h, m
 
 
 def _pre_classify_time(h: int, m: int) -> tuple[int, int]:
-    m -= 2
+    m -= 1
     if m < 0:
-        m += 60
+        m = 59
         h = (h - 1) % 24
     return h, m
 

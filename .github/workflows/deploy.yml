@@ -1,0 +1,45 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push cancels an in-flight deploy instead of racing it.
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: pytest
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ubuntu
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd ~/TelegramSentinel
+            # Hard-sync to remote — idempotent, immune to server-side drift.
+            # .env, sessions/ and data/ are gitignored, so they are untouched.
+            git fetch origin main
+            git reset --hard origin/main
+            docker compose up --build -d
+            sleep 10
+            docker ps --filter name=telegramsentinel-sentinel-1 --filter status=running | grep -q telegramsentinel-sentinel-1

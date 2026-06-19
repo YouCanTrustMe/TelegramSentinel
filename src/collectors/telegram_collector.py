@@ -15,6 +15,11 @@ log = logging.getLogger(__name__)
 
 POLL_INTERVAL = 300  # seconds between channel polls
 _INVITE_FAIL_THRESHOLD = 20  # mark source as 'error' after this many consecutive invite-resolve failures
+# Bootstrap a brand-new source with only its latest few posts; on subsequent polls
+# fetch up to this many to catch up. Bounded so a stale/reset last_message_id can't
+# pull a channel's whole history; a burst beyond it is reported, not silently lost.
+_BOOTSTRAP_LIMIT = 20
+_CATCHUP_LIMIT = 200
 
 userbot = Client(
     "sessions/sentinel_userbot",
@@ -235,7 +240,7 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
         chat_id = chat_ref if chat_ref.startswith("@") else f"@{chat_ref}"
 
     last_msg_id = source.get("last_message_id")
-    limit = 20 if last_msg_id is None else 100
+    limit = _BOOTSTRAP_LIMIT if last_msg_id is None else _CATCHUP_LIMIT
 
     saved = 0
     try:
@@ -244,6 +249,13 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
             if last_msg_id is not None and message.id <= last_msg_id:
                 break
             messages.append(message)
+        else:
+            # Iterator hit the catch-up limit without reaching the last seen id:
+            # the channel posted more than _CATCHUP_LIMIT since the previous poll,
+            # so the overflow beyond it is not collected this cycle.
+            if last_msg_id is not None and len(messages) >= _CATCHUP_LIMIT:
+                log.warning("Source '%s' burst > %d messages since last poll (last_seen id=%s); "
+                            "older overflow skipped this cycle", source["name"], _CATCHUP_LIMIT, last_msg_id)
 
         if messages and not source.get("chat_id"):
             resolved_chat_id = messages[0].chat.id if messages[0].chat else None

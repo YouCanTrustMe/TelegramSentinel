@@ -32,6 +32,7 @@ from src.db.models import (
     source_exists,
     update_category,
 )
+from src.collectors.rss_collector import _FEED_AGENT
 from src.collectors.telegram_collector import userbot
 from src.scheduler import rebuild_digest_jobs
 
@@ -118,7 +119,10 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                             await message.reply(f"Could not fetch channel info: {exc}")
                             return
                 else:
-                    feed = await asyncio.to_thread(feedparser.parse, url)
+                    # Same UA as the collector — some feeds (Cloudflare-fronted) reject
+                    # feedparser's default UA, so validating without it would wrongly
+                    # reject a feed that the collector then fetches fine.
+                    feed = await asyncio.to_thread(feedparser.parse, url, agent=_FEED_AGENT)
                     if feed.bozo and not feed.entries:
                         del _pending[uid]
                         await message.reply(f"❌ Not a valid RSS feed: <code>{escape(url)}</code>")

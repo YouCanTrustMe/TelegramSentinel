@@ -44,7 +44,11 @@ async def _mark_failure(source_id: int, name: str, url: str, reason: str) -> Non
     genuinely dead feed (keeps re-failing) and eventually stop reviving it. The admin
     alert fires only on the first crossing so a dead feed does not spam daily."""
     fails = await increment_source_fail_count(source_id)
-    log.warning("RSS source '%s' failed (%d/%d): %s", name, fails, _FAIL_THRESHOLD, reason)
+    # A lone first failure is almost always a transient remote hiccup (502/500,
+    # momentary unreachability) that the next poll clears, so keep it at DEBUG;
+    # only escalate to WARNING once it repeats and looks like a real outage.
+    level = logging.WARNING if fails >= 2 else logging.DEBUG
+    log.log(level, "RSS source '%s' failed (%d/%d): %s", name, fails, _FAIL_THRESHOLD, reason)
     if fails >= _FAIL_THRESHOLD:
         await update_source_status(source_id, "error")
         if fails == _FAIL_THRESHOLD:

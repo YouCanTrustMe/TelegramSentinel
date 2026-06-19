@@ -208,7 +208,7 @@ async def set_source_prompt_extra(source_id: int, text: str | None) -> None:
 async def get_silent_sources(threshold_hours: int = 120) -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(
-            """SELECT s.id, s.name, s.type,
+            """SELECT s.id, s.name, s.type, s.url,
                       MAX(i.processed_at) AS last_item_at,
                       CAST((julianday('now') - julianday(MAX(i.processed_at))) * 24 AS INTEGER) AS hours_silent
                FROM sources s

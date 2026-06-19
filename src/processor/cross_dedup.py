@@ -22,6 +22,7 @@ from src.db.models import (
     mark_duplicate,
     set_item_embeddings,
 )
+from src.processor.classifier import group_by_topic
 from src.processor.embedder import cosine, embed_texts, from_blob, to_blob
 
 log = logging.getLogger(__name__)
@@ -139,6 +140,62 @@ async def deduplicate(items: list, vectors: dict[int, np.ndarray]) -> tuple[list
         return list(items), {}
 
 
+async def _confirm_mutes(
+    muted: dict[int, int],
+    item_by_id: dict,
+    sent_summary: dict[int, str],
+    vec: dict[int, np.ndarray],
+    sent_vec: dict[int, np.ndarray],
+) -> dict[int, int]:
+    """B1 — LLM confirmation before muting. Embeddings only pre-select candidates;
+    in high-overlap domains (war/strike news) DIFFERENT cross-source events score
+    the same cosine as the SAME event, and muting hides a real story for good. So
+    each candidate is confirmed by the LLM (the same group_by_topic arbiter the
+    within-source merge uses) — only items it groups WITH the primary stay muted.
+    Near-identical pairs (>= merge_near_dup_threshold) are certain dups and skip
+    the LLM. Fail-open: an LLM error keeps the items (no mute)."""
+    by_primary: dict[int, list[int]] = defaultdict(list)
+    for mid, pid in muted.items():
+        by_primary[pid].append(mid)
+
+    confirmed: dict[int, int] = {}
+    for pid, dups in by_primary.items():
+        pvec = vec.get(pid)
+        if pvec is None:
+            pvec = sent_vec.get(pid)
+        need_llm: list[int] = []
+        for d in dups:
+            dv = vec.get(d)
+            if dv is not None and pvec is not None and cosine(dv, pvec) >= settings.merge_near_dup_threshold:
+                confirmed[d] = pid  # near-identical repost: certain dup, no LLM needed
+            else:
+                need_llm.append(d)
+        if not need_llm:
+            continue
+
+        primary_summary = (
+            _field(item_by_id[pid], "summary", "") if pid in item_by_id else sent_summary.get(pid, "")
+        ) or ""
+        inputs = [{"id": pid, "text": primary_summary}]
+        inputs += [{"id": d, "text": _field(item_by_id[d], "summary", "") or ""} for d in need_llm]
+        try:
+            groups = await group_by_topic(inputs)
+        except Exception as exc:
+            log.warning("B1: LLM confirm failed for primary id=%d, keeping %d candidate(s) unmuted: %s",
+                        pid, len(need_llm), exc)
+            continue
+        same_event: set[int] = set()
+        for g in groups:
+            if pid in g.get("ids", []):
+                same_event.update(g["ids"])
+        for d in need_llm:
+            if d in same_event:
+                confirmed[d] = pid
+            else:
+                log.info("B1: kept item id=%d — LLM says different event from primary id=%d", d, pid)
+    return confirmed
+
+
 async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, dict[int, list[tuple[str, str]]]]:
     items = list(items)
     if len(items) < 2 or len(vec) < 2:
@@ -239,7 +296,7 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
         score = f"{cosine(vec[mid], primary_vec):.3f}" if (mid in vec and primary_vec is not None) else "n/a"
         log.info(
             "%s cross-source duplicate: item id=%d (%s) -> primary id=%d | cosine=%s | summary=%s",
-            "WOULD-MUTE" if settings.dedup_shadow else "Muting",
+            "WOULD-MUTE" if settings.dedup_shadow else "Candidate",
             mid, _field(it, "source_name", "?"), pid, score, (_field(it, "summary", "") or "")[:80],
         )
 
@@ -247,9 +304,16 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
         log.info("Cross-source dedup SHADOW: %d duplicate(s) detected, nothing hidden", len(muted))
         return items, {}
 
+    candidates = len(muted)
+    muted = await _confirm_mutes(muted, item_by_id, sent_summary, vec, sent_vec)
+    if not muted:
+        log.info("Cross-source dedup: %d candidate(s) all rejected by LLM, nothing muted", candidates)
+        return items, {}
+
     for mid, pid in muted.items():
         await mark_duplicate(mid, pid)
     survivors = [it for it in items if _field(it, "id") not in muted]
     link_map = await get_duplicate_links([_field(it, "id") for it in survivors])
-    log.info("Cross-source dedup: muted %d duplicate(s), %d survivor(s)", len(muted), len(survivors))
+    log.info("Cross-source dedup: muted %d/%d candidate(s) after LLM confirm, %d survivor(s)",
+             len(muted), candidates, len(survivors))
     return survivors, link_map

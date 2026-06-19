@@ -361,6 +361,20 @@ def _build_digest_text(
     return segments
 
 
+def _quiet_source_url(row) -> str | None:
+    """Clickable link for a quiet source: a Telegram handle becomes a t.me link,
+    an RSS feed links straight to its url. None when there is nothing linkable."""
+    url = (row["url"] or "").strip()
+    if not url:
+        return None
+    if row["type"] == "telegram" and not url.startswith("http"):
+        handle = url.lstrip("@")
+        # Public usernames start with a letter; a numeric/empty handle (private
+        # chat id) has no usable t.me link, so leave it as plain text.
+        return f"https://t.me/{handle}" if handle[:1].isalpha() else None
+    return url if url.startswith("http") else None
+
+
 async def _build_silent_block() -> str:
     sources = await get_silent_sources(120)
     if not sources:
@@ -369,7 +383,10 @@ async def _build_silent_block() -> str:
     for row in sources:
         hours = row["hours_silent"]
         age = f"{hours // 24}d" if hours is not None else "never"
-        lines.append(f"• {escape(row['name'])} [{row['type']}] — {age}")
+        name = escape(row["name"])
+        url = _quiet_source_url(row)
+        label = f'<a href="{escape(url, quote=True)}">{name}</a>' if url else name
+        lines.append(f"• {label} [{row['type']}] — {age}")
     return "<blockquote expandable>" + "\n".join(lines) + "</blockquote>"
 
 

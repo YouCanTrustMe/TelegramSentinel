@@ -24,9 +24,11 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_embed_model: str = "gemini-embedding-001"
     dedup_enabled: bool = True
-    # Shadow mode logs would-be duplicates without hiding anything; flip off once
-    # the threshold is validated against real digests.
-    dedup_shadow: bool = True
+    # Shadow mode logs would-be duplicates without hiding anything. Enforcement is
+    # now live: embeddings only pre-select candidates and an LLM confirms each is
+    # the same event before muting (cross_dedup._confirm_mutes), so the 0.86
+    # threshold can't silently drop a distinct cross-source story on vocabulary alone.
+    dedup_shadow: bool = False
     dedup_threshold: float = 0.86
     dedup_window_hours: int = 24
     # Tuning window: log every cross-source candidate pair at/above this cosine

@@ -5,6 +5,7 @@ key or quota issue yields None embeddings so the caller skips dedup rather than
 losing items. Kept separate from clustering logic in cross_dedup.py."""
 import asyncio
 import logging
+import re
 import time
 from array import array
 
@@ -16,13 +17,26 @@ from src.config import settings
 log = logging.getLogger(__name__)
 
 _ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:batchEmbedContents"
-# Keep a chunk at/below the per-minute budget so one chunk never alone exceeds it.
-_BATCH_LIMIT = 90
+# Smaller chunks (well under the per-minute content budget) so one chunk can't
+# dump a whole minute's allowance at once. The free tier counts requests over a
+# rolling 60s window, so a 90-burst followed by the throttled remainder of a big
+# digest used to push the window over the limit and 429 the tail.
+_BATCH_LIMIT = 60
 _OUTPUT_DIMS = 768
 _TIMEOUT = aiohttp.ClientTimeout(total=60)
 _MAX_RATE_WAIT = 65.0  # cap a single throttle wait; beyond this, let it fail-open
+_RETRY_429_WAIT = 50.0  # fallback wait before retrying a rate-limited chunk once
+_RETRY_DELAY_RE = re.compile(r'"retryDelay"\s*:\s*"(\d+)s"')
 
 _session: aiohttp.ClientSession | None = None
+
+
+class _RateLimited(Exception):
+    """A 429 from the embedding API: retryable after a short wait, unlike other
+    transport errors which fail open immediately."""
+
+    def __init__(self, retry_after: float | None) -> None:
+        self.retry_after = retry_after
 
 # Token-bucket rate limiter (a small async queue with backpressure) so embedding
 # bursts stay under the Gemini free per-minute budget instead of hitting 429s.
@@ -104,6 +118,9 @@ async def _embed_chunk(texts: list[str]) -> list[list[float] | None]:
         if resp.status != 200:
             body = await resp.text()
             log.warning("Gemini embed failed: %s %s", resp.status, body[:300])
+            if resp.status == 429:
+                m = _RETRY_DELAY_RE.search(body)
+                raise _RateLimited(float(m.group(1)) if m else None)
             return [None] * len(texts)
         data = await resp.json()
     embeddings = data.get("embeddings") or []
@@ -130,6 +147,19 @@ async def embed_texts(texts: list[str]) -> list[list[float] | None]:
         try:
             await _rate_acquire(len(chunk))
             out.extend(await _embed_chunk(chunk))
+        except _RateLimited as rl:
+            # The 429 means a big digest's tail spilled over the rolling per-minute
+            # window. Wait it out once and retry so dedup/merge get full coverage
+            # rather than silently skipping the overflow items.
+            wait = min(rl.retry_after or _RETRY_429_WAIT, _MAX_RATE_WAIT)
+            log.info("Gemini 429 on chunk %d, waiting %.0fs and retrying once", i // _BATCH_LIMIT, wait)
+            await asyncio.sleep(wait)
+            try:
+                await _rate_acquire(len(chunk))
+                out.extend(await _embed_chunk(chunk))
+            except Exception as exc:
+                log.warning("Gemini embed retry failed on chunk %d: %s", i // _BATCH_LIMIT, exc)
+                out.extend([None] * len(chunk))
         except Exception as exc:
             log.warning("Gemini embed error on chunk %d: %s", i // _BATCH_LIMIT, exc)
             out.extend([None] * len(chunk))

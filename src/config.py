@@ -32,8 +32,9 @@ class Settings(BaseSettings):
     # Tuning window: log every cross-source candidate pair at/above this cosine
     # (wider than dedup_threshold) so a week of logs can pin the ideal threshold.
     dedup_log_floor: float = 0.80
-    # Gemini free embedding tier allows ~100 texts/min; cap to stay under it.
-    embed_rpm: int = 90
+    # Gemini free embedding tier allows ~100 texts/min over a rolling 60s window;
+    # keep steady throughput below it so a big digest's tail doesn't 429.
+    embed_rpm: int = 70
 
     # Within-source merge: embeddings (reusing dedup vectors) pre-filter candidate
     # clusters, then the LLM decides the real same-event grouping. Embeddings alone

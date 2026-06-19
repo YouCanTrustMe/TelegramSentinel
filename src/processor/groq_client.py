@@ -7,11 +7,74 @@ import json
 import logging
 import time
 
-from groq import AsyncGroq, RateLimitError
+from groq import AsyncGroq, BadRequestError, RateLimitError
 
 from src.config import settings
 
 log = logging.getLogger(__name__)
+
+
+def _escape_stray_quotes(text: str) -> str:
+    """Escape straight double quotes that sit inside a JSON string value (the way
+    the model breaks its own JSON, e.g. summary "ставку на "втілену AI""). A quote
+    only closes a string when the next non-space char is structural (,:}]) or EOF;
+    any other quote inside a string is a stray and gets escaped."""
+    out: list[str] = []
+    in_str = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if in_str and ch == "\\" and i + 1 < n:
+            out.append(ch)
+            out.append(text[i + 1])
+            i += 2
+            continue
+        if ch == '"':
+            if not in_str:
+                in_str = True
+                out.append(ch)
+            else:
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if j >= n or text[j] in ",:}]":
+                    in_str = False
+                    out.append(ch)
+                else:
+                    out.append('\\"')
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _coerce_json(text: str) -> dict | None:
+    """Parse text as a JSON object, retrying once after escaping stray quotes."""
+    for candidate in (text, _escape_stray_quotes(text)):
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _repair_from_error(exc: BadRequestError) -> dict | None:
+    """Recover a usable object from a json_validate_failed error: Groq returns the
+    model's malformed output in `failed_generation`, which is almost always valid
+    apart from unescaped inner quotes."""
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return None
+    err = body.get("error")
+    if not isinstance(err, dict) or err.get("code") != "json_validate_failed":
+        return None
+    failed = err.get("failed_generation")
+    if not isinstance(failed, str) or not failed.strip():
+        return None
+    return _coerce_json(failed)
 
 _client = AsyncGroq(api_key=settings.groq_api_key)
 
@@ -205,6 +268,15 @@ async def groq_json(messages: list[dict], max_retries: int, model: str | None = 
             else:
                 log.warning("Groq rate limit persistent on %s after %d attempts, using raw-text fallback", effective, max_retries)
                 await _maybe_send_rate_limit_alert()
+        except BadRequestError as exc:
+            repaired = _repair_from_error(exc)
+            if repaired is not None:
+                _bump(effective, "ok")
+                log.info("Groq json_validate_failed on %s, repaired malformed JSON", effective)
+                return repaired
+            _bump(effective, "error")
+            log.warning("Groq call error on %s: %s", effective, exc)
+            return {}
         except Exception as exc:
             _bump(effective, "error")
             log.warning("Groq call error on %s: %s", effective, exc)

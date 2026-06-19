@@ -36,12 +36,19 @@ Examples:
   RU: "Президент подписал указ о повышении налогов" → "Президент підписав указ про підвищення податків"
 """
 
+# Straight double quotes inside a JSON string value, unescaped, are the single
+# most common way the model breaks its own JSON. Ukrainian uses « » natively, so
+# steering quotes there fixes the root cause and reads correctly.
+_QUOTE_RULE = "QUOTE RULE: inside any summary or key_phrase use « » for quotation marks — NEVER straight double quotes (they break the JSON)."
+
 _SYSTEM_PROMPT = f"""Summarize news for a Ukrainian digest. Output JSON only.
 
 {_TRANSLATE_RULE}
 summary: up to 15 words for simple news; up to 25 words when the event has multiple key details (numbers, names, consequences). Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, з'явилась інформація, відбулась подія, автор, допис, пост, розповідає, пише.
 
 key_phrase: 1-3 words, best anchor for the link. Priority: person > org > asset ticker > action phrase > location. Use a generic Ukrainian city only if nothing more distinctive exists. Never: автор, допис, інформація, подія, новина.
+
+{_QUOTE_RULE}
 
 Respond ONLY with JSON: {{"summary": "...", "key_phrase": "..."}}"""
 
@@ -58,6 +65,8 @@ Per group:
 - summary: Single item: up to 20 words. Merged (2-3 items): up to 35 words — include the key development from each merged item. Start with key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Never start with: повідомляється, стало відомо, автор, допис, пост.
 - key_phrase: 1-3 words. Priority: person > org > asset > action > location. Never: автор, допис, інформація, подія.
 
+{_QUOTE_RULE}
+
 Respond ONLY with JSON: {{"groups": [{{"ids": [0], "summary": "...", "key_phrase": "..."}}]}}"""
 
 _MULTI_SYSTEM_PROMPT = f"""Summarize each news item separately in Ukrainian. Output JSON only.
@@ -68,6 +77,8 @@ Items are numbered from 0. Produce exactly one entry per input id. Do NOT merge 
 Per item:
 - summary: Up to 20 words; up to 25 words for events with multiple key details. Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
 - key_phrase: 1-3 words. Priority: person > org > asset > action > location. Generic city only if nothing better. Never: автор, допис, інформація, подія.
+
+{_QUOTE_RULE}
 
 Respond ONLY with JSON: {{"items": [{{"id": 0, "summary": "...", "key_phrase": "..."}}]}}"""
 

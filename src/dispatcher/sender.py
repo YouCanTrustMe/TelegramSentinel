@@ -1,3 +1,5 @@
+import asyncio
+import json
 import logging
 
 import aiohttp
@@ -6,6 +8,21 @@ from pyrogram import Client
 from src.config import settings
 
 log = logging.getLogger(__name__)
+
+# Telegram Bot API rate-limits a chat to ~20 messages/min; a multi-message digest
+# can trip a 429. Retry honouring the server's retry_after so the digest finishes
+# rather than aborting mid-way (the rest would otherwise wait for the next run).
+_SEND_MAX_RETRIES = 3
+_SEND_RETRY_DEFAULT = 3.0
+
+
+def _retry_after(body: str, default: float = _SEND_RETRY_DEFAULT) -> float:
+    try:
+        params = json.loads(body).get("parameters") or {}
+        value = params.get("retry_after")
+        return float(value) if value else default
+    except (ValueError, TypeError, AttributeError):
+        return default
 
 bot = Client(
     "sessions/sentinel_bot",
@@ -42,15 +59,23 @@ async def send_message(text: str, disable_notification: bool = False) -> int:
         "disable_web_page_preview": True,
         "disable_notification": disable_notification,
     }
-    async with _get_session().post(url, json=payload) as resp:
-        if resp.status != 200:
+    for attempt in range(_SEND_MAX_RETRIES):
+        async with _get_session().post(url, json=payload) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                message_id: int = data["result"]["message_id"]
+                log.debug("Message sent to supergroup (%d chars) | message_id=%d", len(text), message_id)
+                return message_id
             body = await resp.text()
+            if resp.status == 429 and attempt < _SEND_MAX_RETRIES - 1:
+                wait = _retry_after(body)
+                log.warning("Bot API sendMessage 429, retrying after %.0fs (attempt %d/%d)",
+                            wait, attempt + 1, _SEND_MAX_RETRIES)
+                await asyncio.sleep(wait)
+                continue
             log.error("Bot API sendMessage failed: %s %s", resp.status, body)
             raise RuntimeError(f"sendMessage failed: {resp.status}")
-        data = await resp.json()
-    message_id: int = data["result"]["message_id"]
-    log.debug("Message sent to supergroup (%d chars) | message_id=%d", len(text), message_id)
-    return message_id
+    raise RuntimeError("sendMessage failed: retries exhausted")
 
 
 async def pin_message(message_id: int) -> None:

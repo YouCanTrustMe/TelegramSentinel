@@ -117,10 +117,14 @@ async def _embed_chunk(texts: list[str]) -> list[list[float] | None]:
     async with _get_session().post(url, params={"key": settings.gemini_api_key}, json=payload) as resp:
         if resp.status != 200:
             body = await resp.text()
-            log.warning("Gemini embed failed: %s %s", resp.status, body[:300])
             if resp.status == 429:
+                # Recoverable: embed_texts retries the chunk once. Log at INFO so a
+                # transient 429 we recover from doesn't page the admin through the
+                # WARNING-forwarding log handler; a retry that still fails warns there.
+                log.info("Gemini embed 429 (will retry chunk): %s", body[:200])
                 m = _RETRY_DELAY_RE.search(body)
                 raise _RateLimited(float(m.group(1)) if m else None)
+            log.warning("Gemini embed failed: %s %s", resp.status, body[:300])
             return [None] * len(texts)
         data = await resp.json()
     embeddings = data.get("embeddings") or []

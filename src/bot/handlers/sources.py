@@ -24,7 +24,6 @@ from src.db.models import (
     place_source_at_bottom,
     reassign_source_category,
     remove_source,
-    rename_source,
     reorder_source,
     set_source_chat_id,
     set_source_pending_msg_id,

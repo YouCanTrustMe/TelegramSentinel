@@ -11,19 +11,16 @@ from src.bot.keyboards import (
     _cat_view_text,
     _confirm_keyboard,
     _edit_time_kb,
-    _time_step_kb,
 )
 from src.bot.state import _DEFAULT_DIGEST_TIME, _pending
 from src.db.models import (
     add_category,
-    bulk_set_category_prompt_extra,
     delete_sources_by_category,
     get_categories,
     get_sources_by_category,
     move_sources_to_category,
     reorder_category,
     remove_category,
-    update_category,
 )
 from src.scheduler import rebuild_digest_jobs
 

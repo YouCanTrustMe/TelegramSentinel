@@ -19,7 +19,7 @@ from src.bot.keyboards import (
     _time_step_kb,
     _edit_time_kb,
 )
-from src.bot.state import _DEFAULT_DIGEST_TIME, _pending
+from src.bot.state import _pending
 from src.db.models import (
     add_blocked_word,
     bulk_set_category_prompt_extra,
@@ -206,7 +206,7 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                     log.info("Category emoji updated: %s -> %s", cat_name, new_emoji)
                     text_out, sources = await _cat_view_text(cat_name)
                     await message.reply(
-                        f"✅ Emoji updated.\n\n" + text_out,
+                        "✅ Emoji updated.\n\n" + text_out,
                         reply_markup=_category_view_keyboard(cat_name, sources),
                     )
                 else:

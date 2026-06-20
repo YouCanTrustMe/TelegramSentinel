@@ -86,9 +86,9 @@ async def _warn_if_duplicate_chat(source_id: int, source_name: str, chat_id: int
     if not dupes:
         return
     lines = [
-        f"⚠️ <b>Duplicate source detected</b>",
+        "⚠️ <b>Duplicate source detected</b>",
         f"<b>{source_name}</b> (id={source_id}) resolved to chat_id <code>{chat_id}</code>,",
-        f"which is already used by:",
+        "which is already used by:",
     ]
     for d in dupes:
         lines.append(f"  • <b>{d['name']}</b> (id={d['id']}, status={d['status']}, url=<code>{d['url']}</code>)")

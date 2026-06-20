@@ -1,5 +1,4 @@
 import logging
-from html import escape
 
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 

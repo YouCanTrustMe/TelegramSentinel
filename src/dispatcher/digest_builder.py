@@ -11,10 +11,10 @@ from zoneinfo import ZoneInfo
 from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
-from src.processor.classifier import ClassificationResult, classify, check_blocked_filters, group_by_topic, is_quota_dead, _wants_no_merge, _wants_no_filter
-from src.processor.cross_dedup import cluster_within_source, deduplicate, ensure_embeddings
-from src.processor.embedder import cosine
+from src.processor.classifier import ClassificationResult, classify, check_blocked_filters, is_quota_dead, _wants_no_merge, _wants_no_filter
+from src.processor.cross_dedup import deduplicate, ensure_embeddings
 from src.processor.groq_client import format_groq_stats, reset_groq_stats
+from src.processor.merge import MERGE_MIN_ITEMS, merge_source_items
 
 log = logging.getLogger(__name__)
 
@@ -121,162 +121,6 @@ def _format_item_base(item: dict) -> str:
     if summary_text.strip():
         return f"{prefix}{summary}{suffix}"
     return ""
-
-
-_MERGE_MIN_ITEMS = 4
-
-
-def _items_as_plain(items: list) -> list[dict]:
-    return [
-        {
-            "summary": item["summary"],
-            "key_phrase": item["key_phrase"] if "key_phrase" in item.keys() else "",
-            "original_url": item["original_url"],
-            "published_at": item["published_at"],
-            "raw_text": item["raw_text"],
-            "_item_ids": [item["id"]],
-        }
-        for item in items
-    ]
-
-
-async def _merge_source_items(
-    items: list,
-    prompt_extra: str | None = None,
-    vectors: dict | None = None,
-    stats: dict | None = None,
-) -> list[dict]:
-    if _wants_no_merge(prompt_extra):
-        return _items_as_plain(items)
-    if settings.merge_via_embeddings and vectors is not None:
-        return await _merge_via_embeddings(items, vectors, prompt_extra, stats)
-    return await _merge_via_group_by_topic(items, prompt_extra)
-
-
-def _cluster_summary_fields(cluster: list) -> tuple[str, str]:
-    """Most-detailed existing summary of a cluster (fallback when no LLM call)."""
-    best = max(cluster, key=lambda it: len((it["summary"] or "")))
-    return (best["summary"] or "", (best["key_phrase"] if "key_phrase" in best.keys() else "") or "")
-
-
-def _build_merged(cluster: list, summary: str, key_phrase: str) -> dict:
-    if summary and len(cluster) > 1:
-        summary = f"{summary} · merged {len(cluster)}"
-    return {
-        "summary": summary,
-        "key_phrase": key_phrase,
-        "original_url": next((it["original_url"] for it in cluster if it["original_url"]), None),
-        "published_at": max((it["published_at"] for it in cluster if it["published_at"]), default=None),
-        "raw_text": None,
-        "_item_ids": [it["id"] for it in cluster],
-    }
-
-
-async def _llm_subgroup(cluster: list, prompt_extra: str | None) -> list[tuple[list, str, str]]:
-    """Let the LLM split an embedding candidate cluster into real same-event
-    groups (embeddings over-merge in high-overlap domains, so the LLM is the
-    arbiter). Returns (items, summary, key_phrase) per resulting group."""
-    raw_inputs = [{"id": i, "text": it["summary"] or it["raw_text"] or ""} for i, it in enumerate(cluster)]
-    groups = await group_by_topic(raw_inputs, prompt_extra=prompt_extra)
-    out = []
-    for g in groups:
-        sub = [cluster[i] for i in g["ids"]]
-        out.append((sub, g["summary"] or "", g.get("key_phrase") or ""))
-    return out
-
-
-async def _merge_via_embeddings(
-    items: list,
-    vectors: dict,
-    prompt_extra: str | None,
-    stats: dict | None,
-) -> list[dict]:
-    if len(items) < 2:
-        return _items_as_plain(items)
-    # Embeddings only PRE-FILTER plausibly-related items; the LLM decides whether
-    # a candidate cluster is actually one event (different strikes share vocabulary
-    # and would otherwise be wrongly merged).
-    clusters = cluster_within_source(items, vectors, settings.merge_prefilter_threshold)
-    out: list[dict] = []
-    for cluster in clusters:
-        if len(cluster) == 1:
-            out.extend(_items_as_plain(cluster))
-            continue
-        ids = [it["id"] for it in cluster]
-        min_cos = min(
-            cosine(vectors[ids[i]], vectors[ids[j]])
-            for i in range(len(ids)) for j in range(i + 1, len(ids))
-        )
-        if min_cos >= settings.merge_near_dup_threshold:
-            # Near-identical (reposts/paraphrases): safe to merge without the LLM.
-            log.info("MERGE-CANDIDATE min_cos=%.3f size=%d -> near-dup auto-merge", min_cos, len(cluster))
-            summary, key_phrase = _cluster_summary_fields(cluster)
-            out.append(_build_merged(cluster, summary, key_phrase))
-            if stats is not None:
-                stats["near_dup"] += 1
-            continue
-        try:
-            subgroups = await _llm_subgroup(cluster, prompt_extra)
-        except Exception as exc:
-            log.warning("LLM subgrouping failed, keeping items separate: %s", exc)
-            out.extend(_items_as_plain(cluster))
-            continue
-        merged_sizes = [len(sub) for sub, _, _ in subgroups if len(sub) > 1]
-        log.info("MERGE-CANDIDATE min_cos=%.3f size=%d -> LLM verdict: %s",
-                 min_cos, len(cluster),
-                 f"merged {merged_sizes}" if merged_sizes else "split (all separate)")
-        if stats is not None:
-            stats["llm"] += 1
-        for sub, summ, kp in subgroups:
-            if len(sub) == 1:
-                out.extend(_items_as_plain(sub))
-                continue
-            if not summ:
-                summ, kp = _cluster_summary_fields(sub)
-            out.append(_build_merged(sub, summ, kp))
-            if stats is not None:
-                stats["clusters"] += 1
-    return out
-
-
-async def _merge_via_group_by_topic(items: list, prompt_extra: str | None = None) -> list[dict]:
-    if len(items) < _MERGE_MIN_ITEMS:
-        return _items_as_plain(items)
-
-    if is_quota_dead(settings.groq_model_batch) and is_quota_dead(settings.groq_model_fallback):
-        log.info("Skipping group_by_topic for source: batch model and fallback both quota dead, returning items as-is")
-        return _items_as_plain(items)
-
-    raw_inputs = [{"id": i, "text": item["summary"] or item["raw_text"] or ""} for i, item in enumerate(items)]
-    try:
-        groups = await group_by_topic(raw_inputs, prompt_extra=prompt_extra)
-        merged = []
-        for g in groups:
-            group_items = [items[i] for i in g["ids"]]
-            url = next((x["original_url"] for x in group_items if x["original_url"]), None)
-            pub = max(
-                (x["published_at"] for x in group_items if x["published_at"]),
-                default=None,
-            )
-            summary = g["summary"] or group_items[0]["summary"] or ""
-            if not summary:
-                raw_fallback = (group_items[0]["raw_text"] or "")[:80].split("\n")[0]
-                summary = raw_fallback
-            n = len(g["ids"])
-            if n > 1:
-                summary = f"{summary} · merged {n}"
-            merged.append({
-                "summary": summary,
-                "key_phrase": g.get("key_phrase") or "",
-                "original_url": url,
-                "published_at": pub,
-                "raw_text": None,
-                "_item_ids": [gi["id"] for gi in group_items],
-            })
-        return merged
-    except Exception as exc:
-        log.warning("Topic merging failed, using original items: %s", exc)
-        return _items_as_plain(items)
 
 
 def _source_blocks(
@@ -407,6 +251,179 @@ def _split_into_messages(segments: list[tuple[str, list[int]]]) -> list[tuple[st
     return messages
 
 
+async def _discard_building(building_msg_id: int | None) -> None:
+    """Best-effort removal of the transient "Building digest..." status message."""
+    if building_msg_id:
+        try:
+            await delete_message(building_msg_id)
+        except Exception:
+            pass
+
+
+_RECLASSIFY_TIMEOUT = 120.0
+
+
+async def _reclassify_empty_summaries(items: list, update: Callable[[str], Awaitable[None]]) -> list:
+    """Re-run classification on items with an empty summary but non-empty raw
+    text, bounded by a wall-clock timeout and per-model quota. Returns the
+    (possibly rebuilt) list; items still empty fall through to _defer_empty_items."""
+    empty = [item for item in items if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip()]
+    if not empty:
+        return items
+    log.info("Re-classifying %d item(s) with empty summary before digest (timeout=%ds)", len(empty), int(_RECLASSIFY_TIMEOUT))
+    items = list(items)
+    reclassify_start = time.monotonic()
+    done = 0
+    for i, item in enumerate(items):
+        if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip():
+            if is_quota_dead(settings.groq_model_classify) and is_quota_dead(settings.groq_model_fallback):
+                remaining = sum(1 for x in items[i:] if not (x["summary"] or "").strip())
+                log.warning("Re-classify aborted: classify model and fallback both quota dead, %d items will show as link", remaining)
+                break
+            elapsed = time.monotonic() - reclassify_start
+            if elapsed > _RECLASSIFY_TIMEOUT:
+                remaining = sum(1 for x in items[i:] if not (x["summary"] or "").strip())
+                log.warning("Re-classify timeout after %.0fs, %d items will show as link", elapsed, remaining)
+                break
+            await update(f"⏳ Re-classifying {done + 1}/{len(empty)}...")
+            raw = (item["raw_text"] or "").strip()
+            if len(raw) < 15:
+                await update_item_classification(item["id"], raw, "")
+                items[i] = {**dict(item), "summary": raw, "key_phrase": ""}
+                log.info("Short raw_text used as summary for item id=%d", item["id"])
+            else:
+                remaining_time = _RECLASSIFY_TIMEOUT - (time.monotonic() - reclassify_start)
+                try:
+                    result = await asyncio.wait_for(classify(raw, max_retries=3), timeout=max(5.0, remaining_time))
+                except asyncio.TimeoutError:
+                    log.warning("Re-classify timed out on item id=%d, will show as link", item["id"])
+                    result = ClassificationResult(summary="")
+                if result.summary:
+                    await update_item_classification(item["id"], result.summary, result.key_phrase)
+                    items[i] = {**dict(item), "summary": result.summary, "key_phrase": result.key_phrase}
+                    log.info("Re-classified item id=%d | summary=%s", item["id"], result.summary)
+                else:
+                    log.warning("Re-classify gave up on item id=%d, will show as link", item["id"])
+            done += 1
+    return items
+
+
+async def _defer_empty_items(items: list) -> tuple[list, int]:
+    """Resolve items still empty after re-classify: ones younger than
+    _DEFER_MAX_DAYS are deferred for a later retry, older ones get a raw-text
+    fallback summary. Returns (kept_items, deferred_count)."""
+    now = datetime.now(timezone.utc)
+    kept, deferred = [], 0
+    for item in items:
+        if (item["summary"] or "").strip() or not (item["raw_text"] or "").strip():
+            kept.append(item)
+            continue
+        ts = item["processed_at"] or item["published_at"]
+        age_days = None
+        if ts:
+            try:
+                age_days = (now - datetime.fromisoformat(ts)).total_seconds() / 86400
+            except ValueError:
+                age_days = None
+        if age_days is not None and age_days < _DEFER_MAX_DAYS:
+            deferred += 1
+            continue
+        raw = (item["raw_text"] or "").strip()
+        fallback = "⚠️ " + raw[:80].split("\n")[0]
+        await update_item_classification(item["id"], fallback, "")
+        kept.append({**dict(item), "summary": fallback})
+    return kept, deferred
+
+
+async def _apply_semantic_filter(items: list) -> tuple[list, list]:
+    """Run the LLM content filter over items that some rule targets. Blocked
+    items are marked sent and returned separately for the Filtered section.
+    Fail-open: on error the digest goes out unfiltered. Returns (kept, blocked)."""
+    filter_rules_rows = await get_blocked_words()
+    blocked_items: list = []
+    if not filter_rules_rows:
+        return items, blocked_items
+    try:
+        rules = [r["rule"] for r in filter_rules_rows]
+        scope_map = await get_word_category_map()
+        # Aligned with `rules`: None means the rule applies to every category.
+        rule_scopes = [scope_map.get(r["id"]) or None for r in filter_rules_rows]
+
+        def _has_applicable_rule(cat: str) -> bool:
+            return any(scope is None or cat in scope for scope in rule_scopes)
+
+        filterable, no_filter = [], []
+        for item in items:
+            prompt_extra = item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None
+            cat = item["category"] or "other"
+            # Skip the LLM filter for items no rule targets (saves tokens) and for opted-out sources.
+            if _wants_no_filter(prompt_extra) or not _has_applicable_rule(cat):
+                no_filter.append(item)
+            else:
+                filterable.append(item)
+        check_input = [
+            {
+                "id": item["id"],
+                "text": (item["summary"] or "") + " " + (item["raw_text"] or ""),
+                "source": item["source_name"] or "unknown",
+                "category": item["category"] or "other",
+            }
+            for item in filterable
+        ]
+        blocked_map = await check_blocked_filters(check_input, rules, rule_scopes)
+        if blocked_map:
+            for item in filterable:
+                matched_rule = blocked_map.get(item["id"])
+                if matched_rule is not None:
+                    blocked_items.append({**item, "blocked_by": matched_rule})
+                    log.info("Blocked item id=%d | rule=%r | summary=%s", item["id"], matched_rule, (item["summary"] or "")[:80])
+            await mark_sent([item["id"] for item in blocked_items])
+            log.info("Blocked %d item(s) by semantic filter", len(blocked_items))
+        items = no_filter + [item for item in filterable if item["id"] not in blocked_map]
+    except Exception:
+        log.exception("Semantic filter failed, sending digest unfiltered")
+        blocked_items = []
+    return items, blocked_items
+
+
+async def _run_within_source_merge(
+    cat_meta: dict,
+    source_prompt_extra: dict,
+    vectors: dict,
+    update: Callable[[str], Awaitable[None]],
+) -> None:
+    """Merge same-event items within each source in place, with progress updates."""
+    # Embedding-based merge clusters cheaply, so it is worth running from 2 items;
+    # the old LLM path only paid off in bulk (>= MERGE_MIN_ITEMS).
+    merge_min = 2 if settings.merge_via_embeddings else MERGE_MIN_ITEMS
+    sources_to_merge = [
+        (cat_name, source_name)
+        for cat_name, data in cat_meta.items()
+        for source_name, source_items in data["sources"].items()
+        if len(source_items) >= merge_min and not _wants_no_merge(source_prompt_extra.get(source_name))
+    ]
+    merge_stats = {"clusters": 0, "llm": 0, "near_dup": 0}
+    merge_total = len(sources_to_merge)
+    merge_done = 0
+    if merge_total:
+        await update(f"⏳ {_progress_bar(0, merge_total)} 0/{merge_total}")
+    for cat_name, source_name in sources_to_merge:
+        cat_meta[cat_name]["sources"][source_name] = await merge_source_items(
+            cat_meta[cat_name]["sources"][source_name],
+            prompt_extra=source_prompt_extra.get(source_name),
+            vectors=vectors,
+            stats=merge_stats,
+        )
+        merge_done += 1
+        await update(f"⏳ {_progress_bar(merge_done, merge_total)} {merge_done}/{merge_total} — {source_name}")
+    if merge_total:
+        log.info(
+            "Within-source merge: sources=%d clusters_merged=%d llm_calls=%d near-dup-skip=%d | mode=%s",
+            merge_total, merge_stats["clusters"], merge_stats["llm"], merge_stats["near_dup"],
+            "embeddings" if settings.merge_via_embeddings else "group_by_topic",
+        )
+
+
 async def send_digest(
     categories: list[str] | None = None,
     include_quiet: bool = False,
@@ -448,128 +465,21 @@ async def _send_digest_locked(
         except Exception:
             pass
 
-    _RECLASSIFY_TIMEOUT = 120.0
-    empty = [item for item in items if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip()]
-    if empty:
-        log.info("Re-classifying %d item(s) with empty summary before digest (timeout=%ds)", len(empty), int(_RECLASSIFY_TIMEOUT))
-        items = list(items)
-        reclassify_start = time.monotonic()
-        done = 0
-        for i, item in enumerate(items):
-            if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip():
-                if is_quota_dead(settings.groq_model_classify) and is_quota_dead(settings.groq_model_fallback):
-                    remaining = sum(1 for x in items[i:] if not (x["summary"] or "").strip())
-                    log.warning("Re-classify aborted: classify model and fallback both quota dead, %d items will show as link", remaining)
-                    break
-                elapsed = time.monotonic() - reclassify_start
-                if elapsed > _RECLASSIFY_TIMEOUT:
-                    remaining = sum(1 for x in items[i:] if not (x["summary"] or "").strip())
-                    log.warning("Re-classify timeout after %.0fs, %d items will show as link", elapsed, remaining)
-                    break
-                await _update(f"⏳ Re-classifying {done + 1}/{len(empty)}...")
-                raw = (item["raw_text"] or "").strip()
-                if len(raw) < 15:
-                    await update_item_classification(item["id"], raw, "")
-                    items[i] = {**dict(item), "summary": raw, "key_phrase": ""}
-                    log.info("Short raw_text used as summary for item id=%d", item["id"])
-                else:
-                    remaining_time = _RECLASSIFY_TIMEOUT - (time.monotonic() - reclassify_start)
-                    try:
-                        result = await asyncio.wait_for(classify(raw, max_retries=3), timeout=max(5.0, remaining_time))
-                    except asyncio.TimeoutError:
-                        log.warning("Re-classify timed out on item id=%d, will show as link", item["id"])
-                        result = ClassificationResult(summary="")
-                    if result.summary:
-                        await update_item_classification(item["id"], result.summary, result.key_phrase)
-                        items[i] = {**dict(item), "summary": result.summary, "key_phrase": result.key_phrase}
-                        log.info("Re-classified item id=%d | summary=%s", item["id"], result.summary)
-                    else:
-                        log.warning("Re-classify gave up on item id=%d, will show as link", item["id"])
-                done += 1
+    items = await _reclassify_empty_summaries(items, _update)
 
-    now = datetime.now(timezone.utc)
-    kept, deferred = [], 0
-    for item in items:
-        if (item["summary"] or "").strip() or not (item["raw_text"] or "").strip():
-            kept.append(item)
-            continue
-        ts = item["processed_at"] or item["published_at"]
-        age_days = None
-        if ts:
-            try:
-                age_days = (now - datetime.fromisoformat(ts)).total_seconds() / 86400
-            except ValueError:
-                age_days = None
-        if age_days is not None and age_days < _DEFER_MAX_DAYS:
-            deferred += 1
-            continue
-        raw = (item["raw_text"] or "").strip()
-        fallback = "⚠️ " + raw[:80].split("\n")[0]
-        await update_item_classification(item["id"], fallback, "")
-        kept.append({**dict(item), "summary": fallback})
+    items, deferred = await _defer_empty_items(items)
     if deferred:
         log.info("Deferred %d empty item(s) past digest (younger than %dd), will retry later", deferred, _DEFER_MAX_DAYS)
-    items = kept
     if not items:
         log.info("Digest triggered: nothing to send after deferring %d empty item(s) | filter=%s", deferred, categories)
-        if building_msg_id:
-            try:
-                await delete_message(building_msg_id)
-            except Exception:
-                pass
+        await _discard_building(building_msg_id)
         return False
 
-    filter_rules_rows = await get_blocked_words()
-    blocked_items = []
-    if filter_rules_rows:
-        try:
-            rules = [r["rule"] for r in filter_rules_rows]
-            scope_map = await get_word_category_map()
-            # Aligned with `rules`: None means the rule applies to every category.
-            rule_scopes = [scope_map.get(r["id"]) or None for r in filter_rules_rows]
-
-            def _has_applicable_rule(cat: str) -> bool:
-                return any(scope is None or cat in scope for scope in rule_scopes)
-
-            filterable, no_filter = [], []
-            for item in items:
-                prompt_extra = item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None
-                cat = item["category"] or "other"
-                # Skip the LLM filter for items no rule targets (saves tokens) and for opted-out sources.
-                if _wants_no_filter(prompt_extra) or not _has_applicable_rule(cat):
-                    no_filter.append(item)
-                else:
-                    filterable.append(item)
-            check_input = [
-                {
-                    "id": item["id"],
-                    "text": (item["summary"] or "") + " " + (item["raw_text"] or ""),
-                    "source": item["source_name"] or "unknown",
-                    "category": item["category"] or "other",
-                }
-                for item in filterable
-            ]
-            blocked_map = await check_blocked_filters(check_input, rules, rule_scopes)
-            if blocked_map:
-                for item in filterable:
-                    matched_rule = blocked_map.get(item["id"])
-                    if matched_rule is not None:
-                        blocked_items.append({**item, "blocked_by": matched_rule})
-                        log.info("Blocked item id=%d | rule=%r | summary=%s", item["id"], matched_rule, (item["summary"] or "")[:80])
-                await mark_sent([item["id"] for item in blocked_items])
-                log.info("Blocked %d item(s) by semantic filter", len(blocked_items))
-            items = no_filter + [item for item in filterable if item["id"] not in blocked_map]
-        except Exception:
-            log.exception("Semantic filter failed, sending digest unfiltered")
-            blocked_items = []
-        if not items:
-            log.info("Digest triggered: all items filtered by semantic filter | filter=%s", categories)
-            if building_msg_id:
-                try:
-                    await delete_message(building_msg_id)
-                except Exception:
-                    pass
-            return False
+    items, blocked_items = await _apply_semantic_filter(items)
+    if not items:
+        log.info("Digest triggered: all items filtered by semantic filter | filter=%s", categories)
+        await _discard_building(building_msg_id)
+        return False
 
     # Embeddings are computed once here and shared by cross-source dedup and
     # within-source merge (both cluster on the same vectors).
@@ -582,11 +492,7 @@ async def _send_digest_locked(
         items, dup_link_map = await deduplicate(items, vectors)
         if not items:
             log.info("Digest triggered: all items deduplicated away | filter=%s", categories)
-            if building_msg_id:
-                try:
-                    await delete_message(building_msg_id)
-                except Exception:
-                    pass
+            await _discard_building(building_msg_id)
             return False
 
     all_categories = await get_categories()
@@ -609,35 +515,7 @@ async def _send_digest_locked(
             keys = item.keys()
             source_prompt_extra[sname] = item["source_prompt_extra"] if "source_prompt_extra" in keys else None
 
-    # Embedding-based merge clusters cheaply, so it is worth running from 2 items;
-    # the old LLM path only paid off in bulk (>= _MERGE_MIN_ITEMS).
-    merge_min = 2 if settings.merge_via_embeddings else _MERGE_MIN_ITEMS
-    sources_to_merge = [
-        (cat_name, source_name)
-        for cat_name, data in cat_meta.items()
-        for source_name, source_items in data["sources"].items()
-        if len(source_items) >= merge_min and not _wants_no_merge(source_prompt_extra.get(source_name))
-    ]
-    merge_stats = {"clusters": 0, "llm": 0, "near_dup": 0}
-    merge_total = len(sources_to_merge)
-    merge_done = 0
-    if merge_total:
-        await _update(f"⏳ {_progress_bar(0, merge_total)} 0/{merge_total}")
-    for cat_name, source_name in sources_to_merge:
-        cat_meta[cat_name]["sources"][source_name] = await _merge_source_items(
-            cat_meta[cat_name]["sources"][source_name],
-            prompt_extra=source_prompt_extra.get(source_name),
-            vectors=vectors,
-            stats=merge_stats,
-        )
-        merge_done += 1
-        await _update(f"⏳ {_progress_bar(merge_done, merge_total)} {merge_done}/{merge_total} — {source_name}")
-    if merge_total:
-        log.info(
-            "Within-source merge: sources=%d clusters_merged=%d llm_calls=%d near-dup-skip=%d | mode=%s",
-            merge_total, merge_stats["clusters"], merge_stats["llm"], merge_stats["near_dup"],
-            "embeddings" if settings.merge_via_embeddings else "group_by_topic",
-        )
+    await _run_within_source_merge(cat_meta, source_prompt_extra, vectors, _update)
 
     for data in cat_meta.values():
         for source_name, source_items in data["sources"].items():
@@ -665,12 +543,8 @@ async def _send_digest_locked(
     messages = _split_into_messages(segments)
 
     await _update("⏳ Sending...")
-    if building_msg_id:
-        try:
-            await delete_message(building_msg_id)
-        except Exception:
-            pass
-        building_msg_id = None
+    await _discard_building(building_msg_id)
+    building_msg_id = None
 
     # Mark only items whose message actually reached Telegram; on failure the
     # rest stay sent=0 for the next digest — no duplicates, no silent loss.

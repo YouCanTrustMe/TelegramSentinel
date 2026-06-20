@@ -424,6 +424,44 @@ async def _run_within_source_merge(
         )
 
 
+async def _deliver(messages: list[tuple[str, list[int]]]) -> tuple[int, int, int, bool]:
+    """Send each digest message, marking only items whose message actually
+    reached Telegram (a mid-batch failure leaves the rest sent=0 for the next
+    digest — no duplicates, no silent loss), then pin the first message.
+    Returns (sent_count, total_messages, confirmed_count, failed)."""
+    total_messages = len(messages)
+    confirmed_ids: list[int] = []
+    sent_count = 0
+    first_message_id: int | None = None
+    for msg_text, msg_ids in messages:
+        try:
+            msg_id = await send_message(msg_text, disable_notification=first_message_id is not None)
+            if first_message_id is None:
+                first_message_id = msg_id
+            confirmed_ids.extend(msg_ids)
+            sent_count += 1
+        except Exception as exc:
+            lost = total_messages - sent_count
+            log.error(
+                "Digest send failed at message %d/%d (%d message(s) and their items left unsent for retry): %s",
+                sent_count + 1, total_messages, lost, exc,
+            )
+            break
+
+    failed = sent_count < total_messages
+    if confirmed_ids:
+        await mark_sent(confirmed_ids)
+
+    if first_message_id and not failed:
+        prev_id = await get_app_setting("pinned_digest_message_id")
+        if prev_id:
+            await unpin_message(int(prev_id))
+        await pin_message(first_message_id)
+        await set_app_setting("pinned_digest_message_id", str(first_message_id))
+
+    return sent_count, total_messages, len(confirmed_ids), failed
+
+
 async def send_digest(
     categories: list[str] | None = None,
     include_quiet: bool = False,
@@ -545,44 +583,14 @@ async def _send_digest_locked(
     await _discard_building(building_msg_id)
     building_msg_id = None
 
-    # Mark only items whose message actually reached Telegram; on failure the
-    # rest stay sent=0 for the next digest — no duplicates, no silent loss.
-    total_messages = len(messages)
-    confirmed_ids: list[int] = []
-    sent_count = 0
-    first_message_id: int | None = None
-    for msg_text, msg_ids in messages:
-        try:
-            msg_id = await send_message(msg_text, disable_notification=first_message_id is not None)
-            if first_message_id is None:
-                first_message_id = msg_id
-            confirmed_ids.extend(msg_ids)
-            sent_count += 1
-        except Exception as exc:
-            lost = total_messages - sent_count
-            log.error(
-                "Digest send failed at message %d/%d (%d message(s) and their items left unsent for retry): %s",
-                sent_count + 1, total_messages, lost, exc,
-            )
-            break
-
-    failed = sent_count < total_messages
-    if confirmed_ids:
-        await mark_sent(confirmed_ids)
-
-    if first_message_id and not failed:
-        prev_id = await get_app_setting("pinned_digest_message_id")
-        if prev_id:
-            await unpin_message(int(prev_id))
-        await pin_message(first_message_id)
-        await set_app_setting("pinned_digest_message_id", str(first_message_id))
+    sent_count, total_messages, confirmed_count, failed = await _deliver(messages)
 
     status = "ok" if not failed else "partial"
     logged_total = len(items) + len(blocked_items)
     await log_digest(total=logged_total, status=status)
     log.info(
         "Digest done: %d items (%d filtered) | %d/%d message(s) sent | %d items confirmed | filter=%s | status=%s",
-        len(items), len(blocked_items), sent_count, total_messages, len(confirmed_ids), categories, status,
+        len(items), len(blocked_items), sent_count, total_messages, confirmed_count, categories, status,
     )
     log.info(format_groq_stats())
     reset_groq_stats()

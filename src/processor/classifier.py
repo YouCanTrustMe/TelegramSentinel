@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from src.config import settings
 from src.processor.groq_client import groq_json, is_quota_dead
+from src.util import needs_summary
 
 log = logging.getLogger(__name__)
 
@@ -354,10 +355,7 @@ async def classify_pending_items(limit: int = 3) -> None:
         return done
 
     items = await get_unsent_items()
-    pending = [
-        item for item in items
-        if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip()
-    ]
+    pending = [item for item in items if needs_summary(item)]
     short, long_items = _split(pending)
     for item, raw in short:
         await update_item_classification(item["id"], raw, "")

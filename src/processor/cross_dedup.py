@@ -23,6 +23,7 @@ from src.db.models import (
     set_item_embeddings,
 )
 from src.processor.classifier import group_by_topic
+from src.util import row_get
 from src.processor.embedder import cosine, embed_texts, from_blob, to_blob
 
 log = logging.getLogger(__name__)
@@ -219,7 +220,7 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
                 (row["id"], v, row["source_sort_order"], row["published_at"])
             )
             sent_vec[row["id"]] = v
-            sent_summary[row["id"]] = (row["summary"] if "summary" in row.keys() else "") or ""
+            sent_summary[row["id"]] = row_get(row, "summary", "") or ""
 
     floor = settings.dedup_log_floor
 

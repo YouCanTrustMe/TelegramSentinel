@@ -15,6 +15,7 @@ from src.processor.classifier import ClassificationResult, classify, check_block
 from src.processor.cross_dedup import deduplicate, ensure_embeddings
 from src.processor.groq_client import format_groq_stats, reset_groq_stats
 from src.processor.merge import MERGE_MIN_ITEMS, merge_source_items
+from src.util import needs_summary, row_get
 
 log = logging.getLogger(__name__)
 
@@ -86,11 +87,10 @@ def _format_item_base(item: dict) -> str:
         except Exception:
             pass
 
-    item_keys = item.keys()
     suffix = ""
 
     prefix = f"{hour} · " if hour else ""
-    key_phrase = ((item["key_phrase"] if "key_phrase" in item_keys else "") or "").strip()
+    key_phrase = (row_get(item, "key_phrase", "") or "").strip()
     if url and key_phrase:
         escaped_url = escape(url, quote=True)
         rest_text = summary_text.strip()
@@ -267,7 +267,7 @@ async def _reclassify_empty_summaries(items: list, update: Callable[[str], Await
     """Re-run classification on items with an empty summary but non-empty raw
     text, bounded by a wall-clock timeout and per-model quota. Returns the
     (possibly rebuilt) list; items still empty fall through to _defer_empty_items."""
-    empty = [item for item in items if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip()]
+    empty = [item for item in items if needs_summary(item)]
     if not empty:
         return items
     log.info("Re-classifying %d item(s) with empty summary before digest (timeout=%ds)", len(empty), int(_RECLASSIFY_TIMEOUT))
@@ -275,7 +275,7 @@ async def _reclassify_empty_summaries(items: list, update: Callable[[str], Await
     reclassify_start = time.monotonic()
     done = 0
     for i, item in enumerate(items):
-        if not (item["summary"] or "").strip() and (item["raw_text"] or "").strip():
+        if needs_summary(item):
             if is_quota_dead(settings.groq_model_classify) and is_quota_dead(settings.groq_model_fallback):
                 remaining = sum(1 for x in items[i:] if not (x["summary"] or "").strip())
                 log.warning("Re-classify aborted: classify model and fallback both quota dead, %d items will show as link", remaining)
@@ -315,7 +315,7 @@ async def _defer_empty_items(items: list) -> tuple[list, int]:
     now = datetime.now(timezone.utc)
     kept, deferred = [], 0
     for item in items:
-        if (item["summary"] or "").strip() or not (item["raw_text"] or "").strip():
+        if not needs_summary(item):
             kept.append(item)
             continue
         ts = item["processed_at"] or item["published_at"]
@@ -354,7 +354,7 @@ async def _apply_semantic_filter(items: list) -> tuple[list, list]:
 
         filterable, no_filter = [], []
         for item in items:
-            prompt_extra = item["source_prompt_extra"] if "source_prompt_extra" in item.keys() else None
+            prompt_extra = row_get(item, "source_prompt_extra")
             cat = item["category"] or "other"
             # Skip the LLM filter for items no rule targets (saves tokens) and for opted-out sources.
             if _wants_no_filter(prompt_extra) or not _has_applicable_rule(cat):
@@ -512,8 +512,7 @@ async def _send_digest_locked(
     for item in items:
         sname = item["source_name"] or "Unknown"
         if sname not in source_prompt_extra:
-            keys = item.keys()
-            source_prompt_extra[sname] = item["source_prompt_extra"] if "source_prompt_extra" in keys else None
+            source_prompt_extra[sname] = row_get(item, "source_prompt_extra")
 
     await _run_within_source_merge(cat_meta, source_prompt_extra, vectors, _update)
 

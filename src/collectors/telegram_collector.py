@@ -10,6 +10,7 @@ from src.config import settings
 from src.db.models import find_sources_by_chat_id, get_active_sources, increment_source_fail_count, reset_source_fail_count, save_item, set_source_chat_id, set_source_last_message_id, update_source_status, update_source_url
 from src.dispatcher.admin_alert import admin_alert
 from src.processor.deduplicator import is_duplicate, make_message_id
+from src.util import row_get
 
 log = logging.getLogger(__name__)
 
@@ -325,7 +326,7 @@ async def poll_telegram_once() -> None:
     try:
         sources = await get_active_sources(type_="telegram")
         for row in sources:
-            stored_chat_id = row["chat_id"] if "chat_id" in row.keys() else None
+            stored_chat_id = row_get(row, "chat_id")
             if stored_chat_id:
                 chat_ref = str(stored_chat_id)
             else:
@@ -334,8 +335,8 @@ async def poll_telegram_once() -> None:
                 "id": row["id"],
                 "name": row["name"],
                 "category": row["category"],
-                "last_message_id": row["last_message_id"] if "last_message_id" in row.keys() else None,
-                "chat_id": row["chat_id"] if "chat_id" in row.keys() else None,
+                "last_message_id": row_get(row, "last_message_id"),
+                "chat_id": row_get(row, "chat_id"),
             }
 
             if _is_invite_link(chat_ref):

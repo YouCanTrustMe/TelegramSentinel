@@ -15,6 +15,7 @@ from src.config import settings
 from src.processor.classifier import group_by_topic, is_quota_dead, _wants_no_merge
 from src.processor.cross_dedup import cluster_within_source
 from src.processor.embedder import cosine
+from src.util import row_get
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ def _items_as_plain(items: list) -> list[dict]:
     return [
         {
             "summary": item["summary"],
-            "key_phrase": item["key_phrase"] if "key_phrase" in item.keys() else "",
+            "key_phrase": row_get(item, "key_phrase", ""),
             "original_url": item["original_url"],
             "published_at": item["published_at"],
             "raw_text": item["raw_text"],
@@ -51,7 +52,7 @@ async def merge_source_items(
 def _cluster_summary_fields(cluster: list) -> tuple[str, str]:
     """Most-detailed existing summary of a cluster (fallback when no LLM call)."""
     best = max(cluster, key=lambda it: len((it["summary"] or "")))
-    return (best["summary"] or "", (best["key_phrase"] if "key_phrase" in best.keys() else "") or "")
+    return (best["summary"] or "", row_get(best, "key_phrase", "") or "")
 
 
 def _build_merged(cluster: list, summary: str, key_phrase: str) -> dict:

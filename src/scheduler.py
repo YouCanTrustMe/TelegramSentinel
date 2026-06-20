@@ -7,6 +7,7 @@ from apscheduler.triggers.cron import CronTrigger
 from src.config import settings
 from src.db.models import activate_source, get_categories, get_pending_sources, set_source_pending_msg_id, update_source_url
 from src.dispatcher.digest_builder import send_digest
+from src.util import row_get
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ async def _check_pending_sources() -> None:
         await activate_source(s["id"])
         log.info("Pending source activated: id=%s url=%s", s["id"], s["url"])
 
-        pending_msg_id = s["pending_msg_id"] if "pending_msg_id" in s.keys() else None
+        pending_msg_id = row_get(s, "pending_msg_id")
         if pending_msg_id:
             try:
                 await userbot.delete_messages("me", [pending_msg_id])

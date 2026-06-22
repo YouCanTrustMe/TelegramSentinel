@@ -29,10 +29,15 @@ class Settings(BaseSettings):
     # the same event before muting (cross_dedup._confirm_mutes), so the 0.86
     # threshold can't silently drop a distinct cross-source story on vocabulary alone.
     dedup_shadow: bool = False
+    # "strong" tier: pairs at/above embed as obvious same-story candidates. Pairs in
+    # the confirm band [dedup_log_floor, dedup_threshold) are ALSO unioned but lean
+    # entirely on the LLM (cross_dedup._confirm_mutes) to decide — Ukrainian war-news
+    # rephrasings of one event routinely land at 0.80–0.86, so gating union at 0.86
+    # silently dropped real merges. Used now only to tag log lines strong/confirm.
     dedup_threshold: float = 0.86
     dedup_window_hours: int = 24
-    # Tuning window: log every cross-source candidate pair at/above this cosine
-    # (wider than dedup_threshold) so a week of logs can pin the ideal threshold.
+    # Union floor: any cross-source pair at/above this cosine becomes an LLM-confirmed
+    # candidate. Below it pairs are never even considered.
     dedup_log_floor: float = 0.80
     # Gemini free embedding tier allows ~100 texts/min over a rolling 60s window;
     # keep steady throughput below it so a big digest's tail doesn't 429.

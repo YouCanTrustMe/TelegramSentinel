@@ -61,7 +61,7 @@ def _format_item(item: dict, dup_links: dict[int, list[tuple[str, str]]] | None 
             if url:
                 links.append(f'<a href="{escape(url, quote=True)}">{escape(name)}</a>')
     if links:
-        return f"{line} {', '.join(links)}"
+        return f"{line} ({', '.join(links)})"
     return line
 
 

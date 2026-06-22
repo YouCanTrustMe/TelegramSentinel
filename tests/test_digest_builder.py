@@ -38,6 +38,16 @@ def test_unmapped_media_renders_as_generic_chip_not_literal():
     assert "no text" not in line  # never show the literal marker to the user
 
 
+def test_dedup_source_links_wrapped_in_parentheses():
+    item = {"id": 1, "original_url": "https://t.me/x/1", "summary": "Big news",
+            "raw_text": "", "published_at": None, "key_phrase": ""}
+    dup_links = {1: [("Бабель", "https://t.me/b/2"), ("Лачен", "https://t.me/l/3")]}
+    line = digest_builder._format_item(item, dup_links)
+    assert line.endswith(
+        ' (<a href="https://t.me/b/2">Бабель</a>, <a href="https://t.me/l/3">Лачен</a>)'
+    )
+
+
 def test_quiet_source_url_telegram_handle():
     assert _quiet_source_url({"type": "telegram", "url": "@lachen"}) == "https://t.me/lachen"
 

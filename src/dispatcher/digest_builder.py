@@ -15,6 +15,7 @@ from src.processor.classifier import ClassificationResult, classify, check_block
 from src.processor.cross_dedup import deduplicate, ensure_embeddings
 from src.processor.groq_client import format_groq_stats, reset_groq_stats
 from src.processor.merge import MERGE_MIN_ITEMS, merge_source_items
+from src.media import MEDIA_EMOJI as _MEDIA_EMOJI
 from src.util import needs_summary, row_get
 
 log = logging.getLogger(__name__)
@@ -25,7 +26,6 @@ _TELEGRAM_LIMIT = 4000
 # and split a source across several blocks. Counting raw length is conservative.
 _MAX_BLOCK_LEN = 3800
 _MAX_ITEMS_PER_SOURCE = 50
-_MEDIA_EMOJI = {"[Photo]": "📷", "[Video]": "🎬", "[GIF]": "🎞️"}
 _DEFER_MAX_DAYS = 3
 
 

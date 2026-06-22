@@ -22,6 +22,22 @@ def test_split_breaks_when_over_limit():
     assert messages[1][1] == [2]
 
 
+def test_media_token_renders_as_emoji_chip():
+    item = {"original_url": "https://t.me/x/1", "summary": "[Video note]",
+            "raw_text": "[Video note]", "published_at": None, "key_phrase": ""}
+    line = digest_builder._format_item_base(item)
+    assert '<a href="https://t.me/x/1">🔵</a>' == line
+    assert "[Video note]" not in line and "no text" not in line
+
+
+def test_unmapped_media_renders_as_generic_chip_not_literal():
+    item = {"original_url": "https://t.me/x/2", "summary": "no text",
+            "raw_text": "[Media]", "published_at": None, "key_phrase": ""}
+    line = digest_builder._format_item_base(item)
+    assert '<a href="https://t.me/x/2">📦</a>' == line
+    assert "no text" not in line  # never show the literal marker to the user
+
+
 def test_quiet_source_url_telegram_handle():
     assert _quiet_source_url({"type": "telegram", "url": "@lachen"}) == "https://t.me/lachen"
 

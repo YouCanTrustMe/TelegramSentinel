@@ -9,6 +9,7 @@ from pyrogram.types import Message
 from src.config import settings
 from src.db.models import find_sources_by_chat_id, get_active_sources, increment_source_fail_count, reset_source_fail_count, save_item, set_source_chat_id, set_source_last_message_id, update_source_status, update_source_url
 from src.dispatcher.admin_alert import admin_alert
+from src.media import GENERIC_MEDIA_TOKEN, MEDIA_TOKENS, MEDIA_TYPES, NO_TEXT
 from src.processor.deduplicator import is_duplicate, make_message_id
 from src.util import row_get
 
@@ -158,29 +159,17 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
         raw_text = f"[Poll] {poll.question}" + (f" ({opts})" if opts else "")
     else:
         caption = message.text or message.caption or ""
-        if message.photo:
-            media_prefix = "[Photo] "
-        elif message.video:
-            media_prefix = "[Video] "
-        elif message.animation:
-            media_prefix = "[GIF] "
-        elif message.video_note:
-            media_prefix = "[Video note] "
-        elif message.sticker:
-            media_prefix = "[Sticker] "
-        elif message.document:
-            media_prefix = "[Doc] "
-        elif message.audio:
-            media_prefix = "[Audio] "
-        elif message.voice:
-            media_prefix = "[Voice] "
-        elif getattr(message, "media", None) and not message.web_page:
-            media_prefix = "[Media] "
+        media_prefix = ""
+        for attr, token, _emoji in MEDIA_TYPES:
+            if getattr(message, attr, None):
+                media_prefix = token + " "
+                break
         else:
-            media_prefix = ""
+            if getattr(message, "media", None) and not message.web_page:
+                media_prefix = GENERIC_MEDIA_TOKEN + " "
 
         raw_text = (media_prefix + caption).strip()
-        if not raw_text or raw_text in ("[Photo]", "[Video]", "[GIF]", "[Video note]", "[Sticker]", "[Doc]", "[Audio]", "[Voice]", "[Media]"):
+        if not raw_text or raw_text in MEDIA_TOKENS:
             if not media_prefix:
                 return False
             raw_text = media_prefix.strip()
@@ -210,7 +199,16 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
     published_at = message.date.replace(tzinfo=timezone.utc).isoformat() if message.date else None
 
     if no_caption:
-        summary = "no text"
+        # raw_text is just the media token here, e.g. "[Photo]" / "[Video note]".
+        # Known tokens render as an emoji chip in the digest (_MEDIA_EMOJI); the
+        # generic "[Media]" is a Pyrogram media type we don't recognise yet, so it
+        # stays "no text" and is logged so we can see what else needs a branch.
+        if raw_text == GENERIC_MEDIA_TOKEN:
+            summary = NO_TEXT
+            log.info("Unhandled media-only post from %s | media=%s | %s",
+                     chat_ref, getattr(message, "media", None), original_url)
+        else:
+            summary = raw_text
         key_phrase = ""
     elif len(raw_text.strip()) < 15:
         summary = raw_text.strip()

@@ -401,6 +401,7 @@ Rate each potential match with a confidence score 1-10:
 
 WHAT IS NEVER JUNK (do not block regardless of rule wording):
 - Reporting by a news outlet on company deals, earnings, market moves, product launches, or industry plans — this is journalism, not advertising, even if it mentions prices or brand names.
+- Announcing or covering a product launch, software release, open-source tool, model, or research result — including from a blog, developer, or community channel — is news, not advertising, UNLESS the post itself pushes the reader to buy, sign up, follow a referral/affiliate link, or enter a giveaway.
 - War/conflict news with concrete outcomes: destroyed equipment, strikes with confirmed results, territorial changes — this is hard news, not a "short real-time signal."
 - Analysis, commentary, or op-eds from known media sources — not "collections of recommendations."
 - Any item that is short or ambiguous: default confidence ≤ 5 (keep).

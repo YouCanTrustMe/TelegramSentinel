@@ -175,6 +175,18 @@ async def mark_sent(item_ids: list[int]) -> None:
         await db.commit()
 
 
+async def mark_blocked(reasons: list[tuple[int, str]]) -> None:
+    """Mark content-filtered items sent and record which rule blocked each, so the
+    filter can be audited later (which rule fires, on what) with a query instead of
+    log archaeology."""
+    async with get_db() as db:
+        await db.executemany(
+            "UPDATE items SET sent = 1, blocked_reason = ? WHERE id = ?",
+            [(reason, iid) for iid, reason in reasons],
+        )
+        await db.commit()
+
+
 async def log_digest(total: int, status: str = "ok") -> None:
     async with get_db() as db:
         await db.execute(

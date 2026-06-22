@@ -9,7 +9,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_sent, set_app_setting, update_item_classification
+from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
 from src.processor.classifier import ClassificationResult, classify, check_blocked_filters, is_quota_dead, _wants_no_merge, _wants_no_filter
 from src.processor.cross_dedup import deduplicate, ensure_embeddings
@@ -377,7 +377,7 @@ async def _apply_semantic_filter(items: list) -> tuple[list, list]:
                 if matched_rule is not None:
                     blocked_items.append({**item, "blocked_by": matched_rule})
                     log.info("Blocked item id=%d | rule=%r | summary=%s", item["id"], matched_rule, (item["summary"] or "")[:80])
-            await mark_sent([item["id"] for item in blocked_items])
+            await mark_blocked([(item["id"], item["blocked_by"]) for item in blocked_items])
             log.info("Blocked %d item(s) by semantic filter", len(blocked_items))
         items = no_filter + [item for item in filterable if item["id"] not in blocked_map]
     except Exception:

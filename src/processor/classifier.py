@@ -327,6 +327,12 @@ async def classify_pending_items(limit: int = 3) -> None:
         update_item_classification,
     )
 
+    # (id, summary) of items summarised this run; embedded at the end so their
+    # vectors land in the DB while the queue is shallow, off the digest's critical
+    # path. Otherwise every item is embedded in one burst at digest time, which is
+    # what hammers the Gemini quota on big digests.
+    classified: list[tuple[int, str]] = []
+
     def _split(rows: list) -> tuple[list, list]:
         short, long_items = [], []
         for item in rows:
@@ -342,6 +348,7 @@ async def classify_pending_items(limit: int = 3) -> None:
             result = results.get(item["id"])
             if result and result.summary:
                 await update_item_classification(item["id"], result.summary, result.key_phrase)
+                classified.append((item["id"], result.summary))
                 log.info("%s: item id=%d | summary=%s", label, item["id"], result.summary)
                 done += 1
             else:
@@ -359,36 +366,55 @@ async def classify_pending_items(limit: int = 3) -> None:
     short, long_items = _split(pending)
     for item, raw in short:
         await update_item_classification(item["id"], raw, "")
+        classified.append((item["id"], raw))
     if short:
         log.info("Background classify: %d short text(s) used as summary", len(short))
 
-    if is_quota_dead(settings.groq_model_batch) and is_quota_dead(settings.groq_model_fallback):
+    both_dead = is_quota_dead(settings.groq_model_batch) and is_quota_dead(settings.groq_model_fallback)
+    if both_dead:
         if long_items:
             log.info("Background classify: batch model and fallback both quota dead, skipping %d long items", len(long_items))
-        return
-
-    if long_items:
+    elif long_items:
         batch = long_items[:limit]
         total_classified = 0
         for i in range(0, len(batch), _CLASSIFY_CHUNK):
             total_classified += await _classify_store(batch[i:i + _CLASSIFY_CHUNK], "Background classify")
         log.info("Background classify done: %d/%d classified (%d chunk(s))", total_classified, len(batch), -(-len(batch) // _CLASSIFY_CHUNK))
-        return  # leave backfill for a run when the live queue is clear
+        # leave backfill for a run when the live queue is clear
+    else:
+        # Live queue empty + quota alive → backfill already-sent items still empty
+        # (e.g. bootstrap residue frozen before classification). Small batch only.
+        backlog = await get_sent_empty_items(limit)
+        if not backlog:
+            log.debug("Background classify: no pending items, nothing to backfill")
+        else:
+            bshort, blong = _split(backlog)
+            for item, raw in bshort:
+                await update_item_classification(item["id"], raw, "")
+                classified.append((item["id"], raw))
+            if blong:
+                filled = await _classify_store(blong, "Background backfill")
+                log.info("Background backfill: %d/%d sent-empty items re-classified (%d short)", filled, len(blong), len(bshort))
+            elif bshort:
+                log.info("Background backfill: %d short sent-empty items filled", len(bshort))
 
-    # Live queue empty + quota alive → backfill already-sent items still empty
-    # (e.g. bootstrap residue frozen before classification). Small batch only.
-    backlog = await get_sent_empty_items(limit)
-    if not backlog:
-        log.debug("Background classify: no pending items, nothing to backfill")
+    await _embed_classified(classified)
+
+
+async def _embed_classified(pairs: list[tuple[int, str]]) -> None:
+    """Pre-compute and persist embeddings for freshly summarised items so the
+    digest finds them already cached instead of embedding everything at once.
+    Fail-open: embedding errors never block classification. Imported lazily —
+    cross_dedup imports this module, so a top-level import would be circular."""
+    if not pairs or not (settings.dedup_enabled or settings.merge_via_embeddings):
         return
-    bshort, blong = _split(backlog)
-    for item, raw in bshort:
-        await update_item_classification(item["id"], raw, "")
-    if blong:
-        filled = await _classify_store(blong, "Background backfill")
-        log.info("Background backfill: %d/%d sent-empty items re-classified (%d short)", filled, len(blong), len(bshort))
-    elif bshort:
-        log.info("Background backfill: %d short sent-empty items filled", len(bshort))
+    from src.processor.cross_dedup import ensure_embeddings
+
+    try:
+        await ensure_embeddings([{"id": iid, "summary": summary} for iid, summary in pairs])
+        log.debug("Pre-embedded %d freshly classified item(s)", len(pairs))
+    except Exception:
+        log.exception("Pre-embed after classify failed (digest will embed instead)")
 
 
 _FILTER_SYSTEM_PROMPT = """You are a content filter. Given news items (each tagged [source/category]) and rules describing junk to exclude, decide which items to block.

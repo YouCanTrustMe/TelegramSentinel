@@ -171,7 +171,16 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
         raw_text = (media_prefix + caption).strip()
         if not raw_text or raw_text in MEDIA_TOKENS:
             if not media_prefix:
-                return False
+                # No text, caption, or media we can read. Drop genuinely empty and
+                # service messages — but a real post whose media our pinned Pyrogram
+                # (TL layer 158, 2023) is too old to decode arrives as
+                # MessageMediaUnsupported: the high-level Message exposes nothing, yet
+                # it IS a post (not service, not empty). Keep it as a generic
+                # placeholder so it surfaces in the digest as a 📦 chip with a link
+                # instead of vanishing silently.
+                if getattr(message, "service", None) or getattr(message, "empty", None):
+                    return False
+                media_prefix = GENERIC_MEDIA_TOKEN + " "
             raw_text = media_prefix.strip()
             no_caption = True
         else:
@@ -205,7 +214,9 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
         # stays "no text" and is logged so we can see what else needs a branch.
         if raw_text == GENERIC_MEDIA_TOKEN:
             summary = NO_TEXT
-            log.info("Unhandled media-only post from %s | media=%s | %s",
+            # media=None here means an undecodable post (MessageMediaUnsupported —
+            # Pyrogram layer too old); a non-None type is media we don't tag yet.
+            log.info("Unhandled/undecodable media-only post from %s | media=%s | %s",
                      chat_ref, getattr(message, "media", None), original_url)
         else:
             summary = raw_text

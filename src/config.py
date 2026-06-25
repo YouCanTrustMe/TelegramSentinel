@@ -37,8 +37,13 @@ class Settings(BaseSettings):
     dedup_threshold: float = 0.86
     dedup_window_hours: int = 24
     # Union floor: any cross-source pair at/above this cosine becomes an LLM-confirmed
-    # candidate. Below it pairs are never even considered.
-    dedup_log_floor: float = 0.80
+    # candidate. Below it pairs are never even considered. Raised 0.80→0.82 (2026-06-24)
+    # to thin the B1 candidate flood (45–78/digest) that was the dominant consumer of
+    # the batch model's daily token quota: when 70b's TPD died mid-digest, B1 failed
+    # over to the conservative 8b (which refuses to merge) and cross-source duplicates
+    # slipped through. A higher floor keeps B1 on the reliable 70b. The 0.82–0.86 band
+    # of same-event war-news rephrasings is still caught (the LLM remains the arbiter).
+    dedup_log_floor: float = 0.82
     # Gemini free embedding tier allows ~100 texts/min over a rolling 60s window;
     # keep steady throughput below it so a big digest's tail doesn't 429.
     embed_rpm: int = 70

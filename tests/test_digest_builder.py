@@ -38,6 +38,34 @@ def test_unmapped_media_renders_as_generic_chip_not_literal():
     assert "no text" not in line  # never show the literal marker to the user
 
 
+def _line(summary, key_phrase, url="https://t.me/x/1"):
+    item = {"original_url": url, "summary": summary, "raw_text": summary,
+            "published_at": None, "key_phrase": key_phrase}
+    return digest_builder._format_item_base(item)
+
+
+def test_short_key_phrase_anchor_grows_to_next_word():
+    # A 2-char key phrase is too small to tap, so the anchor pulls in the next word.
+    line = _line("РФ атакувала школу", "РФ")
+    assert line == '<a href="https://t.me/x/1">РФ атакувала</a> школу'
+
+
+def test_short_key_phrase_mid_summary_grows_keeping_prefix():
+    line = _line("Лідери G7 готові передати зброю", "G7")
+    assert line == 'Лідери <a href="https://t.me/x/1">G7 готові</a> передати зброю'
+
+
+def test_long_key_phrase_anchor_is_left_intact():
+    line = _line("Microsoft скоротить 650 працівників", "Microsoft")
+    assert line == '<a href="https://t.me/x/1">Microsoft</a> скоротить 650 працівників'
+
+
+def test_key_phrase_absent_falls_back_to_grown_first_word():
+    # key_phrase not present verbatim (Fed vs Фед) → first word, grown to tappable size.
+    line = _line("Фед підтримує ставки", "Fed")
+    assert line == '<a href="https://t.me/x/1">Фед підтримує</a> ставки'
+
+
 def test_dedup_source_links_wrapped_in_parentheses():
     item = {"id": 1, "original_url": "https://t.me/x/1", "summary": "Big news",
             "raw_text": "", "published_at": None, "key_phrase": ""}

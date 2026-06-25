@@ -27,6 +27,35 @@ _TELEGRAM_LIMIT = 4000
 _MAX_BLOCK_LEN = 3800
 _MAX_ITEMS_PER_SOURCE = 50
 _DEFER_MAX_DAYS = 3
+# Shortest clickable anchor we render: 1-3 char key phrases (Fed, РФ, BTC) are
+# hard to tap on mobile, so the anchor span is grown by whole words until it
+# reaches this length.
+_MIN_ANCHOR_CHARS = 4
+
+
+def _grow_anchor(text: str, idx: int, end: int) -> int:
+    """Extend the anchor span [idx:end] rightwards so the clickable text is long
+    enough to tap on mobile: complete the current word, then pull in following
+    words until the span is at least _MIN_ANCHOR_CHARS long (or text runs out)."""
+    n = len(text)
+    while end < n and re.match(r"\w", text[end], re.UNICODE):
+        end += 1
+    while end - idx < _MIN_ANCHOR_CHARS and end < n:
+        while end < n and not re.match(r"\w", text[end], re.UNICODE):
+            end += 1
+        while end < n and re.match(r"\w", text[end], re.UNICODE):
+            end += 1
+    return end
+
+
+def _anchor_link(text: str, idx: int, end: int, url: str) -> str:
+    """Render `text` with the span [idx:end] — grown to a tappable length — wrapped
+    in a link to `url`; the text before and after the span stays plain."""
+    end = _grow_anchor(text, idx, end)
+    before = escape(text[:idx].rstrip())
+    link = f'<a href="{escape(url, quote=True)}">{escape(text[idx:end])}</a>'
+    after = escape(text[end:].lstrip())
+    return " ".join(p for p in [before, link, after] if p)
 
 
 def _progress_bar(done: int, total: int, width: int = 8) -> str:
@@ -91,30 +120,17 @@ def _format_item_base(item: dict) -> str:
 
     prefix = f"{hour} · " if hour else ""
     key_phrase = (row_get(item, "key_phrase", "") or "").strip()
-    if url and key_phrase:
-        escaped_url = escape(url, quote=True)
-        rest_text = summary_text.strip()
-        idx = rest_text.lower().find(key_phrase.lower())
-        if idx != -1:
-            end = idx + len(key_phrase)
-            while end < len(rest_text) and re.match(r"\w", rest_text[end], re.UNICODE):
-                end += 1
-            anchor_text = rest_text[idx:end]
-            before = escape(rest_text[:idx].rstrip())
-            after = escape(rest_text[end:].lstrip())
-            link = f'<a href="{escaped_url}">{escape(anchor_text)}</a>'
-            parts_text = " ".join(p for p in [before, link, after] if p)
-            return f'{prefix}{parts_text}{suffix}'
-        words = rest_text.split(" ", 1)
-        fallback_anchor = escape(words[0])
-        fallback_rest = (" " + escape(words[1])) if len(words) > 1 else ""
-        return f'{prefix}<a href="{escaped_url}">{fallback_anchor}</a>{fallback_rest}{suffix}'
     if url and summary_text.strip():
-        words = summary_text.strip().split(" ", 1)
-        anchor = escape(words[0])
-        rest = (" " + escape(words[1])) if len(words) > 1 else ""
-        escaped_url = escape(url, quote=True)
-        return f'{prefix}<a href="{escaped_url}">{anchor}</a>{rest}{suffix}'
+        rest_text = summary_text.strip()
+        # Anchor on the key phrase when it appears verbatim in the summary;
+        # otherwise fall back to the first word. Either way the span is grown to
+        # a tappable length by _anchor_link.
+        idx = rest_text.lower().find(key_phrase.lower()) if key_phrase else -1
+        if idx == -1:
+            idx, end = 0, len(rest_text.split(" ", 1)[0])
+        else:
+            end = idx + len(key_phrase)
+        return f'{prefix}{_anchor_link(rest_text, idx, end, url)}{suffix}'
     if url:
         escaped_url = escape(url, quote=True)
         return f'{prefix}<a href="{escaped_url}">→</a>{suffix}'

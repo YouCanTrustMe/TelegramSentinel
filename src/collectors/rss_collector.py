@@ -26,6 +26,25 @@ def _strip_html(text: str) -> str:
     text = re.sub(r"<[^>]+>", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
+
+def _compose_raw_text(title: str, body: str) -> str:
+    """Combine a feed entry's headline (title) and description/standfirst (body).
+    The headline is the most informative part; some feeds (e.g. FT) put the real
+    news in the title and only a vague standfirst in the description, so keeping
+    the description alone lost the story. Combine when they are distinct; otherwise
+    use whichever is non-empty (avoid duplicating one inside the other)."""
+    title = (title or "").strip()
+    body = (body or "").strip()
+    if not title:
+        return body
+    if not body:
+        return title
+    if title.lower() in body.lower():
+        return body  # body already contains the headline → it is the superset
+    if body.lower() in title.lower():
+        return title  # title already contains the body → it is the superset
+    return f"{title}. {body}"
+
 POLL_INTERVAL = 900
 _BOOTSTRAP_LIMIT = 10
 
@@ -98,9 +117,7 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
             log.debug("Skipping duplicate: %s", message_id)
             continue
 
-        title = entry.get("title", "")
-        summary_html = entry.get("summary", "")
-        raw_text = _strip_html(summary_html) or _strip_html(title)
+        raw_text = _compose_raw_text(_strip_html(entry.get("title", "")), _strip_html(entry.get("summary", "")))
         if not raw_text:
             continue
 

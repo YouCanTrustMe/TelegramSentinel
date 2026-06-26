@@ -36,7 +36,10 @@ class Settings(BaseSettings):
     # rephrasings of one event routinely land at 0.80–0.86, so gating union at 0.86
     # silently dropped real merges. Used now only to tag log lines strong/confirm.
     dedup_threshold: float = 0.86
-    dedup_window_hours: int = 24
+    # Compare against items sent in this window so a story repeated in a later
+    # digest is still caught. 48h (was 24h) covers a story that resurfaces a day
+    # or two later, which a 24h window missed.
+    dedup_window_hours: int = 48
     # Union floor: any cross-source pair at/above this cosine becomes an LLM-confirmed
     # candidate. Below it pairs are never even considered. Raised 0.80→0.82 (2026-06-24)
     # to thin the B1 candidate flood (45–78/digest) that was the dominant consumer of

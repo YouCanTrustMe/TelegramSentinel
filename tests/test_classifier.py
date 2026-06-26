@@ -1,9 +1,9 @@
 """Classifier pure helpers: Ukrainian detection, prompt-extra keyword switches,
 media-prefix stripping and the truncation marker."""
 import src.db.models as models
-import src.processor.classifier as classifier
-import src.processor.cross_dedup as cross_dedup
-from src.processor.classifier import (
+import src.processor.llm.classifier as classifier
+import src.processor.dedup.cross_dedup as cross_dedup
+from src.processor.llm.classifier import (
     ClassificationResult,
     _looks_ukrainian,
     _mark_big,

@@ -7,7 +7,7 @@ from apscheduler.triggers.cron import CronTrigger
 from src.config import settings
 from src.db.models import activate_source, get_categories, get_pending_sources, set_source_pending_msg_id, update_source_url
 from src.dispatcher.digest_builder import send_digest
-from src.util import row_get
+from src.common.util import row_get
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ async def _revive_rss_job() -> None:
 async def _startup_provider_check() -> None:
     """Verify LLM provider keys shortly after boot so a missing/expired key is
     surfaced right after a deploy, not only at the daily 04:30 check."""
-    from src.processor.llm_client import verify_llm_providers
+    from src.processor.llm.llm_client import verify_llm_providers
 
     await asyncio.sleep(60)
     await verify_llm_providers()
@@ -57,7 +57,7 @@ async def rebuild_digest_jobs() -> None:
 
 
 async def _pre_digest_classify() -> None:
-    from src.processor.classifier import classify_pending_items
+    from src.processor.llm.classifier import classify_pending_items
 
     log.info("Pre-digest classify started")
     await classify_pending_items(limit=999)
@@ -157,7 +157,7 @@ async def _rebuild_jobs() -> None:
         replace_existing=True,
     )
 
-    from src.processor.classifier import classify_pending_items
+    from src.processor.llm.classifier import classify_pending_items
     _scheduler.add_job(
         classify_pending_items,
         CronTrigger(minute="*/20"),
@@ -185,7 +185,7 @@ async def _rebuild_jobs() -> None:
         coalesce=True,
     )
 
-    from src.processor.llm_client import verify_llm_providers
+    from src.processor.llm.llm_client import verify_llm_providers
     _scheduler.add_job(
         verify_llm_providers,
         CronTrigger(hour=4, minute=30, timezone=settings.digest_timezone),

@@ -1,6 +1,6 @@
 """The shared media table that drives both collector tagging and digest emoji
 chips — kept consistent so a new media type only has to be added once."""
-from src.media import GENERIC_MEDIA_TOKEN, MEDIA_EMOJI, MEDIA_TOKENS, MEDIA_TYPES, NO_TEXT
+from src.common.media import GENERIC_MEDIA_TOKEN, MEDIA_EMOJI, MEDIA_TOKENS, MEDIA_TYPES, NO_TEXT
 
 
 def test_every_media_type_has_its_emoji():

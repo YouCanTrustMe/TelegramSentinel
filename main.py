@@ -13,7 +13,7 @@ from src.collectors.telegram_collector import keep_userbot_online, run_telegram_
 from src.db.models import init_db
 from src.dispatcher.admin_alert import AdminAlertLogHandler, admin_alert, set_loop
 from src.dispatcher.sender import bot, close_session
-from src.processor.embedder import close_session as close_embed_session
+from src.processor.dedup.embedder import close_session as close_embed_session
 from src.scheduler import start_scheduler
 
 logging.basicConfig(

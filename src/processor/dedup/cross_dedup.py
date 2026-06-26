@@ -22,9 +22,9 @@ from src.db.models import (
     mark_duplicate,
     set_item_embeddings,
 )
-from src.processor.classifier import group_by_topic
-from src.util import row_get
-from src.processor.embedder import cosine, embed_texts, from_blob, to_blob
+from src.processor.llm.classifier import group_by_topic
+from src.common.util import row_get
+from src.processor.dedup.embedder import cosine, embed_texts, from_blob, to_blob
 
 log = logging.getLogger(__name__)
 

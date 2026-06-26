@@ -12,11 +12,11 @@ Flip `settings.merge_via_embeddings` off to fall back to the old all-source
 import logging
 
 from src.config import settings
-from src.processor.classifier import group_by_topic, _wants_no_merge
-from src.processor.llm_client import is_task_dead
-from src.processor.cross_dedup import cluster_within_source
-from src.processor.embedder import cosine
-from src.util import row_get
+from src.processor.llm.classifier import group_by_topic, _wants_no_merge
+from src.processor.llm.llm_client import is_task_dead
+from src.processor.dedup.cross_dedup import cluster_within_source
+from src.processor.dedup.embedder import cosine
+from src.common.util import row_get
 
 log = logging.getLogger(__name__)
 

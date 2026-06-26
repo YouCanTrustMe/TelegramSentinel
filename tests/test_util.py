@@ -1,5 +1,5 @@
 """Shared helpers: optional row access and the empty-summary predicate."""
-from src.util import needs_summary, row_get
+from src.common.util import needs_summary, row_get
 
 
 def test_row_get_present_and_missing():

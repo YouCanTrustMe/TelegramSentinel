@@ -11,12 +11,12 @@ from zoneinfo import ZoneInfo
 from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
-from src.processor.classifier import ClassificationResult, classify, check_blocked_filters, _wants_no_merge, _wants_no_filter
-from src.processor.cross_dedup import deduplicate, ensure_embeddings
-from src.processor.llm_client import format_llm_stats, reset_llm_stats, is_task_dead
-from src.processor.merge import MERGE_MIN_ITEMS, merge_source_items
-from src.media import MEDIA_EMOJI as _MEDIA_EMOJI
-from src.util import needs_summary, row_get
+from src.processor.llm.classifier import ClassificationResult, classify, check_blocked_filters, _wants_no_merge, _wants_no_filter
+from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings
+from src.processor.llm.llm_client import format_llm_stats, reset_llm_stats, is_task_dead
+from src.processor.dedup.merge import MERGE_MIN_ITEMS, merge_source_items
+from src.common.media import MEDIA_EMOJI as _MEDIA_EMOJI
+from src.common.util import needs_summary, row_get
 
 log = logging.getLogger(__name__)
 

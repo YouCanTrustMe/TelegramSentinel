@@ -5,8 +5,8 @@ import math
 
 import numpy as np
 
-import src.processor.cross_dedup as cd
-from src.processor.cross_dedup import _UnionFind, _is_placeholder, cluster_within_source
+import src.processor.dedup.cross_dedup as cd
+from src.processor.dedup.cross_dedup import _UnionFind, _is_placeholder, cluster_within_source
 
 
 def test_union_find_groups_transitively():

@@ -2,7 +2,7 @@
 the Bot API retry_after parser, message-id construction and SQL statement split."""
 from src.db.base import _split_sql_statements
 from src.dispatcher.sender import _retry_after
-from src.processor.deduplicator import make_message_id
+from src.processor.dedup.deduplicator import make_message_id
 from src.scheduler import _parse_times, _pre_classify_time, _pre_collect_time
 
 

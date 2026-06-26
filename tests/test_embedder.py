@@ -3,7 +3,7 @@ parser used to time the 429 retry."""
 import numpy as np
 import pytest
 
-from src.processor.embedder import _RETRY_DELAY_RE, cosine, from_blob, to_blob
+from src.processor.dedup.embedder import _RETRY_DELAY_RE, cosine, from_blob, to_blob
 
 
 def test_cosine_identical_is_one():

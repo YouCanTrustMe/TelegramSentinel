@@ -1,8 +1,8 @@
 """LLM client: JSON repair (models emit unescaped inner quotes) + task routing.
 _escape_stray_quotes / _coerce_json repair malformed JSON; _resolve_chain drops
 providers without a key; is_task_dead reports when a whole chain is exhausted."""
-from src.processor import llm_client
-from src.processor.llm_client import (
+from src.processor.llm import llm_client
+from src.processor.llm.llm_client import (
     _coerce_json,
     _escape_stray_quotes,
     _repair_from_groq_400,

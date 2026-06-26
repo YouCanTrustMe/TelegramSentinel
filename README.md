@@ -5,7 +5,7 @@ Personal AI news digest bot. Collects posts from Telegram channels and RSS feeds
 ## Features
 
 - **Multi-source collection** — Telegram channels (via userbot) + RSS/Atom feeds
-- **AI classification** — Groq writes a concise Ukrainian summary (≤15 words, up to ~25 for detail-heavy items) and a key phrase used as the link anchor; models are routed per task (`gpt-oss-120b` for single items, `llama-3.3-70b` for batches/grouping, `llama-3.1-8b` as a quota fallback)
+- **AI classification** — a concise Ukrainian summary (≤15 words, up to ~25 for detail-heavy items) plus a key phrase used as the link anchor; each task is routed to a free-tier model and fails over across separate provider quotas (Mistral, Cerebras, Groq) so no single daily quota stalls a digest
 - **Per-source prompt instructions** — custom AI hints per source (e.g. "keep proper nouns", "focus on numbers", "no merge", "no translate")
 - **Digest** — sent on a per-category schedule, grouped by category → source; same-topic follow-ups within a source are AI-merged into one entry
 - **Content filter** — natural-language rules (e.g. "local traffic accidents without casualties", "ads and promos") that an LLM applies each digest to silently exclude matching items
@@ -70,16 +70,24 @@ src/
   config.py                     pydantic-settings, single Settings instance
   scheduler.py                  APScheduler — a catch-all job plus per-time jobs for
                                   categories with a custom digest_time; rebuilt on changes
+  common/
+    util.py                     small shared helpers (row_get, needs_summary)
+    media.py                    media token ↔ emoji table
   collectors/
     telegram_collector.py       userbot polls get_chat_history every 5 min
-    rss_collector.py            feedparser, polls every 15 min
+    rss_collector.py            feedparser, polls every 15 min (ingests title + description)
     folder_manager.py           maintains "Sentinel" folder in userbot account
   processor/
-    classifier.py               Groq prompts → Ukrainian summary + key phrase
-    groq_client.py              shared Groq client + token-bucket rate limit + backoff/quota handling
-    deduplicator.py             message_id = tg_{channel}_{id} or md5(url:id)
-    embedder.py                 Gemini embedding transport + cosine/blob helpers (cross-source dedup)
-    cross_dedup.py              cross-source dedup + within-source clustering on shared embeddings
+    llm/
+      llm_client.py             provider-agnostic LLM transport: per-task routing +
+                                  failover across separate free quotas, JSON repair, key alerts
+      classifier.py             summarise / batch / group / content-filter calls
+      prompts.py                LLM prompt templates
+    dedup/
+      deduplicator.py           message_id = tg_{channel}_{id} or md5(url:id)
+      embedder.py               Gemini embedding transport + cosine/blob helpers
+      cross_dedup.py            cross-source dedup + within-source clustering on shared embeddings
+      merge.py                  within-source same-event merge (LLM-arbitrated)
   dispatcher/
     digest_builder.py           groups items, AI-merges same-topic per source, dedups
                                   cross-source, applies the LLM content filter, splits long digests

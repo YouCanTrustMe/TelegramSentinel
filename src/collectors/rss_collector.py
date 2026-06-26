@@ -16,7 +16,7 @@ from src.db.models import (
     update_source_status,
 )
 from src.dispatcher.sender import send_to
-from src.processor.deduplicator import is_duplicate, make_message_id
+from src.processor.dedup.deduplicator import is_duplicate, make_message_id
 
 log = logging.getLogger(__name__)
 

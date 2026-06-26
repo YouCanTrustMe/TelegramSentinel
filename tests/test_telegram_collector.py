@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import src.collectors.telegram_collector as tc
-from src.media import GENERIC_MEDIA_TOKEN, NO_TEXT
+from src.common.media import GENERIC_MEDIA_TOKEN, NO_TEXT
 
 CHAT = "-1002568789348"
 SOURCE = {"id": 20, "category": "hrvatska"}

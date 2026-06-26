@@ -53,6 +53,11 @@ TASK_ROUTING: dict[str, list[tuple[str, str]]] = {
 _QUOTA_DEAD_THRESHOLD = 300.0
 _ALERT_COOLDOWN = 1800.0
 
+# id-array / structured tasks must be deterministic: any sampling raises the chance
+# of a dropped or hallucinated id and broken JSON (the source of "N item(s) missing"
+# warnings). Free-text summary tasks (classify, translate) keep a little sampling.
+_DETERMINISTIC_TASKS = frozenset({"batch", "group", "filter"})
+
 
 # ---- JSON repair (provider-agnostic) ----
 def _escape_stray_quotes(text: str) -> str:
@@ -357,7 +362,7 @@ async def verify_llm_providers() -> None:
             log.info("LLM verify: %s key OK (HTTP %d)", provider, status)
 
 
-async def _call_once(provider: str, model: str, messages: list[dict]) -> tuple[dict | None, int, object]:
+async def _call_once(provider: str, model: str, messages: list[dict], temperature: float = 0.1) -> tuple[dict | None, int, object]:
     """Single HTTP call. Returns (parsed_or_None, status, headers). parsed is {}
     on a recoverable empty/error so the caller can distinguish from a hard failure
     via status."""
@@ -367,7 +372,7 @@ async def _call_once(provider: str, model: str, messages: list[dict]) -> tuple[d
         "model": model,
         "messages": messages,
         "response_format": {"type": "json_object"},
-        "temperature": 0.1,
+        "temperature": temperature,
     }
     headers = {"Authorization": f"Bearer {_key(provider)}", "Content-Type": "application/json"}
     async with session.post(PROVIDERS[provider]["base"], json=payload, headers=headers) as resp:
@@ -402,6 +407,7 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
         log.warning("LLM: no usable provider for task=%s (no API keys), short-circuiting", task)
         return {}
 
+    temperature = 0.0 if task in _DETERMINISTIC_TASKS else 0.1
     first = True
     for provider, model in chain:
         tag = _tag(provider, model)
@@ -417,7 +423,7 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
             if wait_until > now:
                 await asyncio.sleep(wait_until - now)
             try:
-                parsed, status, hdrs = await _call_once(provider, model, messages)
+                parsed, status, hdrs = await _call_once(provider, model, messages, temperature)
             except Exception as exc:
                 _bump(tag, "error")
                 log.warning("LLM call error on %s: %s", tag, str(exc)[:120])

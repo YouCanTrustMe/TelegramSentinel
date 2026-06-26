@@ -119,7 +119,7 @@ def test_llm_json_returns_parsed_on_success(monkeypatch):
     import asyncio
     llm_client._quota_dead_until.clear()
     monkeypatch.setitem(llm_client.TASK_ROUTING, "t_ok", [("groq", "m1")])
-    async def fake_call(provider, model, messages):
+    async def fake_call(provider, model, messages, temperature=0.1):
         return {"summary": "ok"}, 200, {}
     monkeypatch.setattr(llm_client, "_call_once", fake_call)
     out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_ok"))
@@ -132,7 +132,7 @@ def test_llm_json_fails_over_to_next_on_quota_dead(monkeypatch):
     llm_client._failover_count = 0
     monkeypatch.setitem(llm_client.TASK_ROUTING, "t_fo", [("groq", "m1"), ("groq", "m2")])
     calls = []
-    async def fake_call(provider, model, messages):
+    async def fake_call(provider, model, messages, temperature=0.1):
         calls.append(model)
         if model == "m1":
             return None, 429, {"retry-after": "600"}  # quota dead → fail over
@@ -149,7 +149,7 @@ def test_llm_json_fails_over_on_unparseable_then_succeeds(monkeypatch):
     import asyncio
     llm_client._quota_dead_until.clear()
     monkeypatch.setitem(llm_client.TASK_ROUTING, "t_bad", [("groq", "m1"), ("groq", "m2")])
-    async def fake_call(provider, model, messages):
+    async def fake_call(provider, model, messages, temperature=0.1):
         if model == "m1":
             return None, 200, {}  # 200 but JSON unparseable
         return {"ok": 2}, 200, {}
@@ -162,7 +162,7 @@ def test_llm_json_returns_repaired_on_groq_400(monkeypatch):
     import asyncio
     llm_client._quota_dead_until.clear()
     monkeypatch.setitem(llm_client.TASK_ROUTING, "t_rep", [("groq", "m1")])
-    async def fake_call(provider, model, messages):
+    async def fake_call(provider, model, messages, temperature=0.1):
         return {"summary": "repaired"}, 400, {}  # _call_once already repaired failed_generation
     monkeypatch.setattr(llm_client, "_call_once", fake_call)
     out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_rep"))
@@ -174,7 +174,7 @@ def test_llm_json_returns_empty_when_all_dead(monkeypatch):
     _noop_alert(monkeypatch)
     llm_client._quota_dead_until.clear()
     monkeypatch.setitem(llm_client.TASK_ROUTING, "t_dead", [("groq", "d1"), ("groq", "d2")])
-    async def fake_call(provider, model, messages):
+    async def fake_call(provider, model, messages, temperature=0.1):
         return None, 429, {"retry-after": "600"}
     monkeypatch.setattr(llm_client, "_call_once", fake_call)
     out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_dead"))
@@ -194,6 +194,26 @@ def test_alert_provider_throttles_repeat(monkeypatch):
     assert len(sent) == 1
 
 
+def test_id_tasks_use_zero_temperature(monkeypatch):
+    """Deterministic id-array tasks (batch/group/filter) must call the model at
+    temperature 0; free-text summary tasks keep a little sampling."""
+    import asyncio
+    llm_client._quota_dead_until.clear()
+    seen = {}
+    async def fake_call(provider, model, messages, temperature=0.1):
+        seen[messages[0]["content"]] = temperature
+        return {"ok": 1}, 200, {}
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "group", [("groq", "m1")])
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "classify", [("groq", "m1")])
+    asyncio.run(llm_client.llm_json([{"role": "user", "content": "g"}], task="group"))
+    asyncio.run(llm_client.llm_json([{"role": "user", "content": "f"}], task="filter"))
+    asyncio.run(llm_client.llm_json([{"role": "user", "content": "c"}], task="classify"))
+    assert seen["g"] == 0.0
+    assert seen["f"] == 0.0
+    assert seen["c"] == 0.1
+
+
 def test_llm_json_marks_provider_down_on_auth_fail(monkeypatch):
     """A 401 takes the whole provider out of routing (same key → same failure) and
     fails over to the NEXT provider, so the digest stops re-hitting the bad key."""
@@ -204,7 +224,7 @@ def test_llm_json_marks_provider_down_on_auth_fail(monkeypatch):
     async def noop_alert(provider, msg):
         pass
     calls = []
-    async def fake_call(provider, model, messages):
+    async def fake_call(provider, model, messages, temperature=0.1):
         calls.append((provider, model))
         if provider == "mistral":
             return None, 401, {}

@@ -74,6 +74,14 @@ def test_unknown_task_falls_back_to_classify_chain():
     assert _resolve_chain("nonexistent") == _resolve_chain("classify")
 
 
+def test_group_leads_with_high_rpm_provider(monkeypatch):
+    # §6 lever: id-heavy `group` must lead with Mistral (50 RPM), not Cerebras
+    # (5 RPM) — Cerebras serialised big digests behind 60s Retry-After walls.
+    for name in ("cerebras_api_key", "mistral_api_key"):
+        monkeypatch.setattr(llm_client.settings, name, "x-test-key", raising=False)
+    assert _resolve_chain("group")[0][0] == "mistral"
+
+
 def test_is_task_dead_false_when_alive():
     assert is_task_dead("group") is False
 

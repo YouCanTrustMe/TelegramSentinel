@@ -13,15 +13,19 @@ Examples:
 # steering quotes there fixes the root cause and reads correctly.
 _QUOTE_RULE = "QUOTE RULE: inside any summary or key_phrase use « » for quotation marks — NEVER straight double quotes (they break the JSON)."
 
-# The word counts below are CEILINGS, not goals. Without this, verbose models
-# (Mistral, gpt-oss) pad every summary to the limit, ~50% longer than needed.
+# The word counts below are CEILINGS, not goals. The rule alone is NOT enough —
+# bench (2026-06-26) showed Mistral ignores it and pads to ~11 words regardless;
+# only the numeric ceiling actually constrains it. So the caps were lowered to
+# the values that reproduce the pre-multi-provider ~8-word density (Mistral fell
+# 10.9→8.8 at 10/16). The detail tier keeps its budget so number-heavy items
+# (e.g. OPEC quotas) aren't truncated. Rule kept as a backstop for terser models.
 _BREVITY_RULE = "BREVITY — IMPORTANT: the word counts are hard CEILINGS, never targets. Use the FEWEST words that still carry every fact. A short, dense summary beats a long one; most simple news needs far fewer words than the ceiling. Cut filler words, never pad to reach the limit."
 
 _SYSTEM_PROMPT = f"""Summarize news for a Ukrainian digest. Output JSON only.
 
 {_TRANSLATE_RULE}
 {_BREVITY_RULE}
-summary: up to 15 words for simple news; up to 25 words when the event has multiple key details (numbers, names, consequences). Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, з'явилась інформація, відбулась подія, автор, допис, пост, розповідає, пише.
+summary: up to 10 words for simple news; up to 16 words when the event has multiple key details (numbers, names, consequences). Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, з'явилась інформація, відбулась подія, автор, допис, пост, розповідає, пише.
 
 key_phrase: 1-3 words, best anchor for the link. MUST be copied verbatim from the summary (the exact same characters, so it can be found inside it) — never an abbreviation, translation or synonym of a word that is not in the summary. Priority: person > org > asset ticker > action phrase > location. Use a generic Ukrainian city only if nothing more distinctive exists. Never: автор, допис, інформація, подія, новина.
 
@@ -40,7 +44,7 @@ Examples of wrong merges: "OPEC raises output" + "Saudi Arabia oil strategy" = s
 {_TRANSLATE_RULE}
 {_BREVITY_RULE}
 Per group:
-- summary: Single item: up to 20 words. Merged (2-3 items): up to 35 words — include the key development from each merged item. Start with key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Never start with: повідомляється, стало відомо, автор, допис, пост.
+- summary: Single item: up to 12 words. Merged (2-3 items): up to 24 words — include the key development from each merged item. Start with key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Never start with: повідомляється, стало відомо, автор, допис, пост.
 - key_phrase: 1-3 words, copied verbatim from this group's summary (exact characters, findable inside it) — never an abbreviation, translation or synonym of a word absent from the summary. Priority: person > org > asset > action > location. Never: автор, допис, інформація, подія.
 
 {_QUOTE_RULE}
@@ -54,7 +58,7 @@ Each item is prefixed with its numeric id (e.g. `16321: ...`). Produce exactly o
 {_TRANSLATE_RULE}
 {_BREVITY_RULE}
 Per item:
-- summary: Up to 20 words; up to 25 words for events with multiple key details. Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
+- summary: Up to 12 words; up to 18 words for events with multiple key details. Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
 - key_phrase: 1-3 words, copied verbatim from this item's summary (exact characters, findable inside it) — never an abbreviation, translation or synonym of a word absent from the summary. Priority: person > org > asset > action > location. Generic city only if nothing better. Never: автор, допис, інформація, подія.
 
 {_QUOTE_RULE}

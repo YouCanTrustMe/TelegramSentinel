@@ -42,8 +42,12 @@ TASK_ROUTING: dict[str, list[tuple[str, str]]] = {
     "classify":  [("mistral", "mistral-small-latest"), ("groq", "openai/gpt-oss-120b"), ("groq", "llama-3.3-70b-versatile")],
     # id-array batch summarise (no merge)
     "batch":     [("cerebras", "gpt-oss-120b"), ("mistral", "mistral-small-latest"), ("groq", "llama-3.3-70b-versatile")],
-    # id-array grouping + B1 dedup confirm + within-source merge (few, heavy calls)
-    "group":     [("cerebras", "gpt-oss-120b"), ("mistral", "mistral-small-latest"), ("groq", "llama-3.3-70b-versatile")],
+    # id-array grouping + B1 dedup confirm + within-source merge. Mistral leads
+    # (50 RPM): on big digests these fan out to many calls and Cerebras (5 RPM)
+    # serialised them behind 60s Retry-After walls. Cerebras stays as fallback for
+    # its 1M TPD headroom; bench had Mistral drop ~1/25 ids (harmless in B1, where
+    # only co-membership matters, and rare in merge after the echo-exact-id prompt).
+    "group":     [("mistral", "mistral-small-latest"), ("cerebras", "gpt-oss-120b"), ("groq", "llama-3.3-70b-versatile")],
     # content filter (rate 1-10); strict catchers preferred
     "filter":    [("mistral", "mistral-small-latest"), ("cerebras", "gpt-oss-120b"), ("groq", "llama-3.3-70b-versatile")],
     # Ukrainian translate-guard retry
@@ -56,7 +60,7 @@ _ALERT_COOLDOWN = 1800.0
 # id-array / structured tasks must be deterministic: any sampling raises the chance
 # of a dropped or hallucinated id and broken JSON (the source of "N item(s) missing"
 # warnings). Free-text summary tasks (classify, translate) keep a little sampling.
-_DETERMINISTIC_TASKS = frozenset({"batch", "group", "filter"})
+_DETERMINISTIC_TASKS = frozenset({"batch", "group", "filter", "translate"})
 
 
 # ---- JSON repair (provider-agnostic) ----
@@ -452,11 +456,13 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
                     _signal_quota_dead(tag, ra)
                     break  # whole model dead → next chain entry
                 _bump(tag, "rate_limited")
-                _signal_backoff(tag, ra if ra else 65.0)
+                wait = ra if ra else 65.0
+                _signal_backoff(tag, wait)
+                src = "retry-after" if ra else "fallback"
                 if attempt < max_retries - 1:
-                    log.info("LLM rate limit on %s, retry %d/%d after backoff", tag, attempt + 1, max_retries)
+                    log.info("LLM rate limit on %s, retry %d/%d after %gs backoff (%s)", tag, attempt + 1, max_retries, wait, src)
                     continue
-                log.warning("LLM rate limit persistent on %s after %d attempts, failing over", tag, max_retries)
+                log.warning("LLM rate limit persistent on %s after %d attempts (%gs %s), failing over", tag, max_retries, wait, src)
                 break  # next chain entry
             if status in (401, 403):
                 # bad/expired key — retrying is pointless. Take the whole provider

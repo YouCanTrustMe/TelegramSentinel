@@ -290,9 +290,11 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
                 c = cosine(va, vb)
                 ia, ib = item_by_id[ida], item_by_id[idb]
                 if c >= floor and _field(ia, "source_id") != _field(ib, "source_id"):
-                    log.info("DEDUP-CANDIDATE cosine=%.3f tier=%s x-src same-digest [%s] | %s || %s",
-                             c, "strong" if c >= settings.dedup_threshold else "confirm",
-                             cat, (_field(ia, "summary", "") or "")[:60], (_field(ib, "summary", "") or "")[:60])
+                    # Per-pair tuning telemetry (O(pairs)) — DEBUG so it doesn't
+                    # flood INFO; the actual mute decisions are logged once below.
+                    log.debug("DEDUP-CANDIDATE cosine=%.3f tier=%s x-src same-digest [%s] | %s || %s",
+                              c, "strong" if c >= settings.dedup_threshold else "confirm",
+                              cat, (_field(ia, "summary", "") or "")[:60], (_field(ib, "summary", "") or "")[:60])
                 if c >= floor:
                     uf.union(ida, idb)
         sent_nodes: set[int] = set()
@@ -300,9 +302,9 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
             for sid, vs, _so, _pub in pool:
                 c = cosine(va, vs)
                 if c >= floor:
-                    log.info("DEDUP-CANDIDATE cosine=%.3f tier=%s x-digest [%s] | %s || (sent) %s",
-                             c, "strong" if c >= settings.dedup_threshold else "confirm",
-                             cat, (_field(item_by_id[ida], "summary", "") or "")[:60], sent_summary.get(sid, "")[:60])
+                    log.debug("DEDUP-CANDIDATE cosine=%.3f tier=%s x-digest [%s] | %s || (sent) %s",
+                              c, "strong" if c >= settings.dedup_threshold else "confirm",
+                              cat, (_field(item_by_id[ida], "summary", "") or "")[:60], sent_summary.get(sid, "")[:60])
                 if c >= floor:
                     uf.union(ida, sid)
                     sent_nodes.add(sid)

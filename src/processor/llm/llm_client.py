@@ -156,7 +156,7 @@ _backoff_until: dict[str, float] = {}
 _quota_dead_until: dict[str, float] = {}
 _model_stats: dict[str, dict[str, int]] = {}
 _failover_count: int = 0
-_last_alert_time: float = 0.0
+_last_alert_time: float | None = None
 
 
 def _tag(provider: str, model: str) -> str:
@@ -274,7 +274,7 @@ async def close_session() -> None:
 async def _maybe_send_rate_limit_alert() -> None:
     global _last_alert_time
     now = time.monotonic()
-    if now - _last_alert_time < _ALERT_COOLDOWN:
+    if _last_alert_time is not None and now - _last_alert_time < _ALERT_COOLDOWN:
         return
     _last_alert_time = now
     try:
@@ -294,7 +294,8 @@ _provider_alert_at: dict[str, float] = {}
 async def _alert_provider(provider: str, msg: str) -> None:
     log.warning("LLM provider issue | %s: %s", provider, msg)
     now = time.monotonic()
-    if now - _provider_alert_at.get(provider, 0.0) < _PROVIDER_ALERT_COOLDOWN:
+    last = _provider_alert_at.get(provider)
+    if last is not None and now - last < _PROVIDER_ALERT_COOLDOWN:
         return
     _provider_alert_at[provider] = now
     try:

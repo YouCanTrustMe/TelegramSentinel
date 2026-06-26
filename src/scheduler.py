@@ -33,11 +33,21 @@ async def _revive_rss_job() -> None:
         log.info("RSS revive: re-activated %d error source(s) for re-probe: %s", len(revived), ", ".join(revived))
 
 
+async def _startup_provider_check() -> None:
+    """Verify LLM provider keys shortly after boot so a missing/expired key is
+    surfaced right after a deploy, not only at the daily 04:30 check."""
+    from src.processor.llm_client import verify_llm_providers
+
+    await asyncio.sleep(60)
+    await verify_llm_providers()
+
+
 async def start_scheduler() -> None:
     global _scheduler
     _scheduler = AsyncIOScheduler(timezone=settings.digest_timezone)
     await _rebuild_jobs()
     _scheduler.start()
+    asyncio.create_task(_startup_provider_check())
 
 
 async def rebuild_digest_jobs() -> None:
@@ -170,6 +180,16 @@ async def _rebuild_jobs() -> None:
         _revive_rss_job,
         CronTrigger(hour=4, minute=15, timezone=settings.digest_timezone),
         id="revive_rss",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    from src.processor.llm_client import verify_llm_providers
+    _scheduler.add_job(
+        verify_llm_providers,
+        CronTrigger(hour=4, minute=30, timezone=settings.digest_timezone),
+        id="verify_llm",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

@@ -83,7 +83,7 @@ async def test_classify_pending_embeds_freshly_classified(monkeypatch):
     monkeypatch.setattr(models, "get_unsent_items", fake_get_unsent_items)
     monkeypatch.setattr(models, "update_item_classification", fake_update)
     monkeypatch.setattr(classifier, "classify_batch", fake_classify_batch)
-    monkeypatch.setattr(classifier, "is_quota_dead", lambda *_: False)
+    monkeypatch.setattr(classifier, "is_task_dead", lambda *_: False)
     monkeypatch.setattr(classifier.settings, "dedup_enabled", True)
     monkeypatch.setattr(cross_dedup, "ensure_embeddings", fake_ensure_embeddings)
 

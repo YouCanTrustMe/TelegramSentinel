@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass, field
 
 from src.config import settings
-from src.processor.groq_client import groq_json, is_quota_dead
+from src.processor.llm_client import llm_json, is_task_dead
 from src.util import needs_summary
 
 log = logging.getLogger(__name__)
@@ -102,14 +102,13 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
     if prompt_extra:
         system = f"{_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
 
-    data = await groq_json(
+    data = await llm_json(
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": text[:_SINGLE_INPUT_CAP]},
         ],
         max_retries=max_retries,
-        model=settings.groq_model_classify,
-        fallback_model=settings.groq_model_fallback,
+        task="classify",
     )
     result = ClassificationResult(
         summary=data.get("summary", ""),
@@ -132,14 +131,13 @@ async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
         return {}
     text_by_id = {item["id"]: item["text"] or "" for item in items}
     numbered = "\n".join(f"{item['id']}: {item['text'][:_BATCH_INPUT_CAP]}" for item in items)
-    data = await groq_json(
+    data = await llm_json(
         messages=[
             {"role": "system", "content": _MULTI_SYSTEM_PROMPT},
             {"role": "user", "content": numbered},
         ],
         max_retries=3,
-        model=settings.groq_model_batch,
-        fallback_model=settings.groq_model_fallback,
+        task="batch",
     )
     out: dict[int, ClassificationResult] = {}
     for row in data.get("items", []):
@@ -207,14 +205,13 @@ async def _ensure_ukrainian(summary: str, key_phrase: str) -> tuple[str, str]:
     if not summary or _looks_ukrainian(summary):
         return summary, key_phrase
     log.info("Summary not in Ukrainian, re-translating | got=%s", summary[:80])
-    data = await groq_json(
+    data = await llm_json(
         messages=[
             {"role": "system", "content": _TRANSLATE_ONLY_PROMPT},
             {"role": "user", "content": summary},
         ],
         max_retries=2,
-        model=settings.groq_model_batch,
-        fallback_model=settings.groq_model_fallback,
+        task="translate",
     )
     new_summary = data.get("summary", "") or ""
     if new_summary and _looks_ukrainian(new_summary):
@@ -239,14 +236,13 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
         system = _MULTI_SYSTEM_PROMPT
         if prompt_extra:
             system = f"{_MULTI_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
-        data = await groq_json(
+        data = await llm_json(
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": numbered},
             ],
             max_retries=3,
-            model=settings.groq_model_batch,
-            fallback_model=settings.groq_model_fallback,
+            task="batch",
         )
         result = []
         covered: set[int] = set()
@@ -274,14 +270,13 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
     if prompt_extra and not _wants_no_merge(prompt_extra):
         system = f"{_BATCH_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
 
-    data = await groq_json(
+    data = await llm_json(
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": numbered},
         ],
         max_retries=3,
-        model=settings.groq_model_batch,
-        fallback_model=settings.groq_model_fallback,
+        task="group",
     )
     groups = data.get("groups", [])
     if not groups:
@@ -370,7 +365,7 @@ async def classify_pending_items(limit: int = 3) -> None:
     if short:
         log.info("Background classify: %d short text(s) used as summary", len(short))
 
-    both_dead = is_quota_dead(settings.groq_model_batch) and is_quota_dead(settings.groq_model_fallback)
+    both_dead = is_task_dead("batch")
     if both_dead:
         if long_items:
             log.info("Background classify: batch model and fallback both quota dead, skipping %d long items", len(long_items))
@@ -476,14 +471,13 @@ async def check_blocked_filters(
             for item in chunk
         )
         user_msg = f"Filter rules:\n{numbered_rules}\n\nItems:\n{numbered_items}"
-        data = await groq_json(
+        data = await llm_json(
             messages=[
                 {"role": "system", "content": _FILTER_SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
             ],
             max_retries=3,
-            model=settings.groq_model_batch,
-            fallback_model=settings.groq_model_fallback,
+            task="filter",
         )
         if not data or not isinstance(data.get("blocked"), list):
             continue

@@ -11,9 +11,9 @@ from zoneinfo import ZoneInfo
 from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
-from src.processor.classifier import ClassificationResult, classify, check_blocked_filters, is_quota_dead, _wants_no_merge, _wants_no_filter
+from src.processor.classifier import ClassificationResult, classify, check_blocked_filters, _wants_no_merge, _wants_no_filter
 from src.processor.cross_dedup import deduplicate, ensure_embeddings
-from src.processor.groq_client import format_groq_stats, reset_groq_stats
+from src.processor.llm_client import format_llm_stats, reset_llm_stats, is_task_dead
 from src.processor.merge import MERGE_MIN_ITEMS, merge_source_items
 from src.media import MEDIA_EMOJI as _MEDIA_EMOJI
 from src.util import needs_summary, row_get
@@ -292,9 +292,9 @@ async def _reclassify_empty_summaries(items: list, update: Callable[[str], Await
     done = 0
     for i, item in enumerate(items):
         if needs_summary(item):
-            if is_quota_dead(settings.groq_model_classify) and is_quota_dead(settings.groq_model_fallback):
+            if is_task_dead("classify"):
                 remaining = sum(1 for x in items[i:] if not (x["summary"] or "").strip())
-                log.warning("Re-classify aborted: classify model and fallback both quota dead, %d items will show as link", remaining)
+                log.warning("Re-classify aborted: all classify-task models quota dead, %d items will show as link", remaining)
                 break
             elapsed = time.monotonic() - reclassify_start
             if elapsed > _RECLASSIFY_TIMEOUT:
@@ -608,6 +608,6 @@ async def _send_digest_locked(
         "Digest done: %d items (%d filtered) | %d/%d message(s) sent | %d items confirmed | filter=%s | status=%s",
         len(items), len(blocked_items), sent_count, total_messages, confirmed_count, categories, status,
     )
-    log.info(format_groq_stats())
-    reset_groq_stats()
+    log.info(format_llm_stats())
+    reset_llm_stats()
     return not failed

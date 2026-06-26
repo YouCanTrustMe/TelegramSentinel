@@ -12,13 +12,14 @@ class Settings(BaseSettings):
     telegram_supergroup_id: int
     telegram_admin_id: int
 
+    # LLM provider API keys — each a SEPARATE free-tier quota. Per-task model
+    # routing + failover across these lives in src/processor/llm_client.py
+    # (TASK_ROUTING). Groq is the always-present last resort; the others are
+    # optional — a missing key just drops that provider from every chain.
     groq_api_key: str
-    # single-item summaries (high volume, plain {summary,key_phrase} JSON, no id arrays)
-    groq_model_classify: str = "openai/gpt-oss-120b"
-    # batch summarise + topic grouping (returns id arrays — needs a model that emits them reliably)
-    groq_model_batch: str = "llama-3.3-70b-versatile"
-    # shared safety net: whichever model's daily quota dies, calls fall over to this
-    groq_model_fallback: str = "llama-3.1-8b-instant"
+    cerebras_api_key: str = ""
+    mistral_api_key: str = ""
+    zhipu_api_key: str = ""
 
     # Cross-source deduplication (separate provider/endpoint from Groq — see docs).
     gemini_api_key: str = ""

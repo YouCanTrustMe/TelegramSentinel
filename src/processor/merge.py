@@ -12,7 +12,8 @@ Flip `settings.merge_via_embeddings` off to fall back to the old all-source
 import logging
 
 from src.config import settings
-from src.processor.classifier import group_by_topic, is_quota_dead, _wants_no_merge
+from src.processor.classifier import group_by_topic, _wants_no_merge
+from src.processor.llm_client import is_task_dead
 from src.processor.cross_dedup import cluster_within_source
 from src.processor.embedder import cosine
 from src.util import row_get
@@ -139,8 +140,8 @@ async def _merge_via_group_by_topic(items: list, prompt_extra: str | None = None
     if len(items) < MERGE_MIN_ITEMS:
         return _items_as_plain(items)
 
-    if is_quota_dead(settings.groq_model_batch) and is_quota_dead(settings.groq_model_fallback):
-        log.info("Skipping group_by_topic for source: batch model and fallback both quota dead, returning items as-is")
+    if is_task_dead("group"):
+        log.info("Skipping group_by_topic for source: all group-task models quota dead, returning items as-is")
         return _items_as_plain(items)
 
     raw_inputs = [{"id": i, "text": item["summary"] or item["raw_text"] or ""} for i, item in enumerate(items)]

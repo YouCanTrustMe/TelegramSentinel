@@ -427,10 +427,12 @@ WHAT IS NEVER JUNK (do not block regardless of rule wording):
 - Analysis, commentary, or op-eds from known media sources — not "collections of recommendations."
 - Any item that is short or ambiguous: default confidence ≤ 5 (keep).
 
+MATCH THE EXACT RULE: a high score means the item literally matches a specific rule's text, not a vague feeling that it is "low value". Only block under a rule the item clearly fits; if no rule fits, keep it (confidence ≤ 5). Never block hard news just because it is short, starts with an emoji or [Photo], or names a place. Examples that must be KEPT: explosions/fire/strikes in a named place with consequences; court cases or sentences involving officials (minister, MP, mayor, official, treason); a company/market/tech report from a news outlet.
+
 Output JSON only: {"blocked": [{"id": <int>, "rule": <rule_index_0based>, "confidence": <int 1-10>}]}
 If nothing should be blocked: {"blocked": []}"""
 
-_FILTER_BLOCK_THRESHOLD = 7
+_FILTER_BLOCK_THRESHOLD = 8
 
 
 async def check_blocked_filters(

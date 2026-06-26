@@ -90,3 +90,42 @@ async def test_classify_pending_embeds_freshly_classified(monkeypatch):
     await classify_pending_items(limit=10)
 
     assert embedded["ids"] == {1, 2}
+
+
+def test_check_blocked_filters_blocks_only_at_threshold_8(monkeypatch):
+    """Threshold raised 7→8: a confidence-7 match is now KEPT, only >=8 blocks."""
+    import asyncio
+    items = [
+        {"id": 1, "text": "buy now, register via link!", "source": "s", "category": "feed"},
+        {"id": 2, "text": "ordinary news item", "source": "s", "category": "feed"},
+    ]
+    rules = ["advertising and promo posts"]
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        return {"blocked": [
+            {"id": 1, "rule": 0, "confidence": 8},
+            {"id": 2, "rule": 0, "confidence": 7},
+        ]}
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    out = asyncio.run(classifier.check_blocked_filters(items, rules))
+    assert 1 in out and 2 not in out
+
+
+def test_check_blocked_filters_drops_out_of_scope_block(monkeypatch):
+    """A rule scoped to one category must not block an item from another, even if
+    the model returns it (guards against the over-blocking we saw in prod)."""
+    import asyncio
+    items = [
+        {"id": 1, "text": "feed item", "source": "s", "category": "feed"},
+        {"id": 2, "text": "crypto item", "source": "s", "category": "crypto"},
+    ]
+    rules = ["local traffic accidents"]
+    scopes = [{"feed"}]  # rule only applies to the feed category
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        return {"blocked": [{"id": 2, "rule": 0, "confidence": 10}]}  # crypto, out of scope
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    out = asyncio.run(classifier.check_blocked_filters(items, rules, scopes))
+    assert out == {}

@@ -192,3 +192,27 @@ def test_alert_provider_throttles_repeat(monkeypatch):
     asyncio.run(llm_client._alert_provider("mistral", "test issue"))
     asyncio.run(llm_client._alert_provider("mistral", "test issue"))  # within cooldown → suppressed
     assert len(sent) == 1
+
+
+def test_llm_json_marks_provider_down_on_auth_fail(monkeypatch):
+    """A 401 takes the whole provider out of routing (same key → same failure) and
+    fails over to the NEXT provider, so the digest stops re-hitting the bad key."""
+    import asyncio
+    llm_client._quota_dead_until.clear()
+    monkeypatch.setattr(llm_client.settings, "mistral_api_key", "x-test", raising=False)
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_auth", [("mistral", "m1"), ("groq", "g1")])
+    async def noop_alert(provider, msg):
+        pass
+    calls = []
+    async def fake_call(provider, model, messages):
+        calls.append((provider, model))
+        if provider == "mistral":
+            return None, 401, {}
+        return {"ok": 1}, 200, {}
+    monkeypatch.setattr(llm_client, "_alert_provider", noop_alert)
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_auth"))
+    assert out == {"ok": 1}
+    assert calls == [("mistral", "m1"), ("groq", "g1")]
+    assert llm_client._is_dead("mistral/m1") and not llm_client._is_dead("groq/g1")
+    llm_client._quota_dead_until.clear()

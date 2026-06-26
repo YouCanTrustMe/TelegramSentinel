@@ -199,6 +199,17 @@ def _signal_backoff(tag: str, seconds: float = 65.0) -> None:
     log.debug("LLM rate limit: %s backoff %gs", tag, seconds)
 
 
+def _mark_provider_down(provider: str, seconds: float) -> None:
+    """Take a whole provider out of routing for a while (e.g. on auth failure):
+    auth is provider-level, so mark every model that provider serves as dead so
+    later calls skip it instead of re-hitting the bad key on every request."""
+    until = time.monotonic() + seconds
+    for chain in TASK_ROUTING.values():
+        for p, m in chain:
+            if p == provider:
+                _quota_dead_until[_tag(p, m)] = until
+
+
 def _resolve_chain(task: str) -> list[tuple[str, str]]:
     """Routing chain for a task, dropping entries whose provider has no API key."""
     chain = TASK_ROUTING.get(task) or TASK_ROUTING["classify"]
@@ -441,8 +452,11 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
                 log.warning("LLM rate limit persistent on %s after %d attempts, failing over", tag, max_retries)
                 break  # next chain entry
             if status in (401, 403):
-                # bad/expired key — retrying is pointless; alert and fail over now
+                # bad/expired key — retrying is pointless. Take the whole provider
+                # out of routing for a while so the rest of the digest skips it
+                # instead of re-hitting the bad key on every call; alert + fail over.
                 _bump(tag, "error")
+                _mark_provider_down(provider, 1800)
                 await _alert_provider(provider, f"API key invalid or expired (HTTP {status}) — provider temporarily dropped")
                 break  # next chain entry
             # 5xx / other transient

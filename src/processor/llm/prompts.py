@@ -31,7 +31,7 @@ Respond ONLY with JSON: {{"summary": "...", "key_phrase": "..."}}"""
 
 _BATCH_SYSTEM_PROMPT = f"""Group news items from one source by event, then summarize each group in Ukrainian. Output JSON only.
 
-Items are numbered from 0. Every item MUST appear in exactly one group — no item may be omitted or duplicated.
+Each item is prefixed with its numeric id (e.g. `16321: ...`). Use those EXACT ids in your output — never renumber, never start from 0. Every id MUST appear in exactly one group's `ids` — none omitted or duplicated.
 
 MERGE RULE: merge ONLY items that describe THE SAME SPECIFIC EVENT with new developments (same attack, same trial, same announcement, same person's statement on same day). Do NOT merge items that are merely about the same topic, person, or organisation if they are different events. WHEN IN DOUBT — KEEP SEPARATE. Never merge more than 3 items into one group; if 4+ items look related, split them into multiple groups of 2-3.
 Examples of correct merges: "Air alert in Kyiv" + "All-clear in Kyiv" = one group. "Zelensky signed decree X" + "Details of decree X released" = one group.
@@ -49,7 +49,7 @@ Respond ONLY with JSON: {{"groups": [{{"ids": [0], "summary": "...", "key_phrase
 
 _MULTI_SYSTEM_PROMPT = f"""Summarize each news item separately in Ukrainian. Output JSON only.
 
-Items are numbered from 0. Produce exactly one entry per input id. Do NOT merge items.
+Each item is prefixed with its numeric id (e.g. `16321: ...`). Produce exactly one entry per input id, echoing that EXACT id — never renumber or start from 0. Do NOT merge items.
 
 {_TRANSLATE_RULE}
 {_BREVITY_RULE}

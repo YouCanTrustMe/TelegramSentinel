@@ -144,6 +144,45 @@ async def test_confirm_mutes_chunks_large_groups(monkeypatch):
     assert all(d in confirmed for d in (2, 3, 4, 5))
 
 
+async def test_confirm_mutes_batches_many_primaries_into_one_call(monkeypatch):
+    """Several small primaries are packed into a single group_by_topic call (Cerebras
+    is 5 RPM, so one call per primary throttles a big digest). Each candidate is still
+    confirmed only if the LLM groups it with ITS OWN primary."""
+    calls = {"n": 0, "sizes": []}
+
+    async def fake_group_by_topic(inputs, prompt_extra=None):
+        calls["n"] += 1
+        calls["sizes"].append(len(inputs))
+        # Group each primary (odd id) with the very next id ("its" candidate), leaving
+        # the second candidate of primary 1 (id=3) as a separate event -> kept.
+        pairs = {1: {1, 2}, 5: {5, 6}, 7: {7, 8}}
+        present = {i["id"] for i in inputs}
+        groups = []
+        seen: set[int] = set()
+        for p, members in pairs.items():
+            m = members & present
+            if m:
+                groups.append({"ids": list(m), "summary": "x", "key_phrase": ""})
+                seen |= m
+        for i in inputs:
+            if i["id"] not in seen:
+                groups.append({"ids": [i["id"]], "summary": "y", "key_phrase": ""})
+        return groups
+
+    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
+    # 3 primaries (1,5,7); primary 1 has two candidates (2 SAME, 3 different); 5 and 7 have one each.
+    item_by_id = {i: {"id": i, "summary": f"s{i}"} for i in (1, 2, 3, 5, 6, 7, 8)}
+    # No primary has a vector -> nothing auto-confirmed as near-dup, all go to the LLM.
+    vec = {i: _vec(1, 0) for i in (2, 3, 6, 8)}
+    muted = {2: 1, 3: 1, 6: 5, 8: 7}
+
+    confirmed = await cd._confirm_mutes(muted, item_by_id, {}, vec, {})
+
+    assert calls["n"] == 1                 # all three primaries fit one batch (<= _B1_CONFIRM_BATCH)
+    assert confirmed == {2: 1, 6: 5, 8: 7}  # each candidate muted under its OWN primary
+    assert 3 not in confirmed              # LLM kept it as a different event
+
+
 async def test_confirm_mutes_fails_open_on_llm_error(monkeypatch):
     async def boom(inputs, prompt_extra=None):
         raise RuntimeError("quota dead")

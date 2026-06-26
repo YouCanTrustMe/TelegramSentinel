@@ -31,9 +31,16 @@ log = logging.getLogger(__name__)
 
 _PLACEHOLDER_SUMMARIES = {"no text", "no caption", "media"}
 
-# Max items (primary + candidates) in one B1 group_by_topic call. Bigger groups make
-# the LLM over-group and risk muting a distinct story; large groups are chunked.
+# Max items (primary + candidates) the LLM judges together for ONE primary. Bigger
+# groups make the LLM over-group and risk muting a distinct story; large groups are chunked.
 _B1_MAX_GROUP = 10
+
+# Several SMALL primaries are packed into one group_by_topic call up to this many items
+# (distinct primaries = distinct events, so this does not raise the per-primary over-group
+# risk). Without this, a big digest fires one call PER primary (~20), and on a 5 RPM
+# provider that throttles the whole digest to minutes. Two chunks of the SAME primary are
+# never packed together, so _B1_MAX_GROUP still bounds how many candidates one primary sees.
+_B1_CONFIRM_BATCH = 18
 
 
 def _is_placeholder(text: str) -> bool:
@@ -164,6 +171,10 @@ async def _confirm_mutes(
         by_primary[pid].append(mid)
 
     confirmed: dict[int, int] = {}
+    # Build the LLM work as "units": each unit is one primary plus a bounded chunk of its
+    # candidates (the over-group guard). Near-identical reposts are confirmed here without
+    # the LLM.
+    units: list[tuple[int, list[dict]]] = []  # (primary_id, group_by_topic inputs incl. the primary)
     for pid, dups in by_primary.items():
         pvec = vec.get(pid)
         if pvec is None:
@@ -177,30 +188,56 @@ async def _confirm_mutes(
                 need_llm.append(d)
         if not need_llm:
             continue
-
         primary_summary = (
             _field(item_by_id[pid], "summary", "") if pid in item_by_id else sent_summary.get(pid, "")
         ) or ""
-        # Bound each LLM call: a big candidate group asks group_by_topic to judge too
-        # many summaries at once, which over-groups and could mute a real story. Split
-        # into chunks that each carry the primary plus a few candidates.
-        same_event: set[int] = set()
         chunk_size = max(1, _B1_MAX_GROUP - 1)
         for start in range(0, len(need_llm), chunk_size):
             chunk = need_llm[start:start + chunk_size]
             inputs = [{"id": pid, "text": primary_summary}]
             inputs += [{"id": d, "text": _field(item_by_id[d], "summary", "") or ""} for d in chunk]
-            try:
-                groups = await group_by_topic(inputs)
-            except Exception as exc:
-                log.warning("B1: LLM confirm failed for primary id=%d, keeping %d candidate(s) unmuted: %s",
-                            pid, len(chunk), exc)
+            units.append((pid, inputs))
+
+    # Pack units into batches (first-fit). A batch never holds two units of the SAME primary
+    # (that would let one primary see more candidates than _B1_MAX_GROUP), and stays within
+    # _B1_CONFIRM_BATCH items — so many small primaries share one call instead of one each.
+    batches: list[tuple[list[dict], set[int], set[int]]] = []  # (inputs, pids, ids)
+    for pid, inputs in units:
+        placed = False
+        for b_inputs, b_pids, b_ids in batches:
+            if pid in b_pids:
                 continue
-            for g in groups:
-                if pid in g.get("ids", []):
-                    same_event.update(g["ids"])
-        for d in need_llm:
-            if d in same_event:
+            add = sum(1 for x in inputs if x["id"] not in b_ids)
+            if len(b_ids) + add <= _B1_CONFIRM_BATCH:
+                for x in inputs:
+                    if x["id"] not in b_ids:
+                        b_inputs.append(x)
+                        b_ids.add(x["id"])
+                b_pids.add(pid)
+                placed = True
+                break
+        if not placed:
+            batches.append((list(inputs), {pid}, {x["id"] for x in inputs}))
+
+    # One LLM call per batch; collect, per primary, the ids the LLM put in its event group.
+    same_group_of: dict[int, set[int]] = defaultdict(set)
+    for b_inputs, b_pids, _b_ids in batches:
+        try:
+            groups = await group_by_topic(b_inputs)
+        except Exception as exc:
+            log.warning("B1: LLM confirm failed for %d primary group(s), keeping candidates unmuted: %s",
+                        len(b_pids), exc)
+            continue
+        for g in groups:
+            ids = set(g.get("ids", []))
+            for pid in b_pids & ids:
+                same_group_of[pid].update(ids)
+
+    for pid, dups in by_primary.items():
+        for d in dups:
+            if d in confirmed:  # near-dup auto-confirmed above
+                continue
+            if d in same_group_of.get(pid, ()):
                 confirmed[d] = pid
             else:
                 log.info("B1: kept item id=%d — LLM says different event from primary id=%d", d, pid)

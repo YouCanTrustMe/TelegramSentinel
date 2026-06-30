@@ -112,6 +112,33 @@ def test_check_blocked_filters_blocks_only_at_threshold_8(monkeypatch):
     assert 1 in out and 2 not in out
 
 
+def test_group_by_topic_drops_empty_and_phantom_ids(monkeypatch):
+    """A malformed LLM partition — an empty `ids` group plus a hallucinated id —
+    must not crash and must keep every real input id covered exactly once.
+    Regression for the empty-cluster ValueError that killed two prod digests."""
+    import asyncio
+    items = [{"id": 0, "text": "a"}, {"id": 1, "text": "b"}, {"id": 2, "text": "c"}]
+
+    async def fake_llm(messages, max_retries=3, task="group"):
+        return {"groups": [
+            {"ids": [], "summary": "", "key_phrase": ""},          # empty -> dropped
+            {"ids": [0, 9], "summary": "x", "key_phrase": "k"},    # 9 is phantom -> filtered
+            {"ids": [1], "summary": "y", "key_phrase": "k"},
+            # id 2 omitted by the model -> reconciled as a singleton
+        ]}
+
+    async def identity(summary, key_phrase):
+        return summary, key_phrase
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    monkeypatch.setattr(classifier, "_ensure_ukrainian", identity)
+    groups = asyncio.run(classifier.group_by_topic(items))
+
+    covered = sorted(i for g in groups for i in g["ids"])
+    assert covered == [0, 1, 2]                 # every real id, none dropped, no phantom 9
+    assert all(g["ids"] for g in groups)        # no empty group survived
+
+
 def test_check_blocked_filters_drops_out_of_scope_block(monkeypatch):
     """A rule scoped to one category must not block an item from another, even if
     the model returns it (guards against the over-blocking we saw in prod)."""

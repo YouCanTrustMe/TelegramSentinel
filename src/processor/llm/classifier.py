@@ -232,7 +232,20 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
     result = []
     covered_ids: set[int] = set()
     for g in groups:
-        ids = [int(i) for i in g["ids"]]
+        # The LLM occasionally hallucinates an id that was never an input, or emits
+        # a group with empty `ids`. Keep only real input ids and drop now-empty
+        # groups so callers never get a phantom/empty group (an empty one used to
+        # crash within-source merge at max() over an empty cluster).
+        ids = []
+        for raw in g.get("ids", []):
+            try:
+                v = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if v in all_ids:
+                ids.append(v)
+        if not ids:
+            continue
         for i in ids:
             covered_ids.add(i)
         summary = g.get("summary", "") or ""
@@ -249,7 +262,11 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
 
     missing = all_ids - covered_ids
     if missing:
-        log.warning("group_by_topic: %d item(s) missing from AI output, adding as singletons: %s", len(missing), missing)
+        # Benign + self-healing: a dropped id is re-added as its own group. Callers
+        # of the "group" task (within-source merge, B1 dedup confirm) keep the
+        # item's original summary / use co-membership only, so nothing degrades —
+        # hence INFO, not WARNING.
+        log.info("group_by_topic: %d item(s) missing from AI output, re-added as singletons: %s", len(missing), missing)
         for mid in missing:
             result.append({"ids": [mid], "summary": "", "key_phrase": ""})
 

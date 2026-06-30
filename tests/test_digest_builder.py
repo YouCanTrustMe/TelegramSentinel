@@ -124,3 +124,66 @@ async def test_defer_empty_items_keeps_summarised_and_branches_empties(monkeypat
     fallback = next(it for it in kept if it["id"] == 3)
     assert fallback["summary"].startswith("⚠️ stale news body")
     assert written == [(3, fallback["summary"])]
+
+
+def _stub_pinning(monkeypatch):
+    async def _noop(*a, **k):
+        return None
+    monkeypatch.setattr(digest_builder, "get_app_setting", _noop)
+    monkeypatch.setattr(digest_builder, "set_app_setting", _noop)
+    monkeypatch.setattr(digest_builder, "pin_message", _noop)
+    monkeypatch.setattr(digest_builder, "unpin_message", _noop)
+
+
+@pytest.mark.asyncio
+async def test_deliver_marks_only_delivered_items(monkeypatch):
+    """The no-loss invariant: mark_sent receives exactly the ids of messages that
+    actually reached Telegram — never more. If this breaks, items would be marked
+    sent without being delivered and silently vanish from every future digest."""
+    marked: list[int] = []
+
+    async def _fake_send(text, disable_notification=False):
+        return 111
+
+    async def _fake_mark(ids):
+        marked.extend(ids)
+
+    monkeypatch.setattr(digest_builder, "send_message", _fake_send)
+    monkeypatch.setattr(digest_builder, "mark_sent", _fake_mark)
+    _stub_pinning(monkeypatch)
+
+    messages = [("m1", [1, 2]), ("m2", [3]), ("m3", [4, 5])]
+    sent, total, confirmed, failed = await digest_builder._deliver(messages)
+
+    assert not failed
+    assert sent == total == 3
+    assert sorted(marked) == [1, 2, 3, 4, 5]  # every id, exactly once
+
+
+@pytest.mark.asyncio
+async def test_deliver_leaves_undelivered_items_unmarked_on_failure(monkeypatch):
+    """A mid-batch send failure must leave the remaining items sent=0 so the next
+    digest retries them — no silent loss, no double-send."""
+    marked: list[int] = []
+    calls = {"n": 0}
+
+    async def _fake_send(text, disable_notification=False):
+        calls["n"] += 1
+        if calls["n"] == 2:        # second message fails
+            raise RuntimeError("Telegram 500")
+        return 111
+
+    async def _fake_mark(ids):
+        marked.extend(ids)
+
+    monkeypatch.setattr(digest_builder, "send_message", _fake_send)
+    monkeypatch.setattr(digest_builder, "mark_sent", _fake_mark)
+    _stub_pinning(monkeypatch)
+
+    messages = [("m1", [1, 2]), ("m2", [3]), ("m3", [4, 5])]
+    sent, total, confirmed, failed = await digest_builder._deliver(messages)
+
+    assert failed
+    assert sent == 1
+    assert marked == [1, 2]            # only the delivered message's items
+    assert 3 not in marked and 4 not in marked and 5 not in marked

@@ -52,6 +52,8 @@ async def merge_source_items(
 
 def _cluster_summary_fields(cluster: list) -> tuple[str, str]:
     """Most-detailed existing summary of a cluster (fallback when no LLM call)."""
+    if not cluster:
+        return ("", "")
     best = max(cluster, key=lambda it: len((it["summary"] or "")))
     return (best["summary"] or "", row_get(best, "key_phrase", "") or "")
 
@@ -76,8 +78,14 @@ async def _llm_subgroup(cluster: list, prompt_extra: str | None) -> list[tuple[l
     raw_inputs = [{"id": i, "text": it["summary"] or it["raw_text"] or ""} for i, it in enumerate(cluster)]
     groups = await group_by_topic(raw_inputs, prompt_extra=prompt_extra)
     out = []
+    n = len(cluster)
     for g in groups:
-        sub = [cluster[i] for i in g["ids"]]
+        # The LLM occasionally hallucinates an out-of-range index or returns an
+        # empty `ids` group; drop both so a bad group never empties a subcluster
+        # (an empty subgroup used to crash the whole digest at _cluster_summary_fields).
+        sub = [cluster[i] for i in g["ids"] if isinstance(i, int) and 0 <= i < n]
+        if not sub:
+            continue
         out.append((sub, g["summary"] or "", g.get("key_phrase") or ""))
     return out
 

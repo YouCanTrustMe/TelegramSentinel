@@ -81,73 +81,47 @@ async def test_plain_text_post_still_saved(captured):
     assert captured["summary"] == ""  # long enough to need classification later
 
 
-class _StopLoop(Exception):
-    """Break the otherwise-infinite keepalive loop from a patched asyncio.sleep."""
+async def test_keepalive_tick_success_resets_counter(monkeypatch):
+    # A healthy ping clears any accumulated failures and leaves the cooldown untouched.
+    async def ok(_):
+        return None
+
+    async def never_restart():
+        raise AssertionError("must not restart on a healthy ping")
+
+    monkeypatch.setattr(tc.userbot, "invoke", ok)
+    monkeypatch.setattr(tc.userbot, "restart", never_restart)
+
+    failures, last_restart = await tc._keepalive_tick(3, 123.0)
+    assert failures == 0
+    assert last_restart == 123.0
 
 
-async def test_keepalive_single_failure_recovers_without_restart(monkeypatch):
-    # One transient ping failure that recovers on the next ping must NOT force a restart.
-    state = {"invoke": 0, "restart": 0}
-
-    async def fake_invoke(_):
-        state["invoke"] += 1
-        if state["invoke"] == 1:
-            raise ConnectionError("Connection lost")
-
-    async def fake_restart():
-        state["restart"] += 1
-
-    async def fake_sleep(_secs):
-        if state["invoke"] >= 2:  # stop once the recovering ping has run
-            raise _StopLoop()
-
-    monkeypatch.setattr(tc.userbot, "invoke", fake_invoke)
-    monkeypatch.setattr(tc.userbot, "restart", fake_restart)
-    monkeypatch.setattr(tc.asyncio, "sleep", fake_sleep)
-
-    with pytest.raises(_StopLoop):
-        await tc.keep_userbot_online()
-
-    assert state["restart"] == 0
-    assert state["invoke"] == 2
-
-
-async def test_keepalive_floodwait_does_not_force_restart(monkeypatch):
-    # A FloodWait on the ping is a rate-limit, not a dead connection: it must never
-    # count toward the failure threshold nor trigger a restart.
-    from pyrogram.errors import FloodWait
-
-    state = {"invoke": 0, "restart": 0}
-
-    async def fake_invoke(_):
-        state["invoke"] += 1
-        raise FloodWait(value=7)
-
-    async def fake_restart():
-        state["restart"] += 1
-
-    async def fake_sleep(_secs):
-        if state["invoke"] >= 3:  # let several FloodWaits go by, then stop
-            raise _StopLoop()
-
-    monkeypatch.setattr(tc.userbot, "invoke", fake_invoke)
-    monkeypatch.setattr(tc.userbot, "restart", fake_restart)
-    monkeypatch.setattr(tc.asyncio, "sleep", fake_sleep)
-
-    with pytest.raises(_StopLoop):
-        await tc.keep_userbot_online()
-
-    assert state["restart"] == 0
-
-
-async def test_keepalive_forces_restart_after_consecutive_failures(monkeypatch):
-    # Every ping fails → after _KEEPALIVE_FAIL_LIMIT in a row, force one restart,
-    # and re-check on the short retry interval (not the full keepalive interval).
-    calls = {"invoke": 0, "restart": 0, "alerts": 0, "sleeps": []}
-
-    async def fake_invoke(_):
-        calls["invoke"] += 1
+async def test_keepalive_tick_single_failure_no_restart(monkeypatch):
+    # One failure only bumps the counter; below the threshold nothing is restarted.
+    async def boom(_):
         raise ConnectionError("Connection lost")
+
+    calls = {"restart": 0}
+
+    async def fake_restart():
+        calls["restart"] += 1
+
+    monkeypatch.setattr(tc.userbot, "invoke", boom)
+    monkeypatch.setattr(tc.userbot, "restart", fake_restart)
+
+    failures, _ = await tc._keepalive_tick(0, 0.0)
+    assert failures == 1
+    assert calls["restart"] == 0
+
+
+async def test_keepalive_tick_forces_restart_at_threshold(monkeypatch):
+    # Reaching _KEEPALIVE_FAIL_LIMIT forces exactly one restart + one admin alert,
+    # resets the counter, and stamps the cooldown.
+    async def boom(_):
+        raise ConnectionError("Connection lost")
+
+    calls = {"restart": 0, "alerts": 0}
 
     async def fake_restart():
         calls["restart"] += 1
@@ -155,20 +129,48 @@ async def test_keepalive_forces_restart_after_consecutive_failures(monkeypatch):
     async def fake_alert(*_a, **_k):
         calls["alerts"] += 1
 
-    async def fake_sleep(secs):
-        calls["sleeps"].append(secs)
-        if calls["restart"] >= 1:  # stop right after the forced restart
-            raise _StopLoop()
-
-    monkeypatch.setattr(tc.userbot, "invoke", fake_invoke)
+    monkeypatch.setattr(tc.userbot, "invoke", boom)
     monkeypatch.setattr(tc.userbot, "restart", fake_restart)
     monkeypatch.setattr(tc, "admin_alert", fake_alert)
-    monkeypatch.setattr(tc.asyncio, "sleep", fake_sleep)
 
-    with pytest.raises(_StopLoop):
-        await tc.keep_userbot_online()
-
+    failures, last_restart = await tc._keepalive_tick(tc._KEEPALIVE_FAIL_LIMIT - 1, 0.0)
     assert calls["restart"] == 1
     assert calls["alerts"] == 1
-    assert calls["invoke"] == tc._KEEPALIVE_FAIL_LIMIT
-    assert calls["sleeps"][0] == tc._KEEPALIVE_RETRY_INTERVAL
+    assert failures == 0
+    assert last_restart > 0.0
+
+
+async def test_keepalive_tick_cooldown_blocks_second_restart(monkeypatch):
+    # At the threshold but still inside the cooldown window → no restart (anti-storm).
+    async def boom(_):
+        raise ConnectionError("Connection lost")
+
+    calls = {"restart": 0}
+
+    async def fake_restart():
+        calls["restart"] += 1
+
+    monkeypatch.setattr(tc.userbot, "invoke", boom)
+    monkeypatch.setattr(tc.userbot, "restart", fake_restart)
+
+    just_restarted = tc.time.monotonic()  # last restart ~now → within cooldown
+    failures, _ = await tc._keepalive_tick(tc._KEEPALIVE_FAIL_LIMIT, just_restarted)
+    assert calls["restart"] == 0
+    assert failures == tc._KEEPALIVE_FAIL_LIMIT + 1
+
+
+async def test_keepalive_tick_floodwait_not_counted(monkeypatch):
+    # A FloodWait is a rate-limit, not a dead connection: counter unchanged, no restart.
+    from pyrogram.errors import FloodWait
+
+    async def flood(_):
+        raise FloodWait(value=7)
+
+    async def never_restart():
+        raise AssertionError("FloodWait must not trigger a restart")
+
+    monkeypatch.setattr(tc.userbot, "invoke", flood)
+    monkeypatch.setattr(tc.userbot, "restart", never_restart)
+
+    failures, _ = await tc._keepalive_tick(1, 0.0)
+    assert failures == 1

@@ -1,9 +1,10 @@
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from pyrogram import Client, raw as tg_raw
-from pyrogram.errors import ChannelBanned, ChannelInvalid, ChannelPrivate, ChatForbidden, UserBannedInChannel, UserKicked, UsernameInvalid, UsernameNotOccupied
+from pyrogram.errors import ChannelBanned, ChannelInvalid, ChannelPrivate, ChatForbidden, FloodWait, UserBannedInChannel, UserKicked, UsernameInvalid, UsernameNotOccupied
 from pyrogram.types import Message
 
 from src.config import settings
@@ -318,17 +319,56 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
     return saved
 
 
+_KEEPALIVE_INTERVAL = 240        # seconds between pings while healthy
+_KEEPALIVE_RETRY_INTERVAL = 30   # faster re-check while pings are failing
+_KEEPALIVE_FAIL_LIMIT = 2        # consecutive failed pings before forcing a reconnect
+_KEEPALIVE_RESTART_COOLDOWN = 600  # min seconds between forced restarts, to avoid a restart storm
+
+
 async def keep_userbot_online() -> None:
-    """Ping Telegram every 4 min so the userbot account shows as online while collectors run."""
+    """Ping Telegram every 4 min so the userbot account shows as online while collectors run.
+
+    Doubles as a connection watchdog: pyrogram 2.0.106 can take many minutes to recover
+    from a server-side session reset on its own, so after a couple of consecutive failed
+    pings (re-checked every 30s, not the full interval) we force a client restart to cut
+    the outage short. A cooldown stops a persistently bad connection from restart-looping.
+    """
     from pyrogram.raw.functions.account import UpdateStatus
-    log.info("Userbot online keepalive started (interval=240s)")
+    log.info("Userbot online keepalive started (interval=%ss)", _KEEPALIVE_INTERVAL)
+    consecutive_failures = 0
+    last_restart = 0.0
     while True:
         try:
             await userbot.invoke(UpdateStatus(offline=False))
+            if consecutive_failures:
+                log.info("Userbot online status recovered after %d failed ping(s)", consecutive_failures)
+            consecutive_failures = 0
             log.debug("Userbot online status refreshed")
+        except FloodWait as exc:
+            # A rate-limit on the ping is not a dead connection: restarting won't help
+            # and would only add churn, so wait it out without counting toward a reconnect.
+            log.warning("Online keepalive hit FloodWait (%ss); not counted as a failure", getattr(exc, "value", "?"))
         except Exception as exc:
-            log.warning("Online keepalive ping failed: %s", exc)
-        await asyncio.sleep(240)
+            consecutive_failures += 1
+            log.warning("Online keepalive ping failed (%d in a row): %s", consecutive_failures, exc)
+            now = time.monotonic()
+            if consecutive_failures >= _KEEPALIVE_FAIL_LIMIT and now - last_restart >= _KEEPALIVE_RESTART_COOLDOWN:
+                last_restart = now
+                restarted = False
+                try:
+                    log.warning("Forcing userbot reconnect after %d consecutive failed pings", consecutive_failures)
+                    await userbot.restart()
+                    consecutive_failures = 0
+                    restarted = True
+                    log.info("Userbot reconnect forced successfully")
+                except Exception as restart_exc:
+                    log.error("Forced userbot reconnect failed: %s", restart_exc)
+                if restarted:
+                    await admin_alert(
+                        f"🔄 Userbot forced-reconnected after {_KEEPALIVE_FAIL_LIMIT} failed keepalive pings",
+                        key="userbot_force_reconnect",
+                    )
+        await asyncio.sleep(_KEEPALIVE_RETRY_INTERVAL if consecutive_failures else _KEEPALIVE_INTERVAL)
 
 
 async def poll_telegram_once() -> None:

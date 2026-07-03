@@ -79,3 +79,96 @@ async def test_plain_text_post_still_saved(captured):
     assert kept is True
     assert captured["raw_text"] == "Нарешті літо в Хорватії"
     assert captured["summary"] == ""  # long enough to need classification later
+
+
+class _StopLoop(Exception):
+    """Break the otherwise-infinite keepalive loop from a patched asyncio.sleep."""
+
+
+async def test_keepalive_single_failure_recovers_without_restart(monkeypatch):
+    # One transient ping failure that recovers on the next ping must NOT force a restart.
+    state = {"invoke": 0, "restart": 0}
+
+    async def fake_invoke(_):
+        state["invoke"] += 1
+        if state["invoke"] == 1:
+            raise ConnectionError("Connection lost")
+
+    async def fake_restart():
+        state["restart"] += 1
+
+    async def fake_sleep(_secs):
+        if state["invoke"] >= 2:  # stop once the recovering ping has run
+            raise _StopLoop()
+
+    monkeypatch.setattr(tc.userbot, "invoke", fake_invoke)
+    monkeypatch.setattr(tc.userbot, "restart", fake_restart)
+    monkeypatch.setattr(tc.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(_StopLoop):
+        await tc.keep_userbot_online()
+
+    assert state["restart"] == 0
+    assert state["invoke"] == 2
+
+
+async def test_keepalive_floodwait_does_not_force_restart(monkeypatch):
+    # A FloodWait on the ping is a rate-limit, not a dead connection: it must never
+    # count toward the failure threshold nor trigger a restart.
+    from pyrogram.errors import FloodWait
+
+    state = {"invoke": 0, "restart": 0}
+
+    async def fake_invoke(_):
+        state["invoke"] += 1
+        raise FloodWait(value=7)
+
+    async def fake_restart():
+        state["restart"] += 1
+
+    async def fake_sleep(_secs):
+        if state["invoke"] >= 3:  # let several FloodWaits go by, then stop
+            raise _StopLoop()
+
+    monkeypatch.setattr(tc.userbot, "invoke", fake_invoke)
+    monkeypatch.setattr(tc.userbot, "restart", fake_restart)
+    monkeypatch.setattr(tc.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(_StopLoop):
+        await tc.keep_userbot_online()
+
+    assert state["restart"] == 0
+
+
+async def test_keepalive_forces_restart_after_consecutive_failures(monkeypatch):
+    # Every ping fails → after _KEEPALIVE_FAIL_LIMIT in a row, force one restart,
+    # and re-check on the short retry interval (not the full keepalive interval).
+    calls = {"invoke": 0, "restart": 0, "alerts": 0, "sleeps": []}
+
+    async def fake_invoke(_):
+        calls["invoke"] += 1
+        raise ConnectionError("Connection lost")
+
+    async def fake_restart():
+        calls["restart"] += 1
+
+    async def fake_alert(*_a, **_k):
+        calls["alerts"] += 1
+
+    async def fake_sleep(secs):
+        calls["sleeps"].append(secs)
+        if calls["restart"] >= 1:  # stop right after the forced restart
+            raise _StopLoop()
+
+    monkeypatch.setattr(tc.userbot, "invoke", fake_invoke)
+    monkeypatch.setattr(tc.userbot, "restart", fake_restart)
+    monkeypatch.setattr(tc, "admin_alert", fake_alert)
+    monkeypatch.setattr(tc.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(_StopLoop):
+        await tc.keep_userbot_online()
+
+    assert calls["restart"] == 1
+    assert calls["alerts"] == 1
+    assert calls["invoke"] == tc._KEEPALIVE_FAIL_LIMIT
+    assert calls["sleeps"][0] == tc._KEEPALIVE_RETRY_INTERVAL

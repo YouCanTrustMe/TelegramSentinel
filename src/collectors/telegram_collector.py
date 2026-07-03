@@ -325,10 +325,13 @@ _KEEPALIVE_FAIL_LIMIT = 2        # consecutive failed pings before forcing a rec
 _KEEPALIVE_RESTART_COOLDOWN = 600  # min seconds between forced restarts, to avoid a restart storm
 
 
-async def _keepalive_tick(consecutive_failures: int, last_restart: float) -> tuple[int, float]:
+async def _keepalive_tick(consecutive_failures: int, last_restart: float | None) -> tuple[int, float | None]:
     """One keepalive/watchdog cycle. Pings Telegram; on repeated failure forces a
     reconnect. Returns the updated (consecutive_failures, last_restart) so the loop
-    stays a thin driver and this logic is directly testable without an infinite loop."""
+    stays a thin driver and this logic is directly testable without an infinite loop.
+    last_restart is a time.monotonic() stamp, or None when no restart has happened yet
+    (None must always allow the first restart — monotonic is uptime, not epoch, so a
+    0.0 sentinel would wrongly block a restart during the first cooldown of uptime)."""
     from pyrogram.raw.functions.account import UpdateStatus
     try:
         await userbot.invoke(UpdateStatus(offline=False))
@@ -345,7 +348,7 @@ async def _keepalive_tick(consecutive_failures: int, last_restart: float) -> tup
         consecutive_failures += 1
         log.warning("Online keepalive ping failed (%d in a row): %s", consecutive_failures, exc)
         now = time.monotonic()
-        if consecutive_failures >= _KEEPALIVE_FAIL_LIMIT and now - last_restart >= _KEEPALIVE_RESTART_COOLDOWN:
+        if consecutive_failures >= _KEEPALIVE_FAIL_LIMIT and (last_restart is None or now - last_restart >= _KEEPALIVE_RESTART_COOLDOWN):
             last_restart = now
             restarted = False
             try:
@@ -374,7 +377,7 @@ async def keep_userbot_online() -> None:
     """
     log.info("Userbot online keepalive started (interval=%ss)", _KEEPALIVE_INTERVAL)
     consecutive_failures = 0
-    last_restart = 0.0
+    last_restart: float | None = None
     while True:
         consecutive_failures, last_restart = await _keepalive_tick(consecutive_failures, last_restart)
         await asyncio.sleep(_KEEPALIVE_RETRY_INTERVAL if consecutive_failures else _KEEPALIVE_INTERVAL)

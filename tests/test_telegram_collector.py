@@ -133,11 +133,12 @@ async def test_keepalive_tick_forces_restart_at_threshold(monkeypatch):
     monkeypatch.setattr(tc.userbot, "restart", fake_restart)
     monkeypatch.setattr(tc, "admin_alert", fake_alert)
 
-    failures, last_restart = await tc._keepalive_tick(tc._KEEPALIVE_FAIL_LIMIT - 1, 0.0)
+    # last_restart=None → no prior restart, so the cooldown must never block the first one.
+    failures, last_restart = await tc._keepalive_tick(tc._KEEPALIVE_FAIL_LIMIT - 1, None)
     assert calls["restart"] == 1
     assert calls["alerts"] == 1
     assert failures == 0
-    assert last_restart > 0.0
+    assert last_restart is not None
 
 
 async def test_keepalive_tick_cooldown_blocks_second_restart(monkeypatch):

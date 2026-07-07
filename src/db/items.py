@@ -196,6 +196,18 @@ async def log_digest(total: int, status: str = "ok") -> None:
         await db.commit()
 
 
+async def get_recent_digests(hours: int) -> list:
+    """Digest-log rows (sent_at, items_total, status) sent within the last `hours`,
+    oldest first. Backs the daily digest-health watchdog."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT sent_at, items_total, status FROM digest_log "
+            "WHERE julianday(sent_at) >= julianday('now', ?) ORDER BY sent_at ASC",
+            (f"-{hours} hours",),
+        ) as cur:
+            return await cur.fetchall()
+
+
 async def prune_old_items(retention_days: int) -> int:
     """Delete already-sent items older than retention_days to bound table
     growth. Trade-off: RSS dedup relies on these rows (is_seen checks

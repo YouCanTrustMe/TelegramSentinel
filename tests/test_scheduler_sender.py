@@ -3,7 +3,41 @@ the Bot API retry_after parser, message-id construction and SQL statement split.
 from src.db.base import _split_sql_statements
 from src.dispatcher.sender import _retry_after
 from src.processor.dedup.deduplicator import make_message_id
-from src.scheduler import _parse_times, _pre_classify_time, _pre_collect_time
+from src.scheduler import _parse_times, _pre_classify_time, _pre_collect_time, _summarize_digest_health
+
+
+def test_digest_health_no_digests_is_dead_mans_switch():
+    line, alert = _summarize_digest_health([], 26)
+    assert alert is not None and "stuck" in alert
+    assert "26h" in line
+
+
+def test_digest_health_all_ok_no_alert():
+    rows = [
+        {"sent_at": "2026-07-06 09:00", "items_total": 120, "status": "ok"},
+        {"sent_at": "2026-07-06 14:00", "items_total": 67, "status": "ok"},
+        {"sent_at": "2026-07-06 19:00", "items_total": 95, "status": "ok"},
+    ]
+    line, alert = _summarize_digest_health(rows, 26)
+    assert alert is None
+    assert "3 digest(s)" in line and "282 item(s)" in line and "0 non-ok" in line
+
+
+def test_digest_health_partial_run_alerts():
+    rows = [
+        {"sent_at": "2026-07-06 09:00", "items_total": 40, "status": "ok"},
+        {"sent_at": "2026-07-06 14:00", "items_total": 10, "status": "partial"},
+    ]
+    line, alert = _summarize_digest_health(rows, 26)
+    assert alert is not None and "partial" in alert and "1/2" in alert
+    assert "1 non-ok" in line
+
+
+def test_digest_health_tolerates_missing_keys():
+    # Rows that lack items_total/status (e.g. a sparse Row) must not crash the helper.
+    line, alert = _summarize_digest_health([{"sent_at": "x"}], 26)
+    assert alert is None
+    assert "1 digest(s)" in line and "0 item(s)" in line
 
 
 def test_parse_times():

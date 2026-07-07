@@ -27,6 +27,19 @@ _TELEGRAM_LIMIT = 4000
 _MAX_BLOCK_LEN = 3800
 _MAX_ITEMS_PER_SOURCE = 50
 _DEFER_MAX_DAYS = 3
+# A healthy digest builds in a few seconds (embeddings + a handful of LLM calls);
+# anything past this is the slow-digest regression that once ran to ~9 min, so it
+# gets a WARNING that reaches the admin instead of only living in the timestamps.
+_SLOW_DIGEST_SECONDS = 90.0
+
+
+def _slow_digest_warning(elapsed_s: float, threshold_s: float = _SLOW_DIGEST_SECONDS) -> str | None:
+    """Return an admin-facing warning string when a digest took too long, else None."""
+    if elapsed_s <= threshold_s:
+        return None
+    return f"Slow digest: build took {elapsed_s:.0f}s (> {threshold_s:.0f}s threshold)"
+
+
 # Shortest clickable anchor we render: 1-3 char key phrases (Fed, РФ, BTC) are
 # hard to tap on mobile, so the anchor span is grown by whole words until it
 # reaches this length.
@@ -495,6 +508,8 @@ async def _send_digest_locked(
     include_quiet: bool = False,
     status_fn: Callable[[str], Awaitable[None]] | None = None,
 ) -> bool:
+    digest_start = time.monotonic()
+
     async def _update(text: str) -> None:
         if status_fn:
             try:
@@ -604,10 +619,14 @@ async def _send_digest_locked(
     status = "ok" if not failed else "partial"
     logged_total = len(items) + len(blocked_items)
     await log_digest(total=logged_total, status=status)
+    elapsed = time.monotonic() - digest_start
     log.info(
-        "Digest done: %d items (%d filtered) | %d/%d message(s) sent | %d items confirmed | filter=%s | status=%s",
-        len(items), len(blocked_items), sent_count, total_messages, confirmed_count, categories, status,
+        "Digest done: %d items (%d filtered) | %d/%d message(s) sent | %d items confirmed | filter=%s | status=%s | build=%.1fs",
+        len(items), len(blocked_items), sent_count, total_messages, confirmed_count, categories, status, elapsed,
     )
+    slow_warning = _slow_digest_warning(elapsed)
+    if slow_warning:
+        log.warning("%s | filter=%s", slow_warning, categories)
     log.info(format_llm_stats())
     reset_llm_stats()
     return not failed

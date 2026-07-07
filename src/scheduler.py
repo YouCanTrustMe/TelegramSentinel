@@ -25,6 +25,45 @@ async def _prune_items_job() -> None:
         log.info("Retention: pruned %d sent item(s) older than %d days", deleted, _RETENTION_DAYS)
 
 
+# A digest fires several times a day, and each run with items writes a digest_log
+# row, so a full day with zero rows means the pipeline itself is stuck (the kind of
+# silent stall that once left a 224-item backlog). 26h spans the whole previous day.
+_DIGEST_HEALTH_WINDOW_HOURS = 26
+
+
+def _summarize_digest_health(rows: list, window_hours: int) -> tuple[str, str | None]:
+    """Fold recent digest_log rows into a one-line health summary and an optional
+    alert string. The alert is set when nothing went out at all (dead-man's switch)
+    or when a run ended non-ok; it is logged at WARNING, which the admin-alert log
+    handler forwards to the admin (no separate admin_alert call, or the admin would
+    be notified twice). Pure so it can be unit-tested without a DB or scheduler."""
+    count = len(rows)
+    if count == 0:
+        msg = f"No digest sent in the last {window_hours}h — the digest pipeline may be stuck"
+        return msg, msg
+    total_items = sum(int(row_get(r, "items_total") or 0) for r in rows)
+    non_ok = [r for r in rows if (row_get(r, "status") or "ok") != "ok"]
+    line = (
+        f"Digest health (last {window_hours}h): {count} digest(s), "
+        f"{total_items} item(s) total, {len(non_ok)} non-ok"
+    )
+    if non_ok:
+        statuses = ", ".join(sorted({(row_get(r, "status") or "ok") for r in non_ok}))
+        return line, f"{len(non_ok)}/{count} digest(s) ended non-ok ({statuses}) in the last {window_hours}h"
+    return line, None
+
+
+async def _digest_health_job() -> None:
+    from src.db.models import get_recent_digests
+
+    rows = await get_recent_digests(_DIGEST_HEALTH_WINDOW_HOURS)
+    line, alert = _summarize_digest_health(rows, _DIGEST_HEALTH_WINDOW_HOURS)
+    if alert:
+        log.warning(alert)
+    else:
+        log.info(line)
+
+
 async def _revive_rss_job() -> None:
     from src.db.models import revive_error_rss_sources
 
@@ -190,6 +229,17 @@ async def _rebuild_jobs() -> None:
         verify_llm_providers,
         CronTrigger(hour=4, minute=30, timezone=settings.digest_timezone),
         id="verify_llm",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # id must not start with "digest_"/"pre_collect_"/"pre_classify_", or the
+    # per-time-job cleanup sweep at the top of _rebuild_jobs would remove it.
+    _scheduler.add_job(
+        _digest_health_job,
+        CronTrigger(hour=5, minute=0, timezone=settings.digest_timezone),
+        id="health_check",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

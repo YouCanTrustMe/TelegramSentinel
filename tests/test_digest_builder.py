@@ -5,7 +5,22 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.dispatcher import digest_builder
-from src.dispatcher.digest_builder import _defer_empty_items, _quiet_source_url, _split_into_messages
+from src.dispatcher.digest_builder import _defer_empty_items, _quiet_source_url, _slow_digest_warning, _split_into_messages
+
+
+def test_slow_digest_warning_none_when_fast():
+    assert _slow_digest_warning(3.2, threshold_s=90.0) is None
+
+
+def test_slow_digest_warning_none_at_exact_threshold():
+    # Boundary is inclusive: exactly at the threshold is still healthy.
+    assert _slow_digest_warning(90.0, threshold_s=90.0) is None
+
+
+def test_slow_digest_warning_fires_when_slow():
+    msg = _slow_digest_warning(140.0, threshold_s=90.0)
+    assert msg is not None
+    assert "140s" in msg and "90s" in msg
 
 
 def test_split_keeps_small_segments_in_one_message():

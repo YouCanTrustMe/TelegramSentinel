@@ -51,9 +51,11 @@ async def add_to_folder(username: str, folder_title: str = SENTINEL_FOLDER) -> N
         log.warning("Could not add @%s to folder '%s': %s", username, folder_title, exc)
 
 
-async def remove_from_folder(username: str, folder_title: str = SENTINEL_FOLDER) -> None:
+async def remove_from_folder(ref: str | int, folder_title: str = SENTINEL_FOLDER) -> None:
+    # `ref` may be a username or a numeric chat_id; a renamed channel's username no longer
+    # resolves (USERNAME_NOT_OCCUPIED), so callers pass the chat_id where they have it.
     try:
-        peer = await userbot.resolve_peer(username)
+        peer = await userbot.resolve_peer(ref)
         folder = await _get_folder(folder_title)
         if folder is None:
             return
@@ -61,6 +63,6 @@ async def remove_from_folder(username: str, folder_title: str = SENTINEL_FOLDER)
         if channel_id:
             folder.include_peers = [p for p in folder.include_peers if getattr(p, "channel_id", None) != channel_id]
         await userbot.invoke(raw.functions.messages.UpdateDialogFilter(id=folder.id, filter=folder))
-        log.info("Removed @%s from folder '%s'", username, folder_title)
+        log.info("Removed %s from folder '%s'", ref, folder_title)
     except Exception as exc:
-        log.warning("Could not remove @%s from folder '%s': %s", username, folder_title, exc)
+        log.warning("Could not remove %s from folder '%s': %s", ref, folder_title, exc)

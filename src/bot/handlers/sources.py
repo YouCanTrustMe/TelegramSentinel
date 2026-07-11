@@ -189,12 +189,15 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
 
         if s and s["type"] == "telegram":
             username = s["url"].lstrip("@")
-            await remove_from_folder(username)
+            # Prefer the stored chat_id: it survives a rename, where the username stops
+            # resolving (USERNAME_NOT_OCCUPIED) and we'd stay a member / pinned in the folder.
+            ref = s["chat_id"] or username
+            await remove_from_folder(ref)
             try:
-                await userbot.leave_chat(username)
-                log.info("Userbot left @%s", username)
+                await userbot.leave_chat(ref)
+                log.info("Userbot left %s", ref)
             except Exception as exc:
-                log.warning("Could not leave @%s: %s", username, exc)
+                log.warning("Could not leave %s: %s", ref, exc)
 
         removed = await remove_source(src_id)
         if removed:

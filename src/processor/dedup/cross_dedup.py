@@ -252,8 +252,8 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
     item_by_id = {_field(item, "id"): item for item in items}
     current_ids = set(item_by_id)
 
-    # 2. Comparison pool: items already embedded and SENT within the window, so a
-    # new item can match one shown in a previous digest (not only this batch).
+    # Comparison pool: items already embedded and SENT within the window, so a new item
+    # can match one shown in a previous digest (not only this batch).
     window = await get_recent_embedded_items(settings.dedup_window_hours)
     sent_pool: dict[str, list[tuple[int, np.ndarray, object, object]]] = defaultdict(list)
     sent_vec: dict[int, np.ndarray] = {}
@@ -270,15 +270,45 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
             sent_summary[row["id"]] = row_get(row, "summary", "") or ""
 
     floor = settings.dedup_log_floor
+    near_thr = settings.merge_near_dup_threshold
 
-    # 3. Cluster per category (a cross-source duplicate is always same-category).
+    # Cluster per category (a cross-source duplicate is always same-category).
     by_cat: dict[str, list] = defaultdict(list)
     for item in items:
         if _field(item, "id") in vec:
             by_cat[_field(item, "category", "other") or "other"].append(item)
 
+    # Collapse cross-source near-identical current items without the LLM: such a pair can
+    # also union (at the lower floor) onto a weakly-related already-sent primary, and the
+    # confirm step only compares each member against THAT primary — missing the pair itself.
+    near_muted: dict[int, int] = {}
+    for cat, cat_items in by_cat.items():
+        cur = [(_field(it, "id"), vec[_field(it, "id")]) for it in cat_items]
+        uf = _UnionFind()
+        for a in range(len(cur)):
+            ida, va = cur[a]
+            uf.find(ida)
+            for b in range(a + 1, len(cur)):
+                idb, vb = cur[b]
+                if _field(item_by_id[ida], "source_id") != _field(item_by_id[idb], "source_id") \
+                        and cosine(va, vb) >= near_thr:
+                    uf.union(ida, idb)
+        comps: dict[int, list[int]] = defaultdict(list)
+        for ida, _ in cur:
+            comps[uf.find(ida)].append(ida)
+        for members in comps.values():
+            if len(members) < 2:
+                continue
+            primary = min(members, key=lambda i: _sort_key(item_by_id[i]))
+            psrc = _field(item_by_id[primary], "source_id")
+            for mid in members:
+                if mid != primary and _field(item_by_id[mid], "source_id") != psrc:
+                    near_muted[mid] = primary
+
     muted: dict[int, int] = {}  # duplicate id -> primary id (primary may be a sent-pool id)
     for cat, cat_items in by_cat.items():
+        # Keep the near-dups resolved above out of the floor pass, or they re-anchor onto a weak sent primary.
+        cat_items = [it for it in cat_items if _field(it, "id") not in near_muted]
         cur = [(_field(it, "id"), vec[_field(it, "id")]) for it in cat_items]
         pool = sent_pool.get(cat, [])
         uf = _UnionFind()
@@ -336,7 +366,7 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
                     if mid != primary and _field(item_by_id[mid], "source_id") != primary_src:
                         muted[mid] = primary
 
-    if not muted:
+    if not muted and not near_muted:
         log.info("Cross-source dedup: no duplicates among %d item(s)", len(items))
         return items, {}
 
@@ -351,21 +381,41 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
             "WOULD-MUTE" if settings.dedup_shadow else "Candidate",
             mid, _field(it, "source_name", "?"), pid, score, (_field(it, "summary", "") or "")[:80],
         )
+    for mid, pid in near_muted.items():
+        it = item_by_id.get(mid)
+        score = f"{cosine(vec[mid], vec[pid]):.3f}" if (mid in vec and pid in vec) else "n/a"
+        log.info(
+            "%s near-identical cross-source duplicate: item id=%d (%s) -> primary id=%d | cosine=%s | summary=%s",
+            "WOULD-MUTE" if settings.dedup_shadow else "Auto",
+            mid, _field(it, "source_name", "?"), pid, score, (_field(it, "summary", "") or "")[:80],
+        )
 
     if settings.dedup_shadow:
-        log.info("Cross-source dedup SHADOW: %d duplicate(s) detected, nothing hidden", len(muted))
+        log.info("Cross-source dedup SHADOW: %d duplicate(s) detected, nothing hidden", len(muted) + len(near_muted))
         return items, {}
 
     candidates = len(muted)
-    muted = await _confirm_mutes(muted, item_by_id, sent_summary, vec, sent_vec)
-    if not muted:
+    confirmed = await _confirm_mutes(muted, item_by_id, sent_summary, vec, sent_vec) if muted else {}
+    confirmed.update(near_muted)
+    if not confirmed:
         log.info("Cross-source dedup: %d candidate(s) all rejected by LLM, nothing muted", candidates)
         return items, {}
 
+    muted = confirmed
+    # A near-dup primary can itself be muted by the floor pass (Z->X, X->Y); point every
+    # muted item at a surviving primary, else Z's source link renders under the hidden X.
+    def _survivor(pid: int) -> int:
+        seen: set[int] = set()
+        while pid in muted and pid not in seen:
+            seen.add(pid)
+            pid = muted[pid]
+        return pid
+
+    muted = {mid: _survivor(pid) for mid, pid in muted.items()}
     for mid, pid in muted.items():
         await mark_duplicate(mid, pid)
     survivors = [it for it in items if _field(it, "id") not in muted]
     link_map = await get_duplicate_links([_field(it, "id") for it in survivors])
-    log.info("Cross-source dedup: muted %d/%d candidate(s) after LLM confirm, %d survivor(s)",
-             len(muted), candidates, len(survivors))
+    log.info("Cross-source dedup: muted %d LLM-confirmed (of %d) + %d near-identical, %d survivor(s)",
+             len(muted) - len(near_muted), candidates, len(near_muted), len(survivors))
     return survivors, link_map

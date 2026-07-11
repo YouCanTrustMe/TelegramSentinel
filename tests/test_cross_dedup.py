@@ -121,6 +121,91 @@ async def test_confirm_band_pair_reaches_llm_and_mutes(monkeypatch):
     assert [it["id"] for it in survivors] == [1]
 
 
+async def test_near_identical_pair_muted_without_llm(monkeypatch):
+    """A cross-source pair at >= merge_near_dup_threshold is a certain repost and must
+    be muted directly, WITHOUT the LLM — even when the LLM would reject the link. Such a
+    pair can transitively union onto a weakly-related already-sent primary, and the
+    confirm-vs-primary step alone then misses it (observed: 0.99-cosine reposts left in)."""
+    marked: list[tuple[int, int]] = []
+    calls = {"n": 0}
+
+    async def fake_recent(_hours):
+        return []
+
+    async def fake_mark(mid, pid):
+        marked.append((mid, pid))
+
+    async def fake_links(_ids):
+        return {}
+
+    async def fake_group_by_topic(inputs, prompt_extra=None):
+        calls["n"] += 1  # would call every candidate a DIFFERENT event
+        return [{"ids": [i["id"]], "summary": "y", "key_phrase": ""} for i in inputs]
+
+    monkeypatch.setattr(cd, "get_recent_embedded_items", fake_recent)
+    monkeypatch.setattr(cd, "mark_duplicate", fake_mark)
+    monkeypatch.setattr(cd, "get_duplicate_links", fake_links)
+    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
+    monkeypatch.setattr(cd.settings, "dedup_shadow", False)
+
+    ang = math.radians(5)  # cosine ~0.996, above merge_near_dup_threshold (0.95)
+    items = [
+        {"id": 1, "summary": "Long-range strike command created", "category": "feed",
+         "source_id": 10, "source_name": "A", "source_sort_order": 0, "published_at": "1"},
+        {"id": 2, "summary": "Long-range strike command set up", "category": "feed",
+         "source_id": 11, "source_name": "B", "source_sort_order": 1, "published_at": "2"},
+    ]
+    vec = {1: _vec(1, 0), 2: _vec(math.cos(ang), math.sin(ang))}
+
+    survivors, _ = await cd.deduplicate(items, vec)
+
+    assert marked == [(2, 1)]                       # lower-priority repost muted
+    assert [it["id"] for it in survivors] == [1]
+    assert calls["n"] == 0                           # near-identical -> LLM never consulted
+
+
+async def test_near_dup_chain_collapses_to_surviving_primary(monkeypatch):
+    """A near-dup primary (X) can itself be muted under a higher-priority floor match (Y):
+    Z->X and X->Y. The chain must collapse so Z points at the SURVIVOR Y, not the hidden X
+    (otherwise Z's source link would render under a story that isn't shown)."""
+    marked: list[tuple[int, int]] = []
+
+    async def fake_recent(_hours):
+        return []
+
+    async def fake_mark(mid, pid):
+        marked.append((mid, pid))
+
+    async def fake_links(_ids):
+        return {}
+
+    async def fake_group_by_topic(inputs, prompt_extra=None):
+        return [{"ids": [i["id"] for i in inputs], "summary": "x", "key_phrase": ""}]  # all same event
+
+    monkeypatch.setattr(cd, "get_recent_embedded_items", fake_recent)
+    monkeypatch.setattr(cd, "mark_duplicate", fake_mark)
+    monkeypatch.setattr(cd, "get_duplicate_links", fake_links)
+    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
+    monkeypatch.setattr(cd.settings, "dedup_shadow", False)
+
+    a = math.radians(3)   # X(id=2) & Z(id=3): cosine ~0.9986 -> near-dup, primary X
+    y = math.radians(33)  # X(id=2) & Y(id=1): cosine ~0.839 -> floor band, Y wins on priority
+    items = [
+        {"id": 1, "summary": "strike variant", "category": "feed",
+         "source_id": 30, "source_name": "Y", "source_sort_order": 0, "published_at": "1"},
+        {"id": 2, "summary": "strike A", "category": "feed",
+         "source_id": 31, "source_name": "X", "source_sort_order": 2, "published_at": "2"},
+        {"id": 3, "summary": "strike A repost", "category": "feed",
+         "source_id": 32, "source_name": "Z", "source_sort_order": 3, "published_at": "3"},
+    ]
+    vec = {1: _vec(math.cos(y), math.sin(y)), 2: _vec(1, 0), 3: _vec(math.cos(a), math.sin(a))}
+
+    survivors, _ = await cd.deduplicate(items, vec)
+
+    assert [it["id"] for it in survivors] == [1]          # only Y survives
+    assert sorted(marked) == [(2, 1), (3, 1)]             # both point at Y, not Z->X->hidden
+
+
 async def test_confirm_mutes_chunks_large_groups(monkeypatch):
     """A big candidate group is split so no single group_by_topic call exceeds the
     cap (primary + a few candidates), guarding against the LLM over-grouping."""

@@ -15,7 +15,7 @@ from src.processor.llm.classifier import ClassificationResult, classify, check_b
 from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings
 from src.processor.llm.llm_client import format_llm_stats, reset_llm_stats, is_task_dead
 from src.processor.dedup.merge import MERGE_MIN_ITEMS, merge_source_items
-from src.common.media import MEDIA_EMOJI as _MEDIA_EMOJI
+from src.common.media import MEDIA_LABEL as _MEDIA_LABEL, is_media_placeholder
 from src.common.util import needs_summary, row_get
 
 log = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ def _format_item_base(item: dict) -> str:
         raw = item["raw_text"] or ""
         summary_text = raw[:60].split("\n")[0]
 
-    summary_text = _MEDIA_EMOJI.get(summary_text, summary_text)
+    summary_text = _MEDIA_LABEL.get(summary_text, summary_text)
 
     summary = escape(summary_text)
     hour = ""
@@ -385,8 +385,9 @@ async def _apply_semantic_filter(items: list) -> tuple[list, list]:
         for item in items:
             prompt_extra = row_get(item, "source_prompt_extra")
             cat = item["category"] or "other"
-            # Skip the LLM filter for items no rule targets (saves tokens) and for opted-out sources.
-            if _wants_no_filter(prompt_extra) or not _has_applicable_rule(cat):
+            # Skip the LLM filter for items no rule targets (saves tokens), opted-out sources,
+            # and media-only placeholders (unreadable content → any block would be a blind guess).
+            if _wants_no_filter(prompt_extra) or not _has_applicable_rule(cat) or is_media_placeholder(item["summary"]):
                 no_filter.append(item)
             else:
                 filterable.append(item)

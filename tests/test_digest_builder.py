@@ -41,7 +41,8 @@ def test_media_token_renders_as_emoji_chip():
     item = {"original_url": "https://t.me/x/1", "summary": "[Video note]",
             "raw_text": "[Video note]", "published_at": None, "key_phrase": ""}
     line = digest_builder._format_item_base(item)
-    assert '<a href="https://t.me/x/1">🔵</a>' == line
+    # Emoji + word so the link has a real, tappable anchor (not a lone emoji).
+    assert '<a href="https://t.me/x/1">🔵 Video</a>' == line
     assert "[Video note]" not in line and "no text" not in line
 
 
@@ -49,7 +50,7 @@ def test_unmapped_media_renders_as_generic_chip_not_literal():
     item = {"original_url": "https://t.me/x/2", "summary": "no text",
             "raw_text": "[Media]", "published_at": None, "key_phrase": ""}
     line = digest_builder._format_item_base(item)
-    assert '<a href="https://t.me/x/2">📦</a>' == line
+    assert '<a href="https://t.me/x/2">📦 Media</a>' == line
     assert "no text" not in line  # never show the literal marker to the user
 
 
@@ -202,3 +203,41 @@ async def test_deliver_leaves_undelivered_items_unmarked_on_failure(monkeypatch)
     assert sent == 1
     assert marked == [1, 2]            # only the delivered message's items
     assert 3 not in marked and 4 not in marked and 5 not in marked
+
+
+@pytest.mark.asyncio
+async def test_media_placeholder_skips_semantic_filter(monkeypatch):
+    """A media-only post (no readable text) is never handed to the content filter — we
+    can't judge content we can't see, so it is kept unconditionally instead of being
+    blind-blocked (the filter had been mis-flagging these as link-lists)."""
+    seen: dict = {}
+
+    async def fake_get_blocked_words():
+        return [{"id": 1, "rule": "block everything"}]
+
+    async def fake_scope_map():
+        return {}  # rule 1 has no scope -> applies to every category
+
+    async def fake_check(check_input, rules, rule_scopes):
+        seen["ids"] = [c["id"] for c in check_input]
+        return {c["id"]: rules[0] for c in check_input}  # block everything it is shown
+
+    async def fake_mark_blocked(pairs):
+        seen["marked"] = pairs
+
+    monkeypatch.setattr(digest_builder, "get_blocked_words", fake_get_blocked_words)
+    monkeypatch.setattr(digest_builder, "get_word_category_map", fake_scope_map)
+    monkeypatch.setattr(digest_builder, "check_blocked_filters", fake_check)
+    monkeypatch.setattr(digest_builder, "mark_blocked", fake_mark_blocked)
+
+    items = [
+        {"id": 1, "summary": "no text", "raw_text": "[Video]", "category": "feed",
+         "source_name": "A", "source_prompt_extra": None},
+        {"id": 2, "summary": "Real news", "raw_text": "body", "category": "feed",
+         "source_name": "B", "source_prompt_extra": None},
+    ]
+    kept, blocked = await digest_builder._apply_semantic_filter(items)
+
+    assert seen["ids"] == [2]                        # placeholder never reached the filter
+    assert 1 in [k["id"] for k in kept]              # placeholder kept despite "block everything"
+    assert [b["id"] for b in blocked] == [2]         # real item still blocked as usual

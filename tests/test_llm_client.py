@@ -166,6 +166,28 @@ def test_llm_json_fails_over_on_unparseable_then_succeeds(monkeypatch):
     assert out == {"ok": 2}
 
 
+def test_llm_json_fails_over_immediately_on_429_without_retry_after(monkeypatch):
+    """Variant A: a 429 with no Retry-After (e.g. Cerebras' 5 RPM cap) must fail over to
+    the next provider at once — no invented backoff sleep, no retries on the throttled
+    model — instead of burning ~1-2 min before failing over anyway."""
+    import asyncio
+    llm_client._quota_dead_until.clear()
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_ra", [("groq", "m1"), ("groq", "m2")])
+    calls = []
+    async def fake_call(provider, model, messages, temperature=0.1):
+        calls.append(model)
+        if model == "m1":
+            return None, 429, {}  # throttled, no retry-after header
+        return {"ok": 3}, 200, {}
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_ra"))
+    assert out == {"ok": 3}
+    assert calls == ["m1", "m2"]  # m1 tried once, then immediate failover (not retried)
+    assert "groq/m1" not in llm_client._backoff_until  # no invented sleep-backoff registered
+    assert llm_client._is_dead("groq/m1")  # skipped for a cooldown so later calls don't re-warn
+    llm_client._quota_dead_until.clear()  # don't leak the cooldown into other tests
+
+
 def test_llm_json_returns_repaired_on_groq_400(monkeypatch):
     import asyncio
     llm_client._quota_dead_until.clear()

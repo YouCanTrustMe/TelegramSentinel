@@ -56,6 +56,9 @@ TASK_ROUTING: dict[str, list[tuple[str, str]]] = {
 
 _QUOTA_DEAD_THRESHOLD = 300.0
 _ALERT_COOLDOWN = 1800.0
+# How long a 429-without-Retry-After model is skipped, so a digest's later calls route
+# past it instead of re-hitting (and re-warning about) the same throttle.
+_RATE_LIMIT_COOLDOWN = 60.0
 
 # id-array / structured tasks must be deterministic: any sampling raises the chance
 # of a dropped or hallucinated id and broken JSON (the source of "N item(s) missing"
@@ -456,13 +459,19 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
                     _signal_quota_dead(tag, ra)
                     break  # whole model dead → next chain entry
                 _bump(tag, "rate_limited")
-                wait = ra if ra else 65.0
-                _signal_backoff(tag, wait)
-                src = "retry-after" if ra else "fallback"
+                if ra is None:
+                    # No Retry-After (e.g. Cerebras' 5 RPM cap): fail over now rather than
+                    # sleep a guessed wait, and skip this model for a cooldown. A real
+                    # Retry-After is still honoured below.
+                    _quota_dead_until[tag] = time.monotonic() + _RATE_LIMIT_COOLDOWN
+                    log.warning("LLM rate limit on %s (no retry-after), failing over and skipping it for %gs",
+                                tag, _RATE_LIMIT_COOLDOWN)
+                    break  # next chain entry
+                _signal_backoff(tag, ra)
                 if attempt < max_retries - 1:
-                    log.info("LLM rate limit on %s, retry %d/%d after %gs backoff (%s)", tag, attempt + 1, max_retries, wait, src)
+                    log.info("LLM rate limit on %s, retry %d/%d after %gs backoff (retry-after)", tag, attempt + 1, max_retries, ra)
                     continue
-                log.warning("LLM rate limit persistent on %s after %d attempts (%gs %s), failing over", tag, max_retries, wait, src)
+                log.warning("LLM rate limit persistent on %s after %d attempts (%gs retry-after), failing over", tag, max_retries, ra)
                 break  # next chain entry
             if status in (401, 403):
                 # bad/expired key — retrying is pointless. Take the whole provider

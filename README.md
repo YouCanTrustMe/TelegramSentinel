@@ -68,8 +68,8 @@ Outbound messages go through the Bot HTTP API (`sender.py`), not MTProto.
 main.py                         entrypoint — starts both clients, scheduler, collectors
 src/
   config.py                     pydantic-settings, single Settings instance
-  scheduler.py                  APScheduler — a catch-all job plus per-time jobs for
-                                  categories with a custom digest_time; rebuilt on changes
+  scheduler.py                  APScheduler — one job per distinct category digest_time
+                                  (no catch-all); rebuilt on every schedule change
   common/
     util.py                     small shared helpers (row_get, needs_summary)
     media.py                    media token ↔ emoji table
@@ -99,6 +99,7 @@ src/
       categories.py             /categories inline UI (add/edit/reorder/delete)
       sources.py                source view, add/rename/reassign/remove, per-source prompt
       blocked.py                /blocked — manage LLM content-filter rules
+      timetable.py              digest schedule — pick a time, toggle categories on/off
       misc.py                   /stats, /logs, /digest, /help
       conversation.py           all text-input wizards (add category/source/rule/etc.)
     keyboards.py                InlineKeyboardMarkup builders
@@ -118,7 +119,7 @@ SQLite at `data/sentinel.db`.
 | Table | Purpose |
 |---|---|
 | `sources` | channels and feeds; `status` = active/pending; `sort_order`; `prompt_extra` |
-| `categories` | name, emoji, `digest_time` (HH:MM or comma-separated), `sort_order` |
+| `categories` | name, emoji, `digest_time` (comma-separated HH:MM — a category with none is never sent), `sort_order` |
 | `items` | collected posts; `sent` flag; `summary` + `key_phrase`; `embedding` + `duplicate_of` for cross-source dedup |
 | `digest_log` | per-digest audit: item count, status |
 | `blocked_words` | content-filter rule descriptions; matched semantically by the LLM each digest |

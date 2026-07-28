@@ -26,19 +26,19 @@ from src.scheduler import rebuild_digest_jobs
 log = logging.getLogger(__name__)
 
 
-async def _finalize_add_category(uid: int, data: dict, message, reply: bool = True) -> None:
+async def _finalize_add_category(uid: int, data: dict, message) -> None:
+    """A new category starts on the default schedule; times are changed in the
+    timetable, so the wizard never asks for one."""
     name = data["name"]
     emoji = data["emoji"]
-    digest_time = data.get("digest_time", _DEFAULT_DIGEST_TIME)
-    await add_category(name, emoji, digest_time)
+    await add_category(name, emoji, _DEFAULT_DIGEST_TIME)
     del _pending[uid]
     await rebuild_digest_jobs()
-    log.info("Category added: %s %s digest_time=%s", emoji, name, digest_time)
-    text = f"✅ Category <b>{emoji} {name}</b> added.  ⏰ {digest_time}"
-    if reply:
-        await message.reply(text)
-    else:
-        await message.edit_text(text)
+    log.info("Category added: %s %s digest_time=%s", emoji, name, _DEFAULT_DIGEST_TIME)
+    await message.reply(
+        f"✅ Category <b>{emoji} {name}</b> added.  ⏰ {_DEFAULT_DIGEST_TIME}\n\n"
+        "<i>Change it in 🕐 Timetable.</i>"
+    )
 
 
 def register_category_handlers(bot, admin_msg, admin_cb) -> None:
@@ -89,16 +89,6 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
         uid = query.from_user.id
         _pending[uid] = {"action": "add_category", "step": 0, "data": {}}
         await query.message.edit_text("Category name:", reply_markup=_back_kb("cat_list"))
-
-    @bot.on_callback_query(pf.regex(r"^cat_add_time_default$") & admin_cb)
-    async def cb_cat_add_time_default(_, query: CallbackQuery) -> None:
-        uid = query.from_user.id
-        if uid not in _pending or _pending[uid].get("action") != "add_category":
-            await query.answer("Session expired.", show_alert=True)
-            return
-        data = _pending[uid]["data"]
-        data["digest_time"] = _DEFAULT_DIGEST_TIME
-        await _finalize_add_category(uid, data, query.message, reply=False)
 
     @bot.on_callback_query(pf.regex(r"^cat_del:") & admin_cb)
     async def cb_cat_del(_, query: CallbackQuery) -> None:

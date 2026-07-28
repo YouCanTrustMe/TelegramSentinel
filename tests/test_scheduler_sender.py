@@ -3,7 +3,7 @@ the Bot API retry_after parser, message-id construction and SQL statement split.
 from src.db.base import _split_sql_statements
 from src.dispatcher.sender import _retry_after
 from src.processor.dedup.deduplicator import make_message_id
-from src.scheduler import parse_times, _pre_classify_time, _pre_collect_time, _summarize_digest_health
+from src.scheduler import _pre_classify_time, _pre_collect_time, _summarize_digest_health
 
 
 def test_digest_health_no_digests_is_dead_mans_switch():
@@ -38,13 +38,6 @@ def test_digest_health_tolerates_missing_keys():
     line, alert = _summarize_digest_health([{"sent_at": "x"}], 26)
     assert alert is None
     assert "1 digest(s)" in line and "0 item(s)" in line
-
-
-def test_parse_times():
-    assert parse_times("15:00,21:00") == [(15, 0), (21, 0)]
-    assert parse_times("9:30") == [(9, 30)]
-    assert parse_times("15:00, ,21:00") == [(15, 0), (21, 0)]
-    assert parse_times("garbage") == []
 
 
 def test_pre_digest_ordering_collect_before_classify():

@@ -6,8 +6,9 @@ from apscheduler.triggers.cron import CronTrigger
 
 from src.config import settings
 from src.db.models import activate_source, get_categories, get_pending_sources, set_source_pending_msg_id, update_source_url
-from src.dispatcher.digest_builder import send_digest
+from src.common.schedule import parse_times
 from src.common.util import row_get
+from src.dispatcher.digest_builder import send_digest
 
 log = logging.getLogger(__name__)
 
@@ -149,22 +150,6 @@ async def _check_pending_sources() -> None:
                 log.info("Deleted pending notice from Saved Messages for source id=%s", s["id"])
             except Exception as exc:
                 log.warning("Could not delete pending notice from Saved Messages: %s", exc)
-
-
-def parse_times(time_str: str) -> list[tuple[int, int]]:
-    """Public so the timetable UI reads a schedule string exactly the way the
-    cron jobs do — the displayed timetable cannot drift from what actually fires."""
-    result = []
-    for t in time_str.split(","):
-        t = t.strip()
-        if not t:
-            continue
-        try:
-            h, m = map(int, t.split(":"))
-            result.append((h, m))
-        except (ValueError, AttributeError):
-            log.warning("Invalid time in schedule string: %r", t)
-    return result
 
 
 def _pre_collect_time(h: int, m: int) -> tuple[int, int]:

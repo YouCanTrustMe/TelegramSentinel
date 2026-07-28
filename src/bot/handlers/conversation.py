@@ -9,17 +9,15 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from src.bot.handlers.categories import _finalize_add_category
 from src.bot.handlers.sources import _finalize_add_source
 from src.bot.keyboards import (
+    _add_time_kb,
     _back_kb,
     _blocked_keyboard,
     _cat_view_text,
     _category_view_keyboard,
     _is_rss,
-    _is_valid_time,
+    _slot_keyboard,
+    _slot_text,
     _source_view_keyboard,
-    _time_step_kb,
-    _edit_time_kb,
-    _timetable_keyboard,
-    _timetable_text,
 )
 from src.bot.state import _pending
 from src.db.models import (
@@ -36,6 +34,7 @@ from src.db.models import (
 )
 from src.collectors.rss_collector import _FEED_AGENT
 from src.collectors.telegram_collector import userbot
+from src.common.schedule import parse_times
 from src.scheduler import rebuild_digest_jobs
 
 log = logging.getLogger(__name__)
@@ -64,20 +63,25 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                 await message.reply("Emoji:", reply_markup=_back_kb("cat_list"))
             elif step == 1:
                 data["emoji"] = escape(text[:8])
-                state["step"] = 2
-                await message.reply(
-                    "Digest time (HH:MM or comma-separated, e.g. 15:00,21:00) or skip for default:",
-                    reply_markup=_time_step_kb(),
-                )
-            elif step == 2:
-                if not _is_valid_time(text):
-                    await message.reply(
-                        "Invalid format. Use HH:MM or comma-separated e.g. 15:00,21:00:",
-                        reply_markup=_time_step_kb(),
-                    )
-                    return
-                data["digest_time"] = text
                 await _finalize_add_category(uid, data, message)
+
+        elif action == "add_digest_time":
+            times = parse_times(text)
+            if len(times) != 1:
+                await message.reply(
+                    "Send one time as HH:MM, e.g. 08:30:",
+                    reply_markup=_add_time_kb(),
+                )
+                return
+            del _pending[uid]
+            h, m = times[0]
+            time_str = f"{h:02d}:{m:02d}"
+            cats = await get_categories()
+            log.info("Timetable new time entered | time=%s", time_str)
+            await message.reply(
+                _slot_text(time_str, cats),
+                reply_markup=_slot_keyboard(time_str, cats),
+            )
 
         elif action == "add_blocked_word":
             added = await add_blocked_word(text)
@@ -213,26 +217,6 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                     )
                 else:
                     await message.reply("Category not found.")
-
-            elif field == "time":
-                if not _is_valid_time(text):
-                    await message.reply(
-                        "Invalid format. Use HH:MM or comma-separated e.g. 15:00,21:00:",
-                        reply_markup=_edit_time_kb(),
-                    )
-                    return
-                ok = await update_category(cat_name, new_digest_time=text)
-                del _pending[uid]
-                if not ok:
-                    await message.reply("Category not found.")
-                    return
-                await rebuild_digest_jobs()
-                log.info("Category digest_time updated: %s -> %s", cat_name, text)
-                cats = await get_categories()
-                await message.reply(
-                    f"✅ <b>{cat_name}</b> digest time set to <b>{text}</b>.\n\n" + _timetable_text(cats),
-                    reply_markup=_timetable_keyboard(cats),
-                )
 
         elif action == "edit_source_prompt":
             src_id = state["data"]["source_id"]

@@ -4,8 +4,8 @@ from html import escape
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.bot.state import _DEFAULT_DIGEST_TIME
+from src.common.schedule import fires_at, parse_times, slots_by_time
 from src.db.models import get_active_sources, get_categories, get_pending_sources
-from src.scheduler import parse_times
 
 log = logging.getLogger(__name__)
 
@@ -16,20 +16,6 @@ _PAGE_SIZE_BLOCKED = 7
 
 def _is_rss(url: str) -> bool:
     return url.startswith("http://") or url.startswith("https://")
-
-
-def _is_valid_time(t: str) -> bool:
-    parts = [p.strip() for p in t.split(",")]
-    if not parts or not parts[0]:
-        return False
-    for part in parts:
-        try:
-            h, m = map(int, part.split(":"))
-            if not (0 <= h < 24 and 0 <= m < 60):
-                return False
-        except (ValueError, AttributeError):
-            return False
-    return True
 
 
 def _back_kb(back_data: str) -> InlineKeyboardMarkup:
@@ -139,55 +125,83 @@ def _confirm_keyboard(yes_data: str, no_data: str) -> InlineKeyboardMarkup:
     ]])
 
 
-def _time_step_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"⏭ Default ({_DEFAULT_DIGEST_TIME})", callback_data="cat_add_time_default")],
-        [InlineKeyboardButton("◀ Back", callback_data="cat_list")],
-    ])
-
-
-def _edit_time_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("❌ Cancel", callback_data="tt_list")],
-    ])
-
-
-def _timetable_slots(cats) -> dict[str, list]:
-    """Map "HH:MM" -> categories firing at that time, ordered by time. Built with
-    the scheduler's own parser, so what is shown is what is actually scheduled."""
-    slots: dict[str, list] = {}
-    for cat in cats:
-        for h, m in parse_times(cat["digest_time"]):
-            slots.setdefault(f"{h:02d}:{m:02d}", []).append(cat)
-    return {t: slots[t] for t in sorted(slots)}
-
-
 def _timetable_text(cats) -> str:
-    slots = _timetable_slots(cats)
-    if not slots:
-        return "🕐 <b>Timetable</b>\n\nNo digest times set."
-    # The last slot of the day also carries the quiet-sources block (see _rebuild_jobs).
-    last = list(slots)[-1]
+    """Categories sharing a schedule are shown as one entry: with most categories
+    on the same times, listing all of them per slot buried the one that differs."""
+    if not cats:
+        return "🕐 <b>Timetable</b>\n\nNo categories yet."
+
+    slots = slots_by_time(cats)
+    groups: dict[str, list] = {}
+    never: list = []
+    for cat in cats:
+        key = " · ".join(f"{h:02d}:{m:02d}" for h, m in sorted(set(parse_times(cat["digest_time"]))))
+        if key:
+            groups.setdefault(key, []).append(cat)
+        else:
+            never.append(cat)
+
+    def _names(group) -> str:
+        return "   ".join(f"{c['emoji']} {escape(c['name'])}" for c in group)
+
     lines = ["🕐 <b>Timetable</b>", ""]
-    for time_str, slot_cats in slots.items():
-        names = ", ".join(f"{c['emoji']} {escape(c['name'])}" for c in slot_cats)
-        suffix = "  ·  <i>⏸ quiet sources</i>" if time_str == last else ""
-        lines.append(f"<b>{time_str}</b> — {names}{suffix}")
-    lines.append("")
-    lines.append("<i>Tap a category to change its time(s).</i>")
+    for key, group in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        lines.append(f"<b>{key}</b>")
+        lines.append(_names(group))
+        lines.append("")
+    if never:
+        # Listed rather than skipped: an unscheduled category is exactly what the
+        # reader needs to see here, and it has no other screen that would show it.
+        lines.append("<b>⚠️ never</b>")
+        lines.append(_names(never))
+        lines.append("")
+    if slots:
+        # The last slot of the day also carries the quiet-sources block (see _rebuild_jobs).
+        lines.append(f"<i>⏸ quiet sources ride with the {list(slots)[-1]} digest</i>")
     return "\n".join(lines)
 
 
 def _timetable_keyboard(cats) -> InlineKeyboardMarkup:
-    buttons = [
-        [InlineKeyboardButton(
-            f"{c['emoji']} {c['name']} · {c['digest_time']}",
-            callback_data=f"tt_edit:{c['name']}",
-        )]
-        for c in cats
-    ]
+    slots = list(slots_by_time(cats))
+    buttons = []
+    for i in range(0, len(slots), 3):
+        buttons.append([
+            InlineKeyboardButton(t, callback_data=f"tt_slot:{t}") for t in slots[i:i + 3]
+        ])
+    buttons.append([InlineKeyboardButton("➕ Add time", callback_data="tt_add")])
     buttons.append([InlineKeyboardButton("◀ Back", callback_data="cat_list")])
     return InlineKeyboardMarkup(buttons)
+
+
+def _slot_text(time_str: str, cats) -> str:
+    on = sum(1 for c in cats if fires_at(c, time_str))
+    if not on:
+        return (
+            f"🕐 <b>{time_str}</b>\n\n"
+            f"<i>Nothing goes out at {time_str} yet — pick the categories below. "
+            f"The time disappears again if you leave it empty.</i>"
+        )
+    return f"🕐 <b>{time_str}</b>\n\n<i>{on} of {len(cats)} categories go out at {time_str}.</i>"
+
+
+def _slot_keyboard(time_str: str, cats) -> InlineKeyboardMarkup:
+    buttons = []
+    for i in range(0, len(cats), 2):
+        buttons.append([
+            InlineKeyboardButton(
+                f"{'✅' if fires_at(c, time_str) else '⬜'} {c['emoji']} {c['name']}",
+                callback_data=f"tt_toggle:{time_str}:{c['name']}",
+            )
+            for c in cats[i:i + 2]
+        ])
+    if any(fires_at(c, time_str) for c in cats):
+        buttons.append([InlineKeyboardButton(f"🗑 Remove {time_str}", callback_data=f"tt_del:{time_str}")])
+    buttons.append([InlineKeyboardButton("◀ Back", callback_data="tt_list")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _add_time_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="tt_list")]])
 
 
 def _blocked_keyboard(words, page: int = 0) -> InlineKeyboardMarkup:

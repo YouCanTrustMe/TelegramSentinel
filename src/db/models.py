@@ -62,6 +62,10 @@ from src.db.categories import (
     remove_category,
     reorder_category,
     bulk_set_category_prompt_extra,
+    add_category_time,
+    remove_category_time,
+    remove_time_everywhere,
+    get_schedule_slots,
 )
 from src.db.blocked import (
     get_blocked_words,
@@ -87,6 +91,7 @@ __all__ = [
     "category_exists", "get_categories", "add_category", "update_category",
     "move_sources_to_category", "delete_sources_by_category", "remove_category",
     "reorder_category", "bulk_set_category_prompt_extra",
+    "add_category_time", "remove_category_time", "remove_time_everywhere", "get_schedule_slots",
     "get_blocked_words", "add_blocked_word", "remove_blocked_word",
     "get_categories_for_word", "link_word_category", "unlink_word_category", "get_word_category_map",
 ]

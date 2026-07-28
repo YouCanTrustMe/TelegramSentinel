@@ -1,5 +1,5 @@
 """The schedule-string algebra shared by the scheduler and the timetable UI."""
-from src.common.schedule import fires_at, format_times, parse_times, slots_by_time, with_time, without_time
+from src.common.schedule import fires_at, parse_times, slots_by_time
 
 
 def test_parse_times():
@@ -17,20 +17,6 @@ def test_parse_times_rejects_out_of_range():
     assert parse_times("24:00") == []
     assert parse_times("-1:00") == []
     assert parse_times("11:00,25:00") == [(11, 0)]
-
-
-def test_format_times_is_canonical():
-    # Stored values drifted into mixed spacing/padding; every write normalises now.
-    assert format_times([(9, 0), (21, 0), (9, 0)]) == "09:00,21:00"
-    assert format_times([]) == ""
-
-
-def test_with_and_without_time_round_trip():
-    assert with_time("11:00,21:00", "16:00") == "11:00,16:00,21:00"
-    assert with_time("11:00, 21:00", "21:00") == "11:00,21:00"  # already there, no duplicate
-    assert without_time("11:00, 16:00, 21:00", "16:00") == "11:00,21:00"
-    assert without_time("9:00", "09:00") == ""  # padding must not hide a match
-    assert without_time("11:00,21:00", "16:00") == "11:00,21:00"
 
 
 def test_fires_at_ignores_spacing_and_zero_padding():

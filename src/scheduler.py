@@ -5,8 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from src.config import settings
-from src.db.models import activate_source, get_categories, get_pending_sources, set_source_pending_msg_id, update_source_url
-from src.common.schedule import parse_times
+from src.db.models import activate_source, get_pending_sources, get_schedule_slots, set_source_pending_msg_id, update_source_url
 from src.common.util import row_get
 from src.dispatcher.digest_builder import send_digest
 
@@ -267,13 +266,9 @@ async def _rebuild_digest_jobs() -> None:
             )
             scheduled_pre_classify.add(job_id)
 
-    # One digest job per distinct category time. No catch-all default schedule:
-    # the schedule is driven entirely by each category's digest_time.
-    categories = await get_categories()
-    by_time: dict[str, list[str]] = {}
-    for cat in categories:
-        for h, m in parse_times(cat["digest_time"]):
-            by_time.setdefault(f"{h:02d}:{m:02d}", []).append(cat["name"])
+    # One digest job per distinct time. No catch-all default schedule: the day is
+    # exactly what category_times says it is.
+    by_time = await get_schedule_slots()
 
     # Quiet-sources block goes to the last digest of the day (HH:MM is
     # zero-padded, so lexical max == chronological latest).

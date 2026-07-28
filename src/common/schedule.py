@@ -1,9 +1,10 @@
-"""Schedule-string algebra shared by the scheduler and the timetable UI.
+"""Reading a category's schedule, shared by the scheduler and the timetable UI.
 
-A category's schedule is stored as a comma-separated `digest_time` string, so every
-reader has to agree on how it parses. Keeping that agreement here — with no imports
-from either side — is what stops the timetable from showing one thing while cron
-runs another, and keeps the bot from depending on the job runner just to read a time.
+Times are stored one per row in `category_times`; `get_categories` hands them back
+as a canonical `digest_time` string for display, and these helpers are how that
+string is read. Writes never build it — they go through the (hour, minute) helpers
+in the DB layer. Keeping the reading here, with no imports from either side, is
+what keeps the bot from depending on the job runner just to show a time.
 """
 import logging
 
@@ -27,22 +28,6 @@ def parse_times(time_str: str) -> list[tuple[int, int]]:
         except (ValueError, AttributeError):
             log.warning("Invalid time in schedule string: %r", t)
     return result
-
-
-def format_times(times) -> str:
-    """Canonical digest_time string: zero-padded, sorted, de-duplicated. Stored
-    values drifted into a mix of "11:00,21:00" and "11:00, 16:00, 21:00"; every
-    write now goes through here."""
-    return ",".join(sorted({f"{h:02d}:{m:02d}" for h, m in times}))
-
-
-def with_time(digest_time: str, time_str: str) -> str:
-    return format_times(parse_times(digest_time) + parse_times(time_str))
-
-
-def without_time(digest_time: str, time_str: str) -> str:
-    dropped = set(parse_times(time_str))
-    return format_times([t for t in parse_times(digest_time) if t not in dropped])
 
 
 def fires_at(cat, time_str: str) -> bool:

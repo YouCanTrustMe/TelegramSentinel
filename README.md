@@ -68,11 +68,13 @@ Outbound messages go through the Bot HTTP API (`sender.py`), not MTProto.
 main.py                         entrypoint — starts both clients, scheduler, collectors
 src/
   config.py                     pydantic-settings, single Settings instance
-  scheduler.py                  APScheduler — one job per distinct category digest_time
-                                  (no catch-all); rebuilt on every schedule change
+  scheduler.py                  APScheduler — one digest job per distinct time in
+                                  category_times (no catch-all); maintenance jobs are
+                                  added once, digest jobs rebuilt on schedule changes
   common/
     util.py                     small shared helpers (row_get, needs_summary)
     media.py                    media token ↔ emoji table
+    schedule.py                 reading a category's digest times (no other deps)
   collectors/
     telegram_collector.py       userbot polls get_chat_history every 5 min
     rss_collector.py            feedparser, polls every 15 min (ingests title + description)
@@ -119,7 +121,8 @@ SQLite at `data/sentinel.db`.
 | Table | Purpose |
 |---|---|
 | `sources` | channels and feeds; `status` = active/pending; `sort_order`; `prompt_extra` |
-| `categories` | name, emoji, `digest_time` (comma-separated HH:MM — a category with none is never sent), `sort_order` |
+| `categories` | name, emoji, `sort_order` |
+| `category_times` | one row per digest time: `(category, hour, minute)`; a category with no row is never sent |
 | `items` | collected posts; `sent` flag; `summary` + `key_phrase`; `embedding` + `duplicate_of` for cross-source dedup |
 | `digest_log` | per-digest audit: item count, status |
 | `blocked_words` | content-filter rule descriptions; matched semantically by the LLM each digest |

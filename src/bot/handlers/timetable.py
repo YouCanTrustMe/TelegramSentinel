@@ -12,8 +12,8 @@ from src.bot.keyboards import (
     _timetable_text,
 )
 from src.bot.state import _pending
-from src.common.schedule import fires_at, slots_by_time, with_time, without_time
-from src.db.models import get_categories, update_category
+from src.common.schedule import fires_at, parse_times, slots_by_time
+from src.db.models import add_category_time, get_categories, remove_category_time, remove_time_everywhere
 from src.scheduler import rebuild_digest_jobs
 
 log = logging.getLogger(__name__)
@@ -40,7 +40,10 @@ def _orphans(cats, time_str: str) -> list[str]:
     """Categories whose only digest time is `time_str`. Removing it would leave them
     with no schedule at all — there is no catch-all job, so their items would never
     be sent and would pile up unsent forever."""
-    return [c["name"] for c in cats if fires_at(c, time_str) and not without_time(c["digest_time"], time_str)]
+    return [
+        c["name"] for c in cats
+        if fires_at(c, time_str) and len(set(parse_times(c["digest_time"]))) == 1
+    ]
 
 
 def register_timetable_handlers(bot, admin_msg, admin_cb) -> None:
@@ -69,21 +72,29 @@ def register_timetable_handlers(bot, admin_msg, admin_cb) -> None:
             await query.answer("Category not found.", show_alert=True)
             return
 
+        parsed = parse_times(time_str)
+        if not parsed:
+            log.warning("Timetable toggle with an unusable time=%s | category=%s", time_str, cat_name)
+            await query.answer("That time is not valid.", show_alert=True)
+            return
+        hour, minute = parsed[0]
+
         if fires_at(cat, time_str):
-            new_times = without_time(cat["digest_time"], time_str)
-            if not new_times:
+            if len(set(parse_times(cat["digest_time"]))) == 1:
                 log.info("Timetable toggle refused | category=%s time=%s | it is the only one left", cat_name, time_str)
                 await query.answer(
                     f"{cat_name} has no other digest time — it would never be sent. Add another time first.",
                     show_alert=True,
                 )
                 return
+            await remove_category_time(cat_name, hour, minute)
+            state = "off"
         else:
-            new_times = with_time(cat["digest_time"], time_str)
+            await add_category_time(cat_name, hour, minute)
+            state = "on"
 
-        await update_category(cat_name, new_digest_time=new_times)
         await rebuild_digest_jobs()
-        log.info("Timetable toggle | category=%s time=%s | digest_time=%s", cat_name, time_str, new_times)
+        log.info("Timetable toggle | category=%s time=%s | now=%s", cat_name, time_str, state)
         await _show_slot(query, time_str)
 
     @bot.on_callback_query(pf.regex(r"^tt_add$") & admin_cb)
@@ -126,11 +137,8 @@ def register_timetable_handlers(bot, admin_msg, admin_cb) -> None:
             await query.answer("Schedule changed meanwhile — nothing removed.", show_alert=True)
             await _show_timetable(query)
             return
-        removed = 0
-        for cat in cats:
-            if fires_at(cat, time_str):
-                await update_category(cat["name"], new_digest_time=without_time(cat["digest_time"], time_str))
-                removed += 1
+        hour, minute = parse_times(time_str)[0]
+        removed = await remove_time_everywhere(hour, minute)
         await rebuild_digest_jobs()
         log.info("Timetable time removed | time=%s categories=%d", time_str, removed)
         await _show_timetable(query)

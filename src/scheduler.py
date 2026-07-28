@@ -85,7 +85,8 @@ async def _startup_provider_check() -> None:
 async def start_scheduler() -> None:
     global _scheduler
     _scheduler = AsyncIOScheduler(timezone=settings.digest_timezone)
-    await _rebuild_jobs()
+    await _add_maintenance_jobs()
+    await _rebuild_digest_jobs()
     _scheduler.start()
     asyncio.create_task(_startup_provider_check())
 
@@ -93,7 +94,7 @@ async def start_scheduler() -> None:
 async def rebuild_digest_jobs() -> None:
     if _scheduler is None:
         return
-    await _rebuild_jobs()
+    await _rebuild_digest_jobs()
 
 
 async def _pre_digest_classify() -> None:
@@ -171,11 +172,12 @@ def _pre_classify_time(h: int, m: int) -> tuple[int, int]:
     return h, m
 
 
-async def _rebuild_jobs() -> None:
-    for job in _scheduler.get_jobs():
-        if job.id.startswith("digest_") or job.id.startswith("pre_collect_") or job.id.startswith("pre_classify_"):
-            _scheduler.remove_job(job.id)
-
+async def _add_maintenance_jobs() -> None:
+    """Fixed-schedule jobs, added once at startup. Kept apart from the digest jobs
+    so a schedule edit — which can be a tap per category — only touches the cron
+    entries it actually changes.
+    An id here must not start with "digest_"/"pre_collect_"/"pre_classify_", or the
+    sweep in _rebuild_digest_jobs would remove it."""
     _scheduler.add_job(
         _check_pending_sources,
         CronTrigger(minute=0),
@@ -221,8 +223,6 @@ async def _rebuild_jobs() -> None:
         coalesce=True,
     )
 
-    # id must not start with "digest_"/"pre_collect_"/"pre_classify_", or the
-    # per-time-job cleanup sweep at the top of _rebuild_jobs would remove it.
     _scheduler.add_job(
         _digest_health_job,
         CronTrigger(hour=5, minute=0, timezone=settings.digest_timezone),
@@ -231,6 +231,14 @@ async def _rebuild_jobs() -> None:
         max_instances=1,
         coalesce=True,
     )
+
+
+async def _rebuild_digest_jobs() -> None:
+    """Digest jobs are rebuilt from scratch on every schedule change; maintenance
+    jobs are left alone."""
+    for job in _scheduler.get_jobs():
+        if job.id.startswith(("digest_", "pre_collect_", "pre_classify_")):
+            _scheduler.remove_job(job.id)
 
     scheduled_pre_collect: set[str] = set()
     scheduled_pre_classify: set[str] = set()

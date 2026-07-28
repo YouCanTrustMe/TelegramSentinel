@@ -531,7 +531,9 @@ async def _send_digest_locked(
     building_msg_id: int | None = None
     if not status_fn:
         try:
-            building_msg_id = await send_message("⏳ Building digest...")
+            # Silent: this status message is transient (edited, then deleted), so a
+            # notification for it would ping the group twice per digest.
+            building_msg_id = await send_message("⏳ Building digest...", disable_notification=True)
         except Exception:
             pass
 

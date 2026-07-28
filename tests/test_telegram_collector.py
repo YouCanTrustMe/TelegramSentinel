@@ -2,7 +2,7 @@
 (MessageMediaUnsupported — high-level Message exposes nothing) must still be kept
 as a 📦 placeholder with a link, while genuinely empty / service messages are
 dropped as before."""
-from datetime import datetime, timezone
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest

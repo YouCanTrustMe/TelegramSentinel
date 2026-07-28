@@ -464,8 +464,11 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
                     # sleep a guessed wait, and skip this model for a cooldown. A real
                     # Retry-After is still honoured below.
                     _quota_dead_until[tag] = time.monotonic() + _RATE_LIMIT_COOLDOWN
-                    log.warning("LLM rate limit on %s (no retry-after), failing over and skipping it for %gs",
-                                tag, _RATE_LIMIT_COOLDOWN)
+                    # INFO, not WARNING: the admin-alert handler forwards WARNING, and
+                    # this fires several times a day while the call still succeeds on the
+                    # next chain entry. A chain that truly runs out alerts separately.
+                    log.info("LLM rate limit on %s (no retry-after), failing over and skipping it for %gs",
+                             tag, _RATE_LIMIT_COOLDOWN)
                     break  # next chain entry
                 _signal_backoff(tag, ra)
                 if attempt < max_retries - 1:

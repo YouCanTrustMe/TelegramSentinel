@@ -188,6 +188,26 @@ def test_llm_json_fails_over_immediately_on_429_without_retry_after(monkeypatch)
     llm_client._quota_dead_until.clear()  # don't leak the cooldown into other tests
 
 
+def test_429_without_retry_after_is_not_admin_alerting(monkeypatch, caplog):
+    """A successful failover must not log at WARNING: the admin-alert log handler
+    forwards WARNING onwards, and this event fires several times a day while the
+    call still completes on the next provider."""
+    import asyncio
+    import logging
+    llm_client._quota_dead_until.clear()
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_quiet", [("groq", "m1"), ("groq", "m2")])
+    async def fake_call(provider, model, messages, temperature=0.1):
+        return (None, 429, {}) if model == "m1" else ({"ok": 4}, 200, {})
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    with caplog.at_level(logging.INFO, logger="src.processor.llm.llm_client"):
+        out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_quiet"))
+    assert out == {"ok": 4}
+    messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert messages == []
+    assert any("no retry-after" in r.message for r in caplog.records)
+    llm_client._quota_dead_until.clear()
+
+
 def test_llm_json_returns_repaired_on_groq_400(monkeypatch):
     import asyncio
     llm_client._quota_dead_until.clear()

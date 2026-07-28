@@ -1,11 +1,19 @@
 """Digest assembly helpers: message splitting under the Telegram limit, the
-quiet-source link builder, and the empty-item defer/fallback phase."""
+per-digest chrome that separates one digest from the next, the quiet-source link
+builder, and the empty-item defer/fallback phase."""
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from src.dispatcher import digest_builder
-from src.dispatcher.digest_builder import _defer_empty_items, _quiet_source_url, _slow_digest_warning, _split_into_messages
+from src.dispatcher.digest_builder import (
+    _chrome_reserve,
+    _decorate_messages,
+    _defer_empty_items,
+    _quiet_source_url,
+    _slow_digest_warning,
+    _split_into_messages,
+)
 
 
 def test_slow_digest_warning_none_when_fast():
@@ -27,6 +35,38 @@ def test_split_keeps_small_segments_in_one_message():
     segments = [("a", [1]), ("b", [2]), ("c", [3])]
     messages = _split_into_messages(segments)
     assert messages == [("a\nb\nc", [1, 2, 3])]
+
+
+def test_digest_chrome_marks_start_parts_and_end():
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    messages = _decorate_messages([("a", [1]), ("b", [2]), ("c", [3])], now, "🌍 world", 34)
+    assert [ids for _, ids in messages] == [[1], [2], [3]]
+    # 28 July 2026 is day 209; every message carries the number, so a continuation
+    # can never be read as the start of the next digest.
+    assert all("#209" in text for text, _ in messages)
+    assert "<b>Digest</b>" in messages[0][0] and "09:00" in messages[0][0]
+    assert "2/3" in messages[1][0] and "3/3" in messages[2][0]
+    assert "Digest</b>" not in messages[1][0]
+    assert "end #209" in messages[2][0] and "34 items" in messages[2][0]
+    assert "end #209" not in messages[0][0]
+
+
+def test_digest_chrome_on_a_single_message_has_both_ends():
+    now = datetime(2026, 1, 1, 21, 30, tzinfo=timezone.utc)
+    (text, _), = _decorate_messages([("body", [1])], now, "", 1)
+    assert "#1" in text and "21:30" in text
+    assert "end #1" in text and "1 item" in text
+    assert "1/1" not in text  # a lone message needs no part marker
+
+
+def test_split_reserves_room_for_the_chrome():
+    now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
+    tags = "🌍 world · 🪙 crypto"
+    reserve = _chrome_reserve(now, tags, 34)
+    segments = [("x" * 1900, [1]), ("y" * 1900, [2]), ("z" * 1900, [3])]
+    messages = _decorate_messages(_split_into_messages(segments, reserve=reserve), now, tags, 34)
+    # Decorating must not push any message past what send_message can deliver.
+    assert all(len(text) <= 4096 for text, _ in messages)
 
 
 def test_split_breaks_when_over_limit():

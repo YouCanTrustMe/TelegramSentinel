@@ -187,33 +187,35 @@ def _source_blocks(
     return blocks
 
 
+# Telegram has no font sizes, so a category header separates itself by texture
+# instead: a rule plus letter-spaced caps, which nothing else in the digest uses.
+_CATEGORY_RULE = "━" * 18
+
+
+def _spaced_caps(text: str) -> str:
+    return " ".join(text.upper())
+
+
 def _build_digest_text(
     cat_meta: dict,
-    date_str: str,
     blocked_items: list | None = None,
-    filtered_categories: list[str] | None = None,
-    all_categories: list | None = None,
     dup_links: dict[int, list[tuple[str, str]]] | None = None,
 ) -> list[tuple[str, list[int]]]:
-    """Build the digest as (text, item_ids) segments so delivery can be
-    confirmed per message. Headers and already-marked blocked items carry no ids."""
-    segments: list[tuple[str, list[int]]] = [(f"<b>📋 Digest — {date_str}</b>", [])]
-    if filtered_categories is not None and all_categories:
-        cat_info = {r["name"]: r["emoji"] for r in all_categories}
-        tags = " · ".join(
-            f"{cat_info.get(c, '📌')} {escape(c.capitalize())}"
-            for c in filtered_categories
-            if c in cat_info
-        )
-        if tags:
-            segments.append((f"<i>{tags}</i>", []))
+    """Build the digest body as (text, item_ids) segments so delivery can be
+    confirmed per message. Headers and already-marked blocked items carry no ids.
+    Per-digest chrome (header / part marker / footer) is added by
+    _decorate_messages once the body has been split into messages."""
+    segments: list[tuple[str, list[int]]] = []
 
     for cat_name, data in cat_meta.items():
         sources = data["sources"]
         if not any(sources.values()):
             continue
 
-        segments.append((f"\n<b>{data['emoji']} {cat_name.capitalize()}</b>", []))
+        segments.append((
+            f"\n<b>{_CATEGORY_RULE}</b>\n<b>{data['emoji']}  {escape(_spaced_caps(cat_name))}</b>",
+            [],
+        ))
 
         for source_name, source_items in sources.items():
             if not source_items:
@@ -263,12 +265,83 @@ async def _build_silent_block() -> str:
     return "<blockquote expandable>" + "\n".join(lines) + "</blockquote>"
 
 
-def _split_into_messages(segments: list[tuple[str, list[int]]]) -> list[tuple[str, list[int]]]:
+def _digest_number(now: datetime) -> int:
+    """Issue number = day of the year: unique per day and needs no stored counter."""
+    return now.timetuple().tm_yday
+
+
+def _category_tags(cat_meta: dict) -> str:
+    return " · ".join(
+        f"{data['emoji']} {escape(name)}"
+        for name, data in cat_meta.items()
+        if any(data["sources"].values())
+    )
+
+
+def _digest_header(now: datetime, tags: str) -> str:
+    """Opening line of a digest. Several digests go out per day, hence the time —
+    the date alone labelled them all the same."""
+    subline = now.strftime("%d %B")
+    if tags:
+        subline = f"{subline} · {tags}"
+    return (
+        f"<code>#{_digest_number(now)}</code>  <b>Digest</b>  <code>{now.strftime('%H:%M')}</code>\n"
+        f"<i>{subline}</i>"
+    )
+
+
+def _part_marker(now: datetime, index: int, total: int) -> str:
+    return f"<code>#{_digest_number(now)} · {index + 1}/{total}</code>"
+
+
+def _digest_footer(now: datetime, item_count: int) -> str:
+    label = "item" if item_count == 1 else "items"
+    return f"<code>end #{_digest_number(now)}</code> <i>· {item_count} {label}</i>"
+
+
+def _chrome_reserve(now: datetime, tags: str, item_count: int) -> int:
+    """Room the header/part marker/footer will take once _decorate_messages runs.
+    Reserved before splitting, or decorating could push a message past Telegram's
+    limit and the send would fail."""
+    # Part index/total are unknown before the split, so reserve for a marker far
+    # wider than any real digest produces.
+    head = max(len(_digest_header(now, tags)), len(_part_marker(now, 999, 999)))
+    return head + len(_digest_footer(now, item_count)) + 4
+
+
+def _decorate_messages(
+    messages: list[tuple[str, list[int]]],
+    now: datetime,
+    tags: str,
+    item_count: int,
+) -> list[tuple[str, list[int]]]:
+    """Wrap the split digest in its chrome: a header on the first message, a part
+    marker on every continuation, a closing line on the last. Without it, the
+    second message of one digest is indistinguishable from the first of the next."""
+    total = len(messages)
+    decorated: list[tuple[str, list[int]]] = []
+    for index, (text, ids) in enumerate(messages):
+        head = _digest_header(now, tags) if index == 0 else _part_marker(now, index, total)
+        # Normalise the seam: a body may or may not start with the blank line that
+        # separates categories, so strip it and always leave exactly one.
+        stripped = text.lstrip("\n")
+        body = f"{head}\n\n{stripped}"
+        if index == total - 1:
+            body = f"{body}\n\n{_digest_footer(now, item_count)}"
+        decorated.append((body, ids))
+    return decorated
+
+
+def _split_into_messages(
+    segments: list[tuple[str, list[int]]],
+    reserve: int = 0,
+) -> list[tuple[str, list[int]]]:
+    limit = _TELEGRAM_LIMIT - reserve
     messages: list[tuple[str, list[int]]] = []
     cur_text, cur_ids = "", []
     for text, ids in segments:
         candidate = (cur_text + "\n" + text).lstrip("\n")
-        if len(candidate) > _TELEGRAM_LIMIT:
+        if len(candidate) > limit:
             if cur_text:
                 messages.append((cur_text, cur_ids))
             cur_text, cur_ids = text, list(ids)
@@ -597,13 +670,9 @@ async def _send_digest_locked(
                 )
                 data["sources"][source_name] = source_items[:_MAX_ITEMS_PER_SOURCE]
 
-    date_str = datetime.now(_get_tz()).strftime("%d %B %Y")
     segments = _build_digest_text(
         cat_meta,
-        date_str,
         blocked_items=blocked_items,
-        filtered_categories=categories,
-        all_categories=all_categories,
         dup_links=dup_link_map,
     )
     if include_quiet:
@@ -611,7 +680,11 @@ async def _send_digest_locked(
         if silent_block:
             segments.append((silent_block, []))
             log.info("Appended quiet-sources block to digest")
-    messages = _split_into_messages(segments)
+
+    now = datetime.now(_get_tz())
+    tags = _category_tags(cat_meta)
+    messages = _split_into_messages(segments, reserve=_chrome_reserve(now, tags, len(items)))
+    messages = _decorate_messages(messages, now, tags, len(items))
 
     await _update("⏳ Sending...")
     await _discard_building(building_msg_id)

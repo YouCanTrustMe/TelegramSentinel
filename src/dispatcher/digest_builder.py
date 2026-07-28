@@ -284,19 +284,22 @@ def _digest_header(now: datetime, tags: str) -> str:
     subline = now.strftime("%d %B")
     if tags:
         subline = f"{subline} · {tags}"
+    # Italic carries the service bits (issue number, part marker, closing line) and
+    # bold the title, so the chrome never uses a third typeface: a <code> chip
+    # rendered as a grey monospace box and stood out more than the digest itself.
     return (
-        f"<code>#{_digest_number(now)}</code>  <b>Digest</b>  <code>{now.strftime('%H:%M')}</code>\n"
+        f"<i>#{_digest_number(now)}</i>  <b>Digest</b>  <b>{now.strftime('%H:%M')}</b>\n"
         f"<i>{subline}</i>"
     )
 
 
 def _part_marker(now: datetime, index: int, total: int) -> str:
-    return f"<code>#{_digest_number(now)} · {index + 1}/{total}</code>"
+    return f"<i>#{_digest_number(now)} · {index + 1}/{total}</i>"
 
 
 def _digest_footer(now: datetime, item_count: int) -> str:
     label = "item" if item_count == 1 else "items"
-    return f"<code>end #{_digest_number(now)}</code> <i>· {item_count} {label}</i>"
+    return f"<i>end #{_digest_number(now)} · {item_count} {label}</i>"
 
 
 def _chrome_reserve(now: datetime, tags: str, item_count: int) -> int:

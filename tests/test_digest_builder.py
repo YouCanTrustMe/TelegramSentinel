@@ -49,6 +49,9 @@ def test_digest_chrome_marks_start_parts_and_end():
     assert "Digest</b>" not in messages[1][0]
     assert "end #209" in messages[2][0] and "34 items" in messages[2][0]
     assert "end #209" not in messages[0][0]
+    # Chrome uses only bold/italic: a <code> chip renders as a grey monospace box
+    # and drew more attention than the digest it labels.
+    assert all("<code>" not in text for text, _ in messages)
 
 
 def test_digest_chrome_on_a_single_message_has_both_ends():

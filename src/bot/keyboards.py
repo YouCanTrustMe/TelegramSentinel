@@ -1,9 +1,11 @@
 import logging
+from html import escape
 
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.bot.state import _DEFAULT_DIGEST_TIME
 from src.db.models import get_active_sources, get_categories, get_pending_sources
+from src.scheduler import parse_times
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +68,10 @@ async def _categories_keyboard(cats, page: int = 0) -> InlineKeyboardMarkup:
             nav.append(InlineKeyboardButton("▶", callback_data=f"cat_list:{page + 1}"))
         buttons.append(nav)
 
-    buttons.append([InlineKeyboardButton("➕ Add category", callback_data="cat_add")])
+    buttons.append([
+        InlineKeyboardButton("➕ Add category", callback_data="cat_add"),
+        InlineKeyboardButton("🕐 Timetable", callback_data="tt_list"),
+    ])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -108,10 +113,11 @@ def _category_view_keyboard(cat_name: str, sources, page: int = 0) -> InlineKeyb
 
 
 def _cat_edit_keyboard(cat_name: str) -> InlineKeyboardMarkup:
+    # Digest time is edited in the timetable, where the whole day is visible at once.
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ Rename", callback_data=f"cat_edit_field:{cat_name}:name")],
         [InlineKeyboardButton("🎨 Change emoji", callback_data=f"cat_edit_field:{cat_name}:emoji")],
-        [InlineKeyboardButton("🕐 Change digest time", callback_data=f"cat_edit_field:{cat_name}:time")],
+        [InlineKeyboardButton("🕐 Timetable", callback_data="tt_list")],
         [InlineKeyboardButton("◀ Back", callback_data=f"cat_view:{cat_name}")],
     ])
 
@@ -140,10 +146,48 @@ def _time_step_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def _edit_time_kb(back_cat: str) -> InlineKeyboardMarkup:
+def _edit_time_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("❌ Cancel", callback_data=f"cat_edit:{back_cat}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="tt_list")],
     ])
+
+
+def _timetable_slots(cats) -> dict[str, list]:
+    """Map "HH:MM" -> categories firing at that time, ordered by time. Built with
+    the scheduler's own parser, so what is shown is what is actually scheduled."""
+    slots: dict[str, list] = {}
+    for cat in cats:
+        for h, m in parse_times(cat["digest_time"]):
+            slots.setdefault(f"{h:02d}:{m:02d}", []).append(cat)
+    return {t: slots[t] for t in sorted(slots)}
+
+
+def _timetable_text(cats) -> str:
+    slots = _timetable_slots(cats)
+    if not slots:
+        return "🕐 <b>Timetable</b>\n\nNo digest times set."
+    # The last slot of the day also carries the quiet-sources block (see _rebuild_jobs).
+    last = list(slots)[-1]
+    lines = ["🕐 <b>Timetable</b>", ""]
+    for time_str, slot_cats in slots.items():
+        names = ", ".join(f"{c['emoji']} {escape(c['name'])}" for c in slot_cats)
+        suffix = "  ·  <i>⏸ quiet sources</i>" if time_str == last else ""
+        lines.append(f"<b>{time_str}</b> — {names}{suffix}")
+    lines.append("")
+    lines.append("<i>Tap a category to change its time(s).</i>")
+    return "\n".join(lines)
+
+
+def _timetable_keyboard(cats) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(
+            f"{c['emoji']} {c['name']} · {c['digest_time']}",
+            callback_data=f"tt_edit:{c['name']}",
+        )]
+        for c in cats
+    ]
+    buttons.append([InlineKeyboardButton("◀ Back", callback_data="cat_list")])
+    return InlineKeyboardMarkup(buttons)
 
 
 def _blocked_keyboard(words, page: int = 0) -> InlineKeyboardMarkup:

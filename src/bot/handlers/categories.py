@@ -10,7 +10,6 @@ from src.bot.keyboards import (
     _category_view_keyboard,
     _cat_view_text,
     _confirm_keyboard,
-    _edit_time_kb,
 )
 from src.bot.state import _DEFAULT_DIGEST_TIME, _pending
 from src.db.models import (
@@ -201,14 +200,6 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
             await query.message.edit_text(
                 f"New emoji for <b>{cat_name}</b>:",
                 reply_markup=_back_kb(f"cat_edit:{cat_name}"),
-            )
-        elif field == "time":
-            cats = await get_categories()
-            cat = next((c for c in cats if c["name"] == cat_name), None)
-            current = cat["digest_time"] if cat else _DEFAULT_DIGEST_TIME
-            await query.message.edit_text(
-                f"New digest time for <b>{cat_name}</b> (HH:MM or comma-separated):\nCurrent: <b>{current}</b>",
-                reply_markup=_edit_time_kb(cat_name),
             )
 
     @bot.on_callback_query(pf.regex(r"^cat_bulk_prompt:") & admin_cb)

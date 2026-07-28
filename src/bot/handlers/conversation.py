@@ -18,6 +18,8 @@ from src.bot.keyboards import (
     _source_view_keyboard,
     _time_step_kb,
     _edit_time_kb,
+    _timetable_keyboard,
+    _timetable_text,
 )
 from src.bot.state import _pending
 from src.db.models import (
@@ -216,21 +218,21 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                 if not _is_valid_time(text):
                     await message.reply(
                         "Invalid format. Use HH:MM or comma-separated e.g. 15:00,21:00:",
-                        reply_markup=_edit_time_kb(cat_name),
+                        reply_markup=_edit_time_kb(),
                     )
                     return
                 ok = await update_category(cat_name, new_digest_time=text)
                 del _pending[uid]
-                if ok:
-                    await rebuild_digest_jobs()
-                    log.info("Category digest_time updated: %s -> %s", cat_name, text)
-                    text_out, sources = await _cat_view_text(cat_name)
-                    await message.reply(
-                        f"✅ Digest time set to <b>{text}</b>.\n\n" + text_out,
-                        reply_markup=_category_view_keyboard(cat_name, sources),
-                    )
-                else:
+                if not ok:
                     await message.reply("Category not found.")
+                    return
+                await rebuild_digest_jobs()
+                log.info("Category digest_time updated: %s -> %s", cat_name, text)
+                cats = await get_categories()
+                await message.reply(
+                    f"✅ <b>{cat_name}</b> digest time set to <b>{text}</b>.\n\n" + _timetable_text(cats),
+                    reply_markup=_timetable_keyboard(cats),
+                )
 
         elif action == "edit_source_prompt":
             src_id = state["data"]["source_id"]

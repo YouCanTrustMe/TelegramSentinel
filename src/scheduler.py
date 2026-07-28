@@ -151,7 +151,9 @@ async def _check_pending_sources() -> None:
                 log.warning("Could not delete pending notice from Saved Messages: %s", exc)
 
 
-def _parse_times(time_str: str) -> list[tuple[int, int]]:
+def parse_times(time_str: str) -> list[tuple[int, int]]:
+    """Public so the timetable UI reads a schedule string exactly the way the
+    cron jobs do — the displayed timetable cannot drift from what actually fires."""
     result = []
     for t in time_str.split(","):
         t = t.strip()
@@ -277,7 +279,7 @@ async def _rebuild_jobs() -> None:
     categories = await get_categories()
     by_time: dict[str, list[str]] = {}
     for cat in categories:
-        for h, m in _parse_times(cat["digest_time"]):
+        for h, m in parse_times(cat["digest_time"]):
             by_time.setdefault(f"{h:02d}:{m:02d}", []).append(cat["name"])
 
     # Quiet-sources block goes to the last digest of the day (HH:MM is

@@ -59,6 +59,10 @@ _ALERT_COOLDOWN = 1800.0
 # How long a 429-without-Retry-After model is skipped, so a digest's later calls route
 # past it instead of re-hitting (and re-warning about) the same throttle.
 _RATE_LIMIT_COOLDOWN = 60.0
+# A 402 means the account is out of credit, not out of a rolling quota: nothing
+# resets in minutes, so the provider is parked for a day (one alert instead of one
+# per call) and re-probed by the daily verify job.
+_BILLING_DOWN_SECONDS = 86400.0
 
 # id-array / structured tasks must be deterministic: any sampling raises the chance
 # of a dropped or hallucinated id and broken JSON (the source of "N item(s) missing"
@@ -363,6 +367,9 @@ async def verify_llm_providers() -> None:
         status = await _ping(provider)
         if status in (401, 403):
             await _alert_provider(provider, f"API key invalid or expired (HTTP {status}) — provider temporarily dropped")
+        elif status == 402:
+            _mark_provider_down(provider, _BILLING_DOWN_SECONDS)
+            await _alert_provider(provider, "billing/credit exhausted (HTTP 402) — provider dropped for 24h")
         elif status is None:
             log.warning("LLM verify: %s unreachable (network) — skipped", provider)
         else:
@@ -483,6 +490,14 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
                 _bump(tag, "error")
                 _mark_provider_down(provider, 1800)
                 await _alert_provider(provider, f"API key invalid or expired (HTTP {status}) — provider temporarily dropped")
+                break  # next chain entry
+            if status == 402:
+                # out of credit / free tier ended. Retrying costs 3 attempts and a
+                # WARNING per call (which the admin-alert handler forwards), so treat
+                # it like an auth failure: park the provider for a day, alert once.
+                _bump(tag, "quota_dead")
+                _mark_provider_down(provider, _BILLING_DOWN_SECONDS)
+                await _alert_provider(provider, "billing/credit exhausted (HTTP 402) — provider dropped for 24h")
                 break  # next chain entry
             # 5xx / other transient
             _bump(tag, "error")

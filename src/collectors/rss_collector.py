@@ -50,6 +50,31 @@ _BOOTSTRAP_LIMIT = 10
 
 # Some feeds (Cloudflare-fronted, e.g. CoinTelegraph) reject feedparser's default UA with 403/404.
 _FEED_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+# ...and other Cloudflare setups do the opposite: a browser UA from a server IP has no
+# matching browser fingerprint, so it reads as a bot in disguise and gets 403 (jack-clark.net),
+# while an honest crawler UA passes. Neither UA works everywhere, so a 403/404 is retried once
+# with the other one before it counts as a failure.
+_FEED_AGENT_FALLBACK = "feedparser/6.0.11 +https://github.com/kurtmckee/feedparser/"
+_UA_BLOCK_STATUSES = (403, 404)
+
+
+def _agent_blocked(feed: object) -> bool:
+    """True when the response looks like a UA-based block rather than a real outage."""
+    return getattr(feed, "status", None) in _UA_BLOCK_STATUSES
+
+
+async def _parse_with_ua_fallback(url: str, name: str):
+    """Parse a feed with the browser UA, retrying once with the crawler UA on a
+    UA-shaped block. Returns the better of the two responses."""
+    feed = await asyncio.to_thread(feedparser.parse, url, agent=_FEED_AGENT)
+    if not _agent_blocked(feed):
+        return feed
+    retry = await asyncio.to_thread(feedparser.parse, url, agent=_FEED_AGENT_FALLBACK)
+    if _agent_blocked(retry):
+        return feed  # blocked either way → a real block, report the original status
+    log.info("RSS '%s': HTTP %s on the browser UA, served on the crawler UA",
+             name, getattr(feed, "status", None))
+    return retry
 
 # A single bad response is usually transient; only disable a feed after this many consecutive failures.
 _FAIL_THRESHOLD = 3
@@ -83,7 +108,7 @@ async def _mark_failure(source_id: int, name: str, url: str, reason: str) -> Non
 async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_extra: str | None = None) -> int:
     log.info("Polling RSS source '%s' (%s)", name, url)
     try:
-        feed = await asyncio.to_thread(feedparser.parse, url, agent=_FEED_AGENT)
+        feed = await _parse_with_ua_fallback(url, name)
     except Exception as exc:
         await _mark_failure(source_id, name, url, f"parse error: {exc}")
         return 0

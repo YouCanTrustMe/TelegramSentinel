@@ -1,6 +1,8 @@
 """LLM client: JSON repair (models emit unescaped inner quotes) + task routing.
 _escape_stray_quotes / _coerce_json repair malformed JSON; _resolve_chain drops
 providers without a key; is_task_dead reports when a whole chain is exhausted."""
+import pytest
+
 from src.processor.llm import llm_client
 from src.processor.llm.llm_client import (
     _coerce_json,
@@ -286,3 +288,62 @@ def test_llm_json_marks_provider_down_on_auth_fail(monkeypatch):
     assert calls == [("mistral", "m1"), ("groq", "g1")]
     assert llm_client._is_dead("mistral/m1") and not llm_client._is_dead("groq/g1")
     llm_client._quota_dead_until.clear()
+
+
+@pytest.mark.asyncio
+async def test_402_parks_the_whole_provider_after_one_attempt(monkeypatch):
+    """Cerebras' free tier ended (HTTP 402) and every batch call spent 3 retries plus a
+    forwarded WARNING on it for 13 days. 402 is a billing state, not a transient 5xx:
+    one attempt, provider parked, one alert, fail over."""
+    llm_client._quota_dead_until.clear()
+    calls = []
+    alerts = []
+
+    async def fake_call_once(provider, model, messages, temperature=0.1):
+        calls.append((provider, model))
+        if provider == "cerebras":
+            return None, 402, {}
+        return {"ok": True}, 200, {}
+
+    async def fake_alert(provider, msg):
+        alerts.append((provider, msg))
+
+    monkeypatch.setattr(llm_client, "_call_once", fake_call_once)
+    monkeypatch.setattr(llm_client, "_alert_provider", fake_alert)
+    monkeypatch.setattr(llm_client, "TASK_ROUTING", {
+        "batch": [("cerebras", "gpt-oss-120b"), ("groq", "llama-3.3-70b-versatile")],
+        "group": [("cerebras", "gpt-oss-120b")],
+    }, raising=False)
+    for name in ("cerebras_api_key", "groq_api_key"):
+        monkeypatch.setattr(llm_client.settings, name, "k", raising=False)
+
+    assert await llm_client.llm_json([{"role": "user", "content": "x"}], task="batch") == {"ok": True}
+    assert calls == [("cerebras", "gpt-oss-120b"), ("groq", "llama-3.3-70b-versatile")]
+    assert len(alerts) == 1 and "402" in alerts[0][1]
+    # provider-level, so the same dead model is skipped on every other chain it heads
+    assert llm_client.is_task_dead("group")
+
+
+@pytest.mark.asyncio
+async def test_402_provider_is_skipped_on_later_calls(monkeypatch):
+    llm_client._quota_dead_until.clear()
+    calls = []
+
+    async def fake_call_once(provider, model, messages, temperature=0.1):
+        calls.append(provider)
+        return (None, 402, {}) if provider == "cerebras" else ({"ok": True}, 200, {})
+
+    async def fake_alert(provider, msg):
+        pass
+
+    monkeypatch.setattr(llm_client, "_call_once", fake_call_once)
+    monkeypatch.setattr(llm_client, "_alert_provider", fake_alert)
+    monkeypatch.setattr(llm_client, "TASK_ROUTING", {
+        "batch": [("cerebras", "gpt-oss-120b"), ("groq", "llama-3.3-70b-versatile")],
+    }, raising=False)
+    for name in ("cerebras_api_key", "groq_api_key"):
+        monkeypatch.setattr(llm_client.settings, name, "k", raising=False)
+
+    for _ in range(3):
+        await llm_client.llm_json([{"role": "user", "content": "x"}], task="batch")
+    assert calls.count("cerebras") == 1  # parked after the first 402, not re-hit per call

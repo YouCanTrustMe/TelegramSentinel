@@ -284,3 +284,20 @@ async def test_media_placeholder_skips_semantic_filter(monkeypatch):
     assert seen["ids"] == [2]                        # placeholder never reached the filter
     assert 1 in [k["id"] for k in kept]              # placeholder kept despite "block everything"
     assert [b["id"] for b in blocked] == [2]         # real item still blocked as usual
+
+
+def test_published_time_prefix_is_italic_hh_mm(monkeypatch):
+    # The stamp carries minutes and rides in the italic the chrome uses, so an
+    # item line never reads as "13⏰" — a bare hour with the clock trailing it.
+    monkeypatch.setattr(digest_builder.settings, "digest_timezone", "UTC")
+    item = {"original_url": "https://t.me/x/1", "summary": "Fed holds rates",
+            "raw_text": "", "published_at": "2026-08-31T13:40:00+00:00", "key_phrase": "Fed"}
+    line = digest_builder._format_item_base(item)
+    assert line.startswith("<i>13:40</i>  ")
+    assert "⏰" not in line
+
+
+def test_unparsable_published_time_leaves_no_prefix():
+    item = {"original_url": "https://t.me/x/1", "summary": "Fed holds rates",
+            "raw_text": "", "published_at": "not-a-date", "key_phrase": "Fed"}
+    assert digest_builder._format_item_base(item).startswith('<a href=')

@@ -117,7 +117,7 @@ def _format_item_base(item: dict) -> str:
     summary_text = _MEDIA_LABEL.get(summary_text, summary_text)
 
     summary = escape(summary_text)
-    hour = ""
+    stamp = ""
     pub = item["published_at"]
     if pub:
         try:
@@ -125,13 +125,16 @@ def _format_item_base(item: dict) -> str:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             dt_local = dt.astimezone(_get_tz())
-            hour = f"{dt_local.hour}⏰"
+            # Italic HH:MM, the same typeface the digest chrome uses for its
+            # service bits, so the column reads as a timeline instead of a
+            # second kind of content.
+            stamp = f"<i>{dt_local:%H:%M}</i>"
         except Exception:
             pass
 
     suffix = ""
 
-    prefix = f"{hour} · " if hour else ""
+    prefix = f"{stamp}  " if stamp else ""
     key_phrase = (row_get(item, "key_phrase", "") or "").strip()
     if url and summary_text.strip():
         rest_text = summary_text.strip()

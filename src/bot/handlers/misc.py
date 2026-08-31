@@ -28,6 +28,33 @@ def _tail_lines(path: Path, n: int, block_size: int = 4096) -> list[str]:
     return text.splitlines()[-n:]
 
 
+# sendMessage rejects anything past 4096 characters, and one log line carrying a
+# collector error can be several hundred on its own. Escaping inflates it further,
+# so the budget is measured after escaping, not before.
+_TELEGRAM_TEXT_LIMIT = 4096
+_LOG_TAIL_LINES = 20
+_LOG_HEADER_BUDGET = 120
+
+
+def _fit_log_lines(lines: list[str]) -> list[str]:
+    """Drop whole lines from the top until the escaped <pre> block fits. Oldest go
+    first: in a log tail the newest line is the one being read — and if that line
+    alone is too long (a traceback), it is cut rather than dropped, or the reply
+    would come back empty."""
+    budget = _TELEGRAM_TEXT_LIMIT - _LOG_HEADER_BUDGET
+    while len(lines) > 1 and len(escape("\n".join(lines))) > budget:
+        lines = lines[1:]
+    if lines and len(escape(lines[0])) > budget:
+        # Slice first — a megabyte-long line (one traceback, no newlines) would
+        # take a million escape() passes to trim one character at a time, on the
+        # single event loop that also runs the collectors.
+        line = lines[0][:budget]
+        while line and len(escape(line)) > budget - 1:
+            line = line[:len(line) * (budget - 1) // len(escape(line))] or line[:-1]
+        lines = [line + "…"]
+    return lines
+
+
 def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_message(pf.chat(settings.telegram_supergroup_id) & pf.pinned_message)
@@ -110,10 +137,13 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
     async def cmd_logs(_, message: Message) -> None:
         log_file = Path(settings.database_path).parent / "logs" / "sentinel.log"
         if not log_file.exists():
-            await message.reply("No log file yet.")
+            await message.reply("📄 <b>Log</b>\n\nNo log file yet.")
             return
-        tail = _tail_lines(log_file, 20)
-        text = "<pre>" + escape("\n".join(tail)) + "</pre>"
+        tail = _fit_log_lines(_tail_lines(log_file, _LOG_TAIL_LINES))
+        text = (
+            f"📄 <b>Log</b> · last {len(tail)} lines\n"
+            "<pre>" + escape("\n".join(tail)) + "</pre>"
+        )
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download full log", callback_data="logs_download")]])
         await message.reply(text, reply_markup=kb)
 

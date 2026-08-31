@@ -26,9 +26,15 @@ def _key(name: str) -> str:
 
 
 PROVIDERS: dict[str, dict] = {
-    "groq":     {"base": "https://api.groq.com/openai/v1/chat/completions",        "rpm": 28, "tpm": 11000},
-    "cerebras": {"base": "https://api.cerebras.ai/v1/chat/completions",            "rpm": 5,  "tpm": 28000},
-    "mistral":  {"base": "https://api.mistral.ai/v1/chat/completions",             "rpm": 45, "tpm": 45000},
+    # rpm/tpm read off each provider's own x-ratelimit headers (2026-08-31) and paced
+    # just under. Groq's 8K tokens/minute is the binding one: a 12-item batch prompt is
+    # ~5K tokens, so barely one fits per minute — hence Groq tails rather than heads.
+    "groq":     {"base": "https://api.groq.com/openai/v1/chat/completions",        "rpm": 28, "tpm": 8000},
+    "mistral":  {"base": "https://api.mistral.ai/v1/chat/completions",             "rpm": 45, "tpm": 50000},
+    # Gemini speaks OpenAI's protocol on this path, so it needs no special transport.
+    # Free tier is ~15 RPM / 1500 RPD per model; paced just under to leave room for
+    # the embedding calls that share the key (a different model, so a separate RPD).
+    "gemini":   {"base": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "rpm": 14, "tpm": 250000},
     "zhipu":    {"base": "https://open.bigmodel.cn/api/paas/v4/chat/completions",  "rpm": 20, "tpm": 100000},
 }
 
@@ -38,20 +44,25 @@ PROVIDERS: dict[str, dict] = {
 # chain as the always-present last resort. Entries whose provider has no API key
 # are skipped automatically, so the system degrades gracefully if a key is missing.
 TASK_ROUTING: dict[str, list[tuple[str, str]]] = {
-    # high-volume single summaries; needs comfortable RPM
-    "classify":  [("mistral", "mistral-small-latest"), ("groq", "openai/gpt-oss-120b"), ("groq", "llama-3.3-70b-versatile")],
+    # Benchmarked 2026-08-31 on 60 real prod items (id fidelity) and on prod filter
+    # ground truth (18 correctly-blocked + 18 that must pass). Mistral Small heads every
+    # chain: 60/60 ids, 0 false blocks, and the roomiest budget of the three (50 RPM /
+    # 50K TPM). Gemini Flash-Lite is second on the same numbers at a third of the latency,
+    # but on a 15 RPM free tier, so it fallbacks rather than leads. Groq tails: its 8K
+    # tokens/minute cannot fit a batch prompt, yet it still serves the small single-item
+    # calls, and it is a third separate quota.
+    # Rejected here: mistral-medium (tighter 25K TPM and it false-blocked real news),
+    # gemini-3.5-flash (same accuracy as Flash-Lite, 7x slower), gemini-2.5-flash-lite
+    # (dropped 12/60 ids), groq qwen/gpt-oss-20b (429 before finishing a batch).
+    "classify":  [("mistral", "mistral-small-latest"), ("gemini", "gemini-3.5-flash-lite"), ("groq", "openai/gpt-oss-120b")],
     # id-array batch summarise (no merge)
-    "batch":     [("cerebras", "gpt-oss-120b"), ("mistral", "mistral-small-latest"), ("groq", "llama-3.3-70b-versatile")],
-    # id-array grouping + B1 dedup confirm + within-source merge. Mistral leads
-    # (50 RPM): on big digests these fan out to many calls and Cerebras (5 RPM)
-    # serialised them behind 60s Retry-After walls. Cerebras stays as fallback for
-    # its 1M TPD headroom; bench had Mistral drop ~1/25 ids (harmless in B1, where
-    # only co-membership matters, and rare in merge after the echo-exact-id prompt).
-    "group":     [("mistral", "mistral-small-latest"), ("cerebras", "gpt-oss-120b"), ("groq", "llama-3.3-70b-versatile")],
-    # content filter (rate 1-10); strict catchers preferred
-    "filter":    [("mistral", "mistral-small-latest"), ("cerebras", "gpt-oss-120b"), ("groq", "llama-3.3-70b-versatile")],
+    "batch":     [("mistral", "mistral-small-latest"), ("gemini", "gemini-3.5-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    # id-array grouping + B1 dedup confirm + within-source merge
+    "group":     [("mistral", "mistral-small-latest"), ("gemini", "gemini-3.5-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    # content filter (rate 1-10)
+    "filter":    [("mistral", "mistral-small-latest"), ("gemini", "gemini-3.5-flash-lite"), ("groq", "openai/gpt-oss-120b")],
     # Ukrainian translate-guard retry
-    "translate": [("mistral", "mistral-small-latest"), ("groq", "openai/gpt-oss-120b"), ("groq", "llama-3.3-70b-versatile")],
+    "translate": [("mistral", "mistral-small-latest"), ("gemini", "gemini-3.5-flash-lite"), ("groq", "openai/gpt-oss-120b")],
 }
 
 _QUOTA_DEAD_THRESHOLD = 300.0
@@ -370,6 +381,8 @@ async def verify_llm_providers() -> None:
         elif status == 402:
             _mark_provider_down(provider, _BILLING_DOWN_SECONDS)
             await _alert_provider(provider, "billing/credit exhausted (HTTP 402) — provider dropped for 24h")
+        elif status == 404:
+            await _alert_provider(provider, f"model '{_sample_model(provider)}' not found (HTTP 404) — retired? routing entry needs updating")
         elif status is None:
             log.warning("LLM verify: %s unreachable (network) — skipped", provider)
         else:
@@ -490,6 +503,15 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
                 _bump(tag, "error")
                 _mark_provider_down(provider, 1800)
                 await _alert_provider(provider, f"API key invalid or expired (HTTP {status}) — provider temporarily dropped")
+                break  # next chain entry
+            if status == 404:
+                # the model id is gone — providers retire models (Groq dropped
+                # llama-3.3-70b-versatile while it was still the tail of every chain,
+                # and nothing noticed because a 404 just looked like a transient error).
+                # Park it for a day and alert so a rotted routing entry surfaces.
+                _bump(tag, "quota_dead")
+                _quota_dead_until[tag] = time.monotonic() + _BILLING_DOWN_SECONDS
+                await _alert_provider(f"{provider}:{model}", f"model '{model}' not found (HTTP 404) — retired? routing entry needs updating")
                 break  # next chain entry
             if status == 402:
                 # out of credit / free tier ended. Retrying costs 3 attempts and a

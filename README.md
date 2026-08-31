@@ -5,7 +5,7 @@ Personal AI news digest bot. Collects posts from Telegram channels and RSS feeds
 ## Features
 
 - **Multi-source collection** — Telegram channels (via userbot) + RSS/Atom feeds
-- **AI classification** — a concise Ukrainian summary (≤15 words, up to ~25 for detail-heavy items) plus a key phrase used as the link anchor; each task is routed to a free-tier model and fails over across separate provider quotas (Mistral, Cerebras, Groq) so no single daily quota stalls a digest
+- **AI classification** — a concise Ukrainian summary (≤15 words, up to ~25 for detail-heavy items) plus a key phrase used as the link anchor; each task is routed to a free-tier model and fails over across separate provider quotas (Mistral, Gemini, Groq) so no single daily quota stalls a digest
 - **Per-source prompt instructions** — custom AI hints per source (e.g. "keep proper nouns", "focus on numbers", "no merge", "no translate")
 - **Digest** — sent on a per-category schedule, grouped by category → source; same-topic follow-ups within a source are AI-merged into one entry
 - **Content filter** — natural-language rules (e.g. "local traffic accidents without casualties", "ads and promos") that an LLM applies each digest to silently exclude matching items
@@ -133,7 +133,7 @@ SQLite at `data/sentinel.db`.
 | Layer | Tech |
 |---|---|
 | Collectors | Pyrogram 2.0, feedparser |
-| AI | Groq (`gpt-oss-120b` / `llama-3.3-70b` / `llama-3.1-8b`) + Gemini embeddings for dedup |
+| AI | Mistral (`mistral-small`) → Gemini (`3.5-flash-lite`) → Groq (`gpt-oss-120b`) + Gemini embeddings for dedup |
 | Storage | SQLite + aiosqlite |
 | Scheduler | APScheduler 3.x |
 | Bot | Pyrogram bot + Bot HTTP API |

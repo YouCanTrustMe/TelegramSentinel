@@ -114,9 +114,9 @@ def test_verify_alerts_on_invalid_key(monkeypatch):
     monkeypatch.setattr(llm_client, "_alert_provider", fake_alert)
     monkeypatch.setattr(llm_client, "_ping", fake_ping)
     monkeypatch.setattr(llm_client.settings, "mistral_api_key", "x", raising=False)
-    monkeypatch.setattr(llm_client.settings, "cerebras_api_key", "x", raising=False)
+    monkeypatch.setattr(llm_client.settings, "gemini_api_key", "x", raising=False)
     asyncio.run(llm_client.verify_llm_providers())
-    assert "mistral" in calls and "cerebras" in calls  # 401 → alerted
+    assert "mistral" in calls and "gemini" in calls  # 401 → alerted
 
 
 def _noop_alert(monkeypatch):
@@ -347,3 +347,43 @@ async def test_402_provider_is_skipped_on_later_calls(monkeypatch):
     for _ in range(3):
         await llm_client.llm_json([{"role": "user", "content": "x"}], task="batch")
     assert calls.count("cerebras") == 1  # parked after the first 402, not re-hit per call
+
+
+@pytest.mark.asyncio
+async def test_404_parks_a_retired_model_and_alerts(monkeypatch):
+    """Groq retired llama-3.3-70b-versatile while it was the tail of every chain and
+    nothing noticed: a 404 read as a transient error, so it was retried forever and
+    the routing entry silently rotted. A 404 must park the model and alert."""
+    llm_client._quota_dead_until.clear()
+    calls, alerts = [], []
+
+    async def fake_call_once(provider, model, messages, temperature=0.1):
+        calls.append(model)
+        return (None, 404, {}) if model == "retired-model" else ({"ok": True}, 200, {})
+
+    async def fake_alert(target, msg):
+        alerts.append((target, msg))
+
+    monkeypatch.setattr(llm_client, "_call_once", fake_call_once)
+    monkeypatch.setattr(llm_client, "_alert_provider", fake_alert)
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_404",
+                        [("groq", "retired-model"), ("groq", "live-model")])
+    monkeypatch.setattr(llm_client.settings, "groq_api_key", "k", raising=False)
+
+    assert await llm_client.llm_json([{"role": "user", "content": "x"}], task="t_404") == {"ok": True}
+    assert calls == ["retired-model", "live-model"]  # one attempt, not three
+    assert len(alerts) == 1 and "404" in alerts[0][1]
+
+    await llm_client.llm_json([{"role": "user", "content": "x"}], task="t_404")
+    assert calls.count("retired-model") == 1  # parked, not re-probed on every call
+
+
+def test_routing_has_no_dead_entries():
+    """Every routed (provider, model) must name a provider that still exists in the
+    registry — a chain entry pointing at a removed provider is silently skipped."""
+    for task, chain in llm_client.TASK_ROUTING.items():
+        assert chain, f"{task} has an empty chain"
+        for provider, model in chain:
+            assert provider in llm_client.PROVIDERS, f"{task} routes to unknown provider {provider}"
+        providers = [p for p, _ in chain]
+        assert len(set(providers)) >= 2, f"{task} has no failover onto a separate quota"

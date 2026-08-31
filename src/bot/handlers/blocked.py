@@ -4,9 +4,10 @@ from html import escape
 from pyrogram import filters as pf
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from src.bot.keyboards import _back_kb, _blocked_keyboard
+from src.bot.keyboards import _back_kb, _blocked_keyboard, _blocked_text
 from src.bot.state import _pending
 from src.db.models import (
+    get_blocked_hit_counts,
     get_blocked_words,
     get_categories,
     get_categories_for_word,
@@ -16,10 +17,6 @@ from src.db.models import (
 )
 
 log = logging.getLogger(__name__)
-
-_BLOCKED_TITLE = "🚫 <b>Content filters</b>"
-_BLOCKED_EMPTY = "🚫 <b>Content filters</b>\n\nNo filter rules yet."
-
 
 async def _render_blocked_view(word_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
     words = await get_blocked_words()
@@ -41,7 +38,7 @@ async def _render_blocked_view(word_id: int) -> tuple[str, InlineKeyboardMarkup]
     if row:
         buttons.append(row)
     buttons.append([InlineKeyboardButton("🗑 Remove", callback_data=f"blocked_del:{word_id}")])
-    buttons.append([InlineKeyboardButton("◀ Back", callback_data="blocked_list")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data="blocked_list")])
 
     applies = f"selected ({len(scoped)})" if scoped else "all categories"
     text = (
@@ -52,14 +49,21 @@ async def _render_blocked_view(word_id: int) -> tuple[str, InlineKeyboardMarkup]
     return text, InlineKeyboardMarkup(buttons)
 
 
+async def _hit_total(words) -> int:
+    """Only rules that still exist count: blocked_reason rows outlive a deleted
+    rule, and the header read "40 blocks" over a list where every rule showed 0."""
+    hits = await get_blocked_hit_counts()
+    return sum(hits.get(w["rule"], 0) for w in words)
+
+
 def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_message(pf.command("blocked") & admin_msg)
     async def cmd_blocked(_, message: Message) -> None:
         words = await get_blocked_words()
         await message.reply(
-            _BLOCKED_TITLE if words else _BLOCKED_EMPTY,
-            reply_markup=_blocked_keyboard(words),
+            _blocked_text(words, await _hit_total(words)),
+            reply_markup=await _blocked_keyboard(words),
         )
 
     @bot.on_callback_query(pf.regex(r"^blocked_list(:\d+)?$") & admin_cb)
@@ -69,8 +73,8 @@ def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
         page = int(parts[1]) if len(parts) > 1 else 0
         words = await get_blocked_words()
         await query.message.edit_text(
-            _BLOCKED_TITLE if words else _BLOCKED_EMPTY,
-            reply_markup=_blocked_keyboard(words, page),
+            _blocked_text(words, await _hit_total(words)),
+            reply_markup=await _blocked_keyboard(words, page),
         )
 
     @bot.on_callback_query(pf.regex(r"^blocked_add$") & admin_cb)
@@ -121,6 +125,6 @@ def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
             log.info("Filter rule removed: id=%s", word_id)
         words = await get_blocked_words()
         await query.message.edit_text(
-            _BLOCKED_TITLE if words else _BLOCKED_EMPTY,
-            reply_markup=_blocked_keyboard(words),
+            _blocked_text(words, await _hit_total(words)),
+            reply_markup=await _blocked_keyboard(words),
         )

@@ -10,8 +10,13 @@ from src.bot.keyboards import (
     _cat_view_text,
     _confirm_keyboard,
     _source_view_keyboard,
+    _source_view_text,
+    split_name_page,
+    page_of,
+    _PAGE_SIZE_SOURCES,
 )
 from src.bot.state import _DEFAULT_DIGEST_TIME, _pending
+from src.common.util import source_link
 from src.collectors.folder_manager import add_to_folder, remove_from_folder
 from src.collectors.telegram_collector import resolve_chat_id, userbot
 from src.db.models import (
@@ -21,6 +26,7 @@ from src.db.models import (
     find_sources_by_chat_id,
     get_categories,
     get_source,
+    get_source_health,
     place_source_at_bottom,
     reassign_source_category,
     remove_source,
@@ -122,18 +128,10 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
         if not s:
             await query.answer("Source not found.", show_alert=True)
             return
-        pending = s["status"] == "pending"
-        icon = "⏳" if pending else ("📡" if s["type"] == "telegram" else "🔗")
-        type_label = "tg" if s["type"] == "telegram" else "rss"
-        status_line = "\nStatus: <b>pending</b>" if pending else ""
-        prompt_line = f"\nPrompt: <i>{escape(s['prompt_extra'])}</i>" if s["prompt_extra"] else ""
-        text = (
-            f"{icon} <b>{s['name']}</b>\n"
-            f"Type: <code>{type_label}</code>\n"
-            f"URL: <code>{s['url']}</code>\n"
-            f"Category: <b>{s['category']}</b>{status_line}{prompt_line}"
+        await query.message.edit_text(
+            _source_view_text(s, await get_source_health(src_id)),
+            reply_markup=_source_view_keyboard(src_id, s["category"], source_link(s["type"], s["url"])),
         )
-        await query.message.edit_text(text, reply_markup=_source_view_keyboard(src_id, s["category"]))
 
     @bot.on_callback_query(pf.regex(r"^src_reassign:") & admin_cb)
     async def cb_src_reassign(_, query: CallbackQuery) -> None:
@@ -157,16 +155,11 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
         log.info("Source id=%s reassigned to category=%s", src_id, cat_name)
         s = await get_source(src_id)
         if s:
-            pending = s["status"] == "pending"
-            icon = "⏳" if pending else ("📡" if s["type"] == "telegram" else "🔗")
-            type_label = "tg" if s["type"] == "telegram" else "rss"
-            text = (
-                f"{icon} <b>{s['name']}</b>\n"
-                f"Type: <code>{type_label}</code>\n"
-                f"URL: <code>{s['url']}</code>\n"
-                f"Category: <b>{s['category']}</b>"
+            text = _source_view_text(s, await get_source_health(src_id))
+            await query.message.edit_text(
+                f"✅ Reassigned.\n\n{text}",
+                reply_markup=_source_view_keyboard(src_id, cat_name, source_link(s["type"], s["url"])),
             )
-            await query.message.edit_text(f"✅ Reassigned.\n\n{text}", reply_markup=_source_view_keyboard(src_id, cat_name))
         else:
             await query.message.edit_text("✅ Reassigned.")
 
@@ -270,7 +263,7 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
             [InlineKeyboardButton("✏️ Edit", callback_data=f"src_prompt_edit:{src_id}")],
             [InlineKeyboardButton("📋 Templates", callback_data=f"src_prompt_tpl:{src_id}")],
             [InlineKeyboardButton("🗑 Clear", callback_data=f"src_prompt_clear:{src_id}")],
-            [InlineKeyboardButton("◀ Back", callback_data=f"src_view:{src_id}")],
+            [InlineKeyboardButton("« Back", callback_data=f"src_view:{src_id}")],
         ])
         await query.message.edit_text(text, reply_markup=kb)
 
@@ -291,7 +284,7 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
             [InlineKeyboardButton("🔓 No blocklist filter", callback_data=f"src_prompt_set:{src_id}:nofilter")],
             [InlineKeyboardButton("🔢 Keep numbers & names verbatim", callback_data=f"src_prompt_set:{src_id}:verbatim")],
             [InlineKeyboardButton("🌐 No translation", callback_data=f"src_prompt_set:{src_id}:notranslate")],
-            [InlineKeyboardButton("◀ Back", callback_data=f"src_prompt:{src_id}")],
+            [InlineKeyboardButton("« Back", callback_data=f"src_prompt:{src_id}")],
         ])
         await query.message.edit_text(text, reply_markup=kb)
 
@@ -316,7 +309,7 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
             f"✅ Prompt set for <b>{escape(s['name']) if s else str(src_id)}</b>:\n\n"
             f"<i>{escape(value)}</i>",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("◀ Back", callback_data=f"src_view:{src_id}")],
+                [InlineKeyboardButton("« Back", callback_data=f"src_view:{src_id}")],
             ]),
         )
 
@@ -348,16 +341,29 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
         await query.message.edit_text(
             f"✅ Prompt cleared for <b>{escape(s['name']) if s else str(src_id)}</b>.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("◀ Back", callback_data=f"src_view:{src_id}")],
+                [InlineKeyboardButton("« Back", callback_data=f"src_view:{src_id}")],
             ]),
+        )
+
+    @bot.on_callback_query(pf.regex(r"^src_reorder:") & admin_cb)
+    async def cb_src_reorder(_, query: CallbackQuery) -> None:
+        cat_name, page = split_name_page(query.data.split(":", 1)[1])
+        text, sources = await _cat_view_text(cat_name)
+        await query.message.edit_text(
+            f"{text}\n\n<i>⇅ Move a source · ✅ Done when the order is right.</i>",
+            reply_markup=_category_view_keyboard(cat_name, sources, page, reorder=True),
         )
 
     @bot.on_callback_query(pf.regex(r"^src_order_(up|down):") & admin_cb)
     async def cb_src_order(_, query: CallbackQuery) -> None:
-        parts = query.data.split(":", 2)
-        direction = "up" if "up" in parts[0] else "down"
-        src_id = int(parts[1])
-        cat_name = parts[2]
+        action, src_id_s, page_s, cat_name = query.data.split(":", 3)
+        direction = "up" if "up" in action else "down"
+        src_id, page = int(src_id_s), int(page_s)
         await reorder_source(src_id, cat_name, direction)
         text, sources = await _cat_view_text(cat_name)
-        await query.message.edit_text(text, reply_markup=_category_view_keyboard(cat_name, sources))
+        page = page_of(sources, "id", src_id, _PAGE_SIZE_SOURCES)
+        log.info("Source reordered: id=%d %s in category=%s (page=%d)", src_id, direction, cat_name, page)
+        await query.message.edit_text(
+            f"{text}\n\n<i>⇅ Move a source · ✅ Done when the order is right.</i>",
+            reply_markup=_category_view_keyboard(cat_name, sources, page, reorder=True),
+        )

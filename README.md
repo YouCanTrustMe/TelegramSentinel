@@ -102,9 +102,11 @@ src/
       sources.py                source view, add/rename/reassign/remove, per-source prompt
       blocked.py                /blocked — manage LLM content-filter rules
       timetable.py              digest schedule — pick a time, toggle categories on/off
-      misc.py                   /stats, /logs, /digest, /help
+      misc.py                   home screen, /stats, /logs, /digest
       conversation.py           all text-input wizards (add category/source/rule/etc.)
-    keyboards.py                InlineKeyboardMarkup builders
+    home.py                     home screen — next digest, queue, quiet sources
+    stats.py                    /stats — 24h volume per category, quiet sources first
+    keyboards.py                InlineKeyboardMarkup builders and screen titles
     state.py                    shared _pending wizard-state dict
   db/
     base.py                     connection, migration runner, app settings
@@ -202,10 +204,12 @@ All commands are private-chat only, admin-only (set via `TELEGRAM_ADMIN_ID`).
 
 | Command | Description |
 |---|---|
+| `/start`, `/home` | Home — next digest, items waiting, last digest, quiet sources |
 | `/categories` | Manage categories and sources — add, edit, reorder, set digest time, bulk-set AI prompt |
 | `/blocked` | Content filter — manage natural-language rules; an LLM suppresses matching items each digest |
+| `/timetable` | Digest schedule — tap a time to toggle categories on or off |
 | `/digest` | Trigger digest immediately |
-| `/stats` | Items collected in last 24h, broken down by category and source |
+| `/stats` | Items collected in last 24h per category and source, quiet sources first |
 | `/logs` | Last 20 log lines; button to download full log file |
 | `/cancel` | Cancel current input wizard |
 

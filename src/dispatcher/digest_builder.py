@@ -16,7 +16,7 @@ from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings
 from src.processor.llm.llm_client import format_llm_stats, reset_llm_stats, is_task_dead
 from src.processor.dedup.merge import MERGE_MIN_ITEMS, merge_source_items
 from src.common.media import MEDIA_LABEL as _MEDIA_LABEL, is_media_placeholder
-from src.common.util import needs_summary, row_get
+from src.common.util import needs_summary, row_get, source_link
 
 log = logging.getLogger(__name__)
 
@@ -240,17 +240,7 @@ def _build_digest_text(
 
 
 def _quiet_source_url(row) -> str | None:
-    """Clickable link for a quiet source: a Telegram handle becomes a t.me link,
-    an RSS feed links straight to its url. None when there is nothing linkable."""
-    url = (row["url"] or "").strip()
-    if not url:
-        return None
-    if row["type"] == "telegram" and not url.startswith("http"):
-        handle = url.lstrip("@")
-        # Public usernames start with a letter; a numeric/empty handle (private
-        # chat id) has no usable t.me link, so leave it as plain text.
-        return f"https://t.me/{handle}" if handle[:1].isalpha() else None
-    return url if url.startswith("http") else None
+    return source_link(row["type"], row["url"])
 
 
 async def _build_silent_block() -> str:

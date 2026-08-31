@@ -12,13 +12,16 @@ from src.bot.keyboards import (
     _add_time_kb,
     _back_kb,
     _blocked_keyboard,
+    _blocked_text,
     _cat_view_text,
     _category_view_keyboard,
     _is_rss,
     _slot_keyboard,
     _slot_text,
     _source_view_keyboard,
+    _source_view_text,
 )
+from src.common.util import source_link
 from src.bot.state import _pending
 from src.db.models import (
     add_blocked_word,
@@ -26,6 +29,7 @@ from src.db.models import (
     get_blocked_words,
     get_categories,
     get_source,
+    get_source_health,
     get_sources_by_category,
     rename_source,
     set_source_prompt_extra,
@@ -90,13 +94,13 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
             if added:
                 log.info("Filter rule added: %s", text)
                 await message.reply(
-                    f"✅ Added filter rule: <code>{escape(text)}</code>\n\n🚫 <b>Content filters</b>",
-                    reply_markup=_blocked_keyboard(words),
+                    f"✅ Added filter rule.\n\n{_blocked_text(words)}",
+                    reply_markup=await _blocked_keyboard(words),
                 )
             else:
                 await message.reply(
-                    f"⚠️ Already exists: <code>{escape(text)}</code>",
-                    reply_markup=_blocked_keyboard(words),
+                    f"⚠️ Already exists.\n\n{_blocked_text(words)}",
+                    reply_markup=await _blocked_keyboard(words),
                 )
 
         elif action == "add_source":
@@ -147,7 +151,7 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                 if cats:
                     keyboard = InlineKeyboardMarkup(
                         [[InlineKeyboardButton(f"{r['emoji']} {r['name']}", callback_data=f"add_src_cat:{r['name']}")] for r in cats]
-                        + [[InlineKeyboardButton("◀ Back", callback_data="cat_list")]]
+                        + [[InlineKeyboardButton("« Back", callback_data="cat_list")]]
                     )
                     await message.reply(f"Name: <b>{name}</b>\nCategory:", reply_markup=keyboard)
                 else:
@@ -166,19 +170,10 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                 log.info("Source renamed: id=%s -> %s", src_id, new_name)
                 s = await get_source(src_id)
                 if s:
-                    pending = s["status"] == "pending"
-                    icon = "⏳" if pending else ("📡" if s["type"] == "telegram" else "🔗")
-                    type_label = "tg" if s["type"] == "telegram" else "rss"
-                    status_line = "\nStatus: <b>pending</b>" if pending else ""
-                    src_text = (
-                        f"{icon} <b>{escape(new_name)}</b>\n"
-                        f"Type: <code>{type_label}</code>\n"
-                        f"URL: <code>{s['url']}</code>\n"
-                        f"Category: <b>{cat_name}</b>{status_line}"
-                    )
+                    src_text = _source_view_text(s, await get_source_health(src_id))
                     await message.reply(
-                        f"✅ Renamed to <b>{escape(new_name)}</b>.\n\n{src_text}",
-                        reply_markup=_source_view_keyboard(src_id, cat_name),
+                        f"✅ Renamed.\n\n{src_text}",
+                        reply_markup=_source_view_keyboard(src_id, cat_name, source_link(s["type"], s["url"])),
                     )
                 else:
                     await message.reply(f"✅ Renamed to <b>{escape(new_name)}</b>.")

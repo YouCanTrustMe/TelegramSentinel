@@ -79,6 +79,7 @@ from src.db.blocked import (
     link_word_category,
     unlink_word_category,
     get_word_category_map,
+    get_blocked_hit_counts,
 )
 __all__ = [
     "get_db", "init_db", "get_app_setting", "set_app_setting",
@@ -100,4 +101,5 @@ __all__ = [
     "add_category_time", "remove_category_time", "remove_time_everywhere", "get_schedule_slots",
     "get_blocked_words", "add_blocked_word", "remove_blocked_word",
     "get_categories_for_word", "link_word_category", "unlink_word_category", "get_word_category_map",
+    "get_blocked_hit_counts",
 ]

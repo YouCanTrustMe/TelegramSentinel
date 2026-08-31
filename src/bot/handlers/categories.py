@@ -9,6 +9,11 @@ from src.bot.keyboards import (
     _categories_keyboard,
     _category_view_keyboard,
     _cat_view_text,
+    render_categories,
+    split_name_page,
+    page_of,
+    _PAGE_SIZE_CATS,
+    _categories_text,
     _confirm_keyboard,
 )
 from src.bot.state import _DEFAULT_DIGEST_TIME, _pending
@@ -47,11 +52,11 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
     async def cmd_categories(_, message: Message) -> None:
         cats = await get_categories()
         if not cats:
-            await message.reply("No categories yet.", reply_markup=InlineKeyboardMarkup(
+            await message.reply(_categories_text([], 0), reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
             ))
             return
-        await message.reply("Categories:", reply_markup=await _categories_keyboard(cats))
+        await message.reply(await render_categories(cats), reply_markup=await _categories_keyboard(cats))
 
     @bot.on_callback_query(pf.regex(r"^cat_list(:\d+)?$") & admin_cb)
     async def cb_cat_list(_, query: CallbackQuery) -> None:
@@ -60,29 +65,43 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
         page = int(parts[1]) if len(parts) > 1 else 0
         cats = await get_categories()
         if not cats:
-            await query.message.edit_text("No categories yet.", reply_markup=InlineKeyboardMarkup(
+            await query.message.edit_text(_categories_text([], 0), reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
             ))
             return
-        await query.message.edit_text("Categories:", reply_markup=await _categories_keyboard(cats, page))
+        await query.message.edit_text(await render_categories(cats), reply_markup=await _categories_keyboard(cats, page))
 
     @bot.on_callback_query(pf.regex(r"^cat_view:") & admin_cb)
     async def cb_cat_view(_, query: CallbackQuery) -> None:
         _pending.pop(query.from_user.id, None)
-        parts = query.data.split(":", 2)
-        cat_name = parts[1]
-        page = int(parts[2]) if len(parts) > 2 else 0
+        cat_name, page = split_name_page(query.data.split(":", 1)[1])
         text, sources = await _cat_view_text(cat_name)
         await query.message.edit_text(text, reply_markup=_category_view_keyboard(cat_name, sources, page))
 
+    @bot.on_callback_query(pf.regex(r"^cat_reorder(:\d+)?$") & admin_cb)
+    async def cb_cat_reorder(_, query: CallbackQuery) -> None:
+        parts = query.data.split(":")
+        page = int(parts[1]) if len(parts) > 1 else 0
+        cats = await get_categories()
+        await query.message.edit_text(
+            f"{await render_categories(cats)}\n\n<i>⇅ Move a category · ✅ Done when the order is right.</i>",
+            reply_markup=await _categories_keyboard(cats, page, reorder=True),
+        )
+
     @bot.on_callback_query(pf.regex(r"^cat_order_(up|down):") & admin_cb)
     async def cb_cat_order(_, query: CallbackQuery) -> None:
-        parts = query.data.split(":", 1)
-        direction = "up" if "up" in parts[0] else "down"
-        cat_name = parts[1]
+        action, page_s, cat_name = query.data.split(":", 2)
+        direction = "up" if "up" in action else "down"
+        page = int(page_s)
         await reorder_category(cat_name, direction)
         cats = await get_categories()
-        await query.message.edit_text("Categories:", reply_markup=await _categories_keyboard(cats))
+        page = page_of(cats, "name", cat_name, _PAGE_SIZE_CATS)
+        log.info("Category reordered: %s %s (page=%d)", cat_name, direction, page)
+        # Reordering happens inside the mode, so the screen stays in it.
+        await query.message.edit_text(
+            f"{await render_categories(cats)}\n\n<i>⇅ Move a category · ✅ Done when the order is right.</i>",
+            reply_markup=await _categories_keyboard(cats, page, reorder=True),
+        )
 
     @bot.on_callback_query(pf.regex(r"^cat_add$") & admin_cb)
     async def cb_cat_add(_, query: CallbackQuery) -> None:
@@ -130,7 +149,7 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
                 [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
             ))
             return
-        await query.message.edit_text("✅ Category removed.\n\nCategories:", reply_markup=await _categories_keyboard(cats))
+        await query.message.edit_text(f"✅ Category removed.\n\n{await render_categories(cats)}", reply_markup=await _categories_keyboard(cats))
 
     @bot.on_callback_query(pf.regex(r"^cat_del_move:") & admin_cb)
     async def cb_cat_del_move(_, query: CallbackQuery) -> None:
@@ -140,11 +159,11 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
         await rebuild_digest_jobs()
         log.info("Category %s deleted, sources moved to %s", from_cat, to_cat)
         cats = await get_categories()
-        text = f"✅ Sources moved to <b>{to_cat}</b>, category <b>{from_cat}</b> deleted.\n\nCategories:"
+        text = f"✅ Sources moved to <b>{to_cat}</b>, category <b>{from_cat}</b> deleted."
         if not cats:
-            await query.message.edit_text(text.replace("\n\nCategories:", ""))
+            await query.message.edit_text(text)
         else:
-            await query.message.edit_text(text, reply_markup=await _categories_keyboard(cats))
+            await query.message.edit_text(f"{text}\n\n{await render_categories(cats)}", reply_markup=await _categories_keyboard(cats))
 
     @bot.on_callback_query(pf.regex(r"^cat_del_all:") & admin_cb)
     async def cb_cat_del_all(_, query: CallbackQuery) -> None:
@@ -159,7 +178,7 @@ def register_category_handlers(bot, admin_msg, admin_cb) -> None:
                 [[InlineKeyboardButton("➕ Add category", callback_data="cat_add")]]
             ))
             return
-        await query.message.edit_text("✅ Category and all sources deleted.\n\nCategories:", reply_markup=await _categories_keyboard(cats))
+        await query.message.edit_text(f"✅ Category and all sources deleted.\n\n{await render_categories(cats)}", reply_markup=await _categories_keyboard(cats))
 
     @bot.on_callback_query(pf.regex(r"^cat_edit:") & admin_cb)
     async def cb_cat_edit(_, query: CallbackQuery) -> None:

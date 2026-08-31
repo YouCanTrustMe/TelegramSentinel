@@ -64,3 +64,18 @@ async def get_word_category_map() -> dict[int, set[str]]:
     for row in rows:
         scope.setdefault(row["word_id"], set()).add(row["category"])
     return scope
+
+
+async def get_blocked_hit_counts(days: int = 30) -> dict[str, int]:
+    """How often each rule blocked something recently. A rule at 0 is dead weight;
+    the rule with the highest count is the first place to look when an item that
+    should have been in the digest is missing."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT blocked_reason AS rule, COUNT(*) AS n FROM items "
+            "WHERE blocked_reason IS NOT NULL "
+            "  AND julianday(processed_at) >= julianday('now', ?) "
+            "GROUP BY blocked_reason",
+            (f"-{days} days",),
+        ) as cur:
+            return {row["rule"]: row["n"] for row in await cur.fetchall()}

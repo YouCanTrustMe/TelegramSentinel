@@ -48,6 +48,12 @@ def _orphans(cats, time_str: str) -> list[str]:
 
 def register_timetable_handlers(bot, admin_msg, admin_cb) -> None:
 
+    @bot.on_message(pf.command("timetable") & admin_msg)
+    async def cmd_timetable(_, message) -> None:
+        cats = await get_categories()
+        await message.reply(_timetable_text(cats), reply_markup=_timetable_keyboard(cats))
+
+
     @bot.on_callback_query(pf.regex(r"^tt_list$") & admin_cb)
     async def cb_tt_list(_, query: CallbackQuery) -> None:
         _pending.pop(query.from_user.id, None)

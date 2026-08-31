@@ -35,6 +35,20 @@ async def get_pending_sources(category: str | None = None) -> list[aiosqlite.Row
             return await cur.fetchall()
 
 
+async def get_error_sources(category: str | None = None) -> list[aiosqlite.Row]:
+    """Sources the RSS collector gave up on (`status='error'`). They are neither
+    active nor pending, so every screen used to hide them — including the one
+    that would let the admin remove or fix them."""
+    async with get_db() as db:
+        if category:
+            async with db.execute(
+                "SELECT * FROM sources WHERE status = 'error' AND category = ?", (category,)
+            ) as cur:
+                return await cur.fetchall()
+        async with db.execute("SELECT * FROM sources WHERE status = 'error'") as cur:
+            return await cur.fetchall()
+
+
 async def set_source_pending_msg_id(source_id: int, msg_id: int | None) -> None:
     async with get_db() as db:
         await db.execute("UPDATE sources SET pending_msg_id = ? WHERE id = ?", (msg_id, source_id))
@@ -208,7 +222,7 @@ async def set_source_prompt_extra(source_id: int, text: str | None) -> None:
 async def get_silent_sources(threshold_hours: int = 120) -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(
-            """SELECT s.id, s.name, s.type, s.url,
+            """SELECT s.id, s.name, s.type, s.url, s.category,
                       MAX(i.processed_at) AS last_item_at,
                       CAST((julianday('now') - julianday(MAX(i.processed_at))) * 24 AS INTEGER) AS hours_silent
                FROM sources s
@@ -240,3 +254,26 @@ async def reorder_source(source_id: int, cat_name: str, direction: str) -> None:
         for i, sid in enumerate(ids):
             await db.execute("UPDATE sources SET sort_order = ? WHERE id = ?", (i, sid))
         await db.commit()
+
+
+async def get_source_health(source_id: int) -> dict:
+    """Freshness of one source: when it last produced an item, how much it produced
+    over the last week, and how much of that was muted as a cross-source duplicate.
+    This is what decides whether a source is worth keeping."""
+    async with get_db() as db:
+        async with db.execute(
+            """SELECT (julianday('now') - julianday(MAX(processed_at))) * 24 AS hours_since,
+                      SUM(CASE WHEN julianday(processed_at) >= julianday('now', '-7 days')
+                               THEN 1 ELSE 0 END) AS week_total,
+                      SUM(CASE WHEN duplicate_of IS NOT NULL
+                                AND julianday(processed_at) >= julianday('now', '-7 days')
+                               THEN 1 ELSE 0 END) AS week_muted
+               FROM items WHERE source_id = ?""",
+            (source_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    return {
+        "hours_since": row["hours_since"],
+        "week_total": row["week_total"] or 0,
+        "week_muted": row["week_muted"] or 0,
+    }

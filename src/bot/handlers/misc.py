@@ -5,8 +5,10 @@ from pathlib import Path
 from pyrogram import filters as pf
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from src.bot.home import render_home
+from src.bot.stats import render_stats
+from src.bot.state import _pending
 from src.config import settings
-from src.db.models import get_categories, get_db
 from src.dispatcher.digest_builder import send_digest
 from src.dispatcher.sender import send_document, send_reply
 
@@ -71,6 +73,9 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_message(pf.command("digest") & admin_msg)
     async def cmd_digest(_, message: Message) -> None:
+        await _run_digest(message)
+
+    async def _run_digest(message: Message) -> None:
         log.info("Manual digest triggered by user")
         status_msg = await message.reply("⏳ Building digest...")
 
@@ -91,50 +96,23 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_message(pf.command("stats") & admin_msg)
     async def cmd_stats(_, message: Message) -> None:
-        async with get_db() as db:
-            async with db.execute(
-                "SELECT COUNT(*) as total FROM items WHERE processed_at >= datetime('now', '-24 hours')"
-            ) as cur:
-                total = (await cur.fetchone())["total"]
-            async with db.execute("SELECT COUNT(*) as unsent FROM items WHERE sent = 0") as cur:
-                unsent = (await cur.fetchone())["unsent"]
-            async with db.execute(
-                """SELECT sources.name, sources.category, sources.type,
-                          SUM(CASE WHEN items.processed_at >= datetime('now', '-24 hours') THEN 1 ELSE 0 END) as cnt,
-                          SUM(CASE WHEN items.sent = 0 THEN 1 ELSE 0 END) as unsent_cnt
-                   FROM items JOIN sources ON items.source_id = sources.id
-                   LEFT JOIN categories ON sources.category = categories.name
-                   GROUP BY sources.id
-                   HAVING cnt > 0 OR unsent_cnt > 0
-                   ORDER BY COALESCE(categories.sort_order, 999), sources.category,
-                            CASE WHEN sources.type = 'telegram' THEN 0 ELSE 1 END,
-                            cnt DESC"""
-            ) as cur:
-                by_source = await cur.fetchall()
+        await send_reply(message.chat.id, await render_stats(), reply_to_message_id=message.id)
 
-        cats = await get_categories()
-        cat_emoji = {c["name"]: c["emoji"] for c in cats}
+    @bot.on_callback_query(pf.regex(r"^home_stats$") & admin_cb)
+    async def cb_home_stats(_, query: CallbackQuery) -> None:
+        await query.answer()
+        await send_reply(query.message.chat.id, await render_stats())
 
-        pending_part = f"  <b>{unsent}</b> pending" if unsent else ""
-        lines = ["📊 <b>Stats</b>", "", f"<tg-spoiler><b>{total}</b></tg-spoiler> collected (24h){pending_part}"]
-
-        if by_source:
-            by_cat: dict[str, list] = {}
-            for r in by_source:
-                by_cat.setdefault(r["category"], []).append(r)
-            for cat_name, sources in by_cat.items():
-                emoji = cat_emoji.get(cat_name, "📌")
-                block_lines = [f"{emoji} <b>{escape(cat_name)}</b>"]
-                for r in sources:
-                    type_label = "tg" if r["type"] == "telegram" else "rss"
-                    unsent_part = f"  ({r['unsent_cnt']}⏳)" if r["unsent_cnt"] else ""
-                    block_lines.append(f"[{type_label}] {escape(r['name'])} · <tg-spoiler>{r['cnt']}</tg-spoiler>{unsent_part}")
-                lines.append("<blockquote expandable>" + "\n".join(block_lines) + "</blockquote>")
-
-        await send_reply(message.chat.id, "\n".join(lines), reply_to_message_id=message.id)
+    @bot.on_callback_query(pf.regex(r"^home_logs$") & admin_cb)
+    async def cb_home_logs(_, query: CallbackQuery) -> None:
+        await query.answer()
+        await _send_log_tail(query.message)
 
     @bot.on_message(pf.command("logs") & admin_msg)
     async def cmd_logs(_, message: Message) -> None:
+        await _send_log_tail(message)
+
+    async def _send_log_tail(message: Message) -> None:
         log_file = Path(settings.database_path).parent / "logs" / "sentinel.log"
         if not log_file.exists():
             await message.reply("📄 <b>Log</b>\n\nNo log file yet.")
@@ -160,13 +138,30 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
             log.exception("Log download failed: %s", exc)
             await query.message.reply(f"Failed to send log file: {exc}")
 
-    @bot.on_message(pf.command("start") & admin_msg)
+    @bot.on_message(pf.command(["start", "home"]) & admin_msg)
     async def cmd_start(_, message: Message) -> None:
-        await message.reply(
-            "<b>TelegramSentinel</b>\n\n"
-            "/categories — manage categories &amp; sources\n"
-            "/blocked — content filter\n\n"
-            "/digest — send digest now\n"
-            "/stats — statistics\n"
-            "/logs — recent log entries"
+        text, kb = await render_home()
+        await message.reply(text, reply_markup=kb)
+
+    @bot.on_callback_query(pf.regex(r"^home$") & admin_cb)
+    async def cb_home(_, query: CallbackQuery) -> None:
+        _pending.pop(query.from_user.id, None)
+        text, kb = await render_home()
+        await query.message.edit_text(text, reply_markup=kb)
+
+    @bot.on_callback_query(pf.regex(r"^home_digest$") & admin_cb)
+    async def cb_home_digest(_, query: CallbackQuery) -> None:
+        # A digest is outward-facing and cannot be recalled, so the button asks
+        # first — and the confirming button names the action, not just "Yes".
+        await query.message.edit_text(
+            "▶️ <b>Send digest now?</b>\n\n<i>Everything currently waiting goes out immediately.</i>",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("▶️ Send it", callback_data="home_digest_go"),
+                InlineKeyboardButton("« Home", callback_data="home"),
+            ]]),
         )
+
+    @bot.on_callback_query(pf.regex(r"^home_digest_go$") & admin_cb)
+    async def cb_home_digest_go(_, query: CallbackQuery) -> None:
+        await query.answer()
+        await _run_digest(query.message)

@@ -14,6 +14,7 @@ from src.db.sources import (
     source_exists,
     add_source,
     get_pending_sources,
+    get_error_sources,
     set_source_pending_msg_id,
     set_source_last_message_id,
     rename_source,
@@ -33,6 +34,7 @@ from src.db.sources import (
     place_source_at_bottom,
     set_source_prompt_extra,
     get_silent_sources,
+    get_source_health,
     reorder_source,
 )
 from src.db.items import (
@@ -46,6 +48,8 @@ from src.db.items import (
     mark_blocked,
     log_digest,
     get_recent_digests,
+    count_unsent_items,
+    get_last_digest,
     prune_old_items,
     set_item_embeddings,
     mark_duplicate,
@@ -78,15 +82,17 @@ from src.db.blocked import (
 )
 __all__ = [
     "get_db", "init_db", "get_app_setting", "set_app_setting",
-    "source_exists", "add_source", "get_pending_sources", "set_source_pending_msg_id",
+    "source_exists", "add_source", "get_pending_sources", "get_error_sources", "set_source_pending_msg_id",
     "set_source_last_message_id", "rename_source", "activate_source", "update_source_url",
     "set_source_chat_id", "find_sources_by_chat_id", "increment_source_fail_count",
     "reset_source_fail_count", "update_source_status", "revive_error_rss_sources", "remove_source", "get_source",
     "get_active_sources", "get_sources_by_category", "reassign_source_category",
     "place_source_at_bottom", "set_source_prompt_extra", "get_silent_sources", "reorder_source",
+    "get_source_health",
     "is_seen", "save_item", "get_unsent_items", "get_sent_empty_items",
     "update_item_classification", "increment_classify_attempts", "mark_sent", "mark_blocked", "log_digest", "get_recent_digests",
     "prune_old_items", "set_item_embeddings", "mark_duplicate", "get_recent_embedded_items",
+    "count_unsent_items", "get_last_digest",
     "get_duplicate_links",
     "category_exists", "get_categories", "add_category", "update_category",
     "move_sources_to_category", "delete_sources_by_category", "remove_category",

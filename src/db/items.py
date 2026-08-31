@@ -208,6 +208,21 @@ async def get_recent_digests(hours: int) -> list:
             return await cur.fetchall()
 
 
+async def count_unsent_items() -> int:
+    async with get_db() as db:
+        async with db.execute("SELECT COUNT(*) AS n FROM items WHERE sent = 0") as cur:
+            return (await cur.fetchone())["n"]
+
+
+async def get_last_digest() -> aiosqlite.Row | None:
+    """Most recent digest-log row, for the home screen's "last digest" line."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT sent_at, items_total, status FROM digest_log ORDER BY sent_at DESC LIMIT 1"
+        ) as cur:
+            return await cur.fetchone()
+
+
 async def prune_old_items(retention_days: int) -> int:
     """Delete already-sent items older than retention_days to bound table
     growth. Trade-off: RSS dedup relies on these rows (is_seen checks

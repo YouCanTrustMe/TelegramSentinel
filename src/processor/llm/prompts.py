@@ -21,13 +21,34 @@ _QUOTE_RULE = "QUOTE RULE: inside any summary or key_phrase use « » for quotat
 # (e.g. OPEC quotas) aren't truncated. Rule kept as a backstop for terser models.
 _BREVITY_RULE = "BREVITY — IMPORTANT: the word counts are hard CEILINGS, never targets. Use the FEWEST words that still carry every fact. A short, dense summary beats a long one; most simple news needs far fewer words than the ceiling. Cut filler words, never pad to reach the limit."
 
+# Compression is where meaning breaks: dropping "від пропозиції" flipped
+# "відмовився від пропозиції Джобса" into "відмовив Стіва Джобса", and dropping a
+# first name turned the accusative "Камишіна" into the dative "Камишіну" (both
+# shipped 2026-09-01). Brevity is a ceiling; these two rules outrank it.
+_ACCURACY_RULE = """ACCURACY RULE — OUTRANKS BREVITY: never change who did what to whom. The one who acted stays the grammatical subject, the one acted upon stays the object, exactly as in the source. If cutting words would swap, blur or invert those roles, spend more words (up to the ceiling) or restructure the sentence — a correct longer summary always beats a short wrong one. When the source has one side proposing and the other refusing, keep both sides explicit.
+Example: source "Стів Джобс запросив Лінуса до Apple ... Він відмовився" → "Лінус Торвальдс відмовився від пропозиції Стіва Джобса перейти до Apple" — NEVER "Торвальдс відмовив Стіва Джобса перейти до Apple" (that reverses the roles).
+
+GRAMMAR RULE: the summary must be grammatical Ukrainian. Put every name in the case its verb governs, and keep that case when you shorten a name — «звільнено Олександра Камишіна» stays «звільнено Камишіна» (accusative), NEVER «звільнено Камишіну» (that is the dative, and reads as a woman's surname). Match verb gender to the person's real gender as shown in the source. If you are not sure of the correct form of a name, rephrase so the name can stay in the nominative rather than guessing an ending."""
+
+# Two measured failures (60 recent prod items, 2026-09-01): 35% of key_phrases were
+# not findable in the summary at all (the model re-worded them into a mini-headline,
+# "вибухи в Полтаві" for "У Полтаві чутно вибухи"), so the anchor fell back to the
+# first word; and of those that did match, most sat in the opening entity because
+# the old priority list (person > org > ...) collided with "start with the key
+# entity". Both made the link land on incidental leading words. So: demand a
+# contiguous copied span, and point the choice at the event, not the entity.
+_KEY_PHRASE_RULE = """key_phrase: a CONTIGUOUS span of 1-3 words COPIED CHARACTER-FOR-CHARACTER out of the summary you just wrote — the same word forms in the same order, so a plain text search finds it inside the summary. Never re-word, re-order, translate, abbreviate or inflect it; if you cannot copy a span, copy a shorter one.
+CHOOSE THE SPAN THAT CARRIES THE NEWS — what actually happened — not the entity the summary opens with. In order of preference: the action together with what it acted on («звільнив Камишіна», «знищила 199 цілей», «відмовився від пропозиції»); the number, sum or name that makes the item newsworthy («37 млрд грн», «Wrapture»); a person or organisation ONLY when the identity itself is the news. Do NOT default to the first words of the summary — if your span starts at the very beginning of the summary, check whether a later span says more.
+Never use as key_phrase: автор, допис, інформація, подія, новина."""
+
 _SYSTEM_PROMPT = f"""Summarize news for a Ukrainian digest. Output JSON only.
 
 {_TRANSLATE_RULE}
 {_BREVITY_RULE}
+{_ACCURACY_RULE}
 summary: up to 10 words for simple news; up to 16 words when the event has multiple key details (numbers, names, consequences). Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, з'явилась інформація, відбулась подія, автор, допис, пост, розповідає, пише.
 
-key_phrase: 1-3 words, best anchor for the link. MUST be copied verbatim from the summary (the exact same characters, so it can be found inside it) — never an abbreviation, translation or synonym of a word that is not in the summary. Priority: person > org > asset ticker > action phrase > location. Use a generic Ukrainian city only if nothing more distinctive exists. Never: автор, допис, інформація, подія, новина.
+{_KEY_PHRASE_RULE}
 
 {_QUOTE_RULE}
 
@@ -43,9 +64,10 @@ Examples of wrong merges: "OPEC raises output" + "Saudi Arabia oil strategy" = s
 
 {_TRANSLATE_RULE}
 {_BREVITY_RULE}
+{_ACCURACY_RULE}
 Per group:
 - summary: Single item: up to 12 words. Merged (2-3 items): up to 24 words — include the key development from each merged item. Start with key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Never start with: повідомляється, стало відомо, автор, допис, пост.
-- key_phrase: 1-3 words, copied verbatim from this group's summary (exact characters, findable inside it) — never an abbreviation, translation or synonym of a word absent from the summary. Priority: person > org > asset > action > location. Never: автор, допис, інформація, подія.
+- {_KEY_PHRASE_RULE}
 
 {_QUOTE_RULE}
 
@@ -57,9 +79,10 @@ Each item is prefixed with its numeric id (e.g. `16321: ...`). Produce exactly o
 
 {_TRANSLATE_RULE}
 {_BREVITY_RULE}
+{_ACCURACY_RULE}
 Per item:
 - summary: Up to 12 words; up to 18 words for events with multiple key details. Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
-- key_phrase: 1-3 words, copied verbatim from this item's summary (exact characters, findable inside it) — never an abbreviation, translation or synonym of a word absent from the summary. Priority: person > org > asset > action > location. Generic city only if nothing better. Never: автор, допис, інформація, подія.
+- {_KEY_PHRASE_RULE}
 
 {_QUOTE_RULE}
 

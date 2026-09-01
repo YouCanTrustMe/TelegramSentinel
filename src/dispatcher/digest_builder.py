@@ -51,24 +51,97 @@ def _grow_anchor(text: str, idx: int, end: int) -> int:
     enough to tap on mobile: complete the current word, then pull in following
     words until the span is at least _MIN_ANCHOR_CHARS long (or text runs out)."""
     n = len(text)
-    while end < n and re.match(r"\w", text[end], re.UNICODE):
+    while end < n and _WORD_CHAR_RE.match(text[end]):
         end += 1
     while end - idx < _MIN_ANCHOR_CHARS and end < n:
-        while end < n and not re.match(r"\w", text[end], re.UNICODE):
+        while end < n and not _WORD_CHAR_RE.match(text[end]):
             end += 1
-        while end < n and re.match(r"\w", text[end], re.UNICODE):
+        while end < n and _WORD_CHAR_RE.match(text[end]):
             end += 1
     return end
 
 
 def _anchor_link(text: str, idx: int, end: int, url: str) -> str:
     """Render `text` with the span [idx:end] — grown to a tappable length — wrapped
-    in a link to `url`; the text before and after the span stays plain."""
+    in a link to `url`; the text before and after the span stays plain, with the
+    sentence's own spacing and punctuation untouched (re-joining the three parts
+    with a space put one in front of every comma following an anchor)."""
     end = _grow_anchor(text, idx, end)
-    before = escape(text[:idx].rstrip())
+    span = text[idx:end]
+    idx += len(span) - len(span.lstrip())
+    end -= len(span) - len(span.rstrip())
     link = f'<a href="{escape(url, quote=True)}">{escape(text[idx:end])}</a>'
-    after = escape(text[end:].lstrip())
-    return " ".join(p for p in [before, link, after] if p)
+    return f"{escape(text[:idx])}{link}{escape(text[end:])}"
+
+
+# The model's key_phrase reaches the summary intact only about two thirds of the
+# time (measured on 60 prod items, 2026-09-01): the rest come back re-worded or
+# re-inflected ("вибухи в Полтаві" for "У Полтаві чутно вибухи"), and the old
+# fallback then anchored the link on the summary's FIRST word — usually a
+# preposition or the leading entity, never the point of the news. So a miss is
+# resolved in two more steps before that fallback is reached.
+_ANCHOR_STEM_CHARS = 4
+# Ukrainian function words: never the whole point of a headline, so they are
+# skipped both when matching a re-worded phrase and when picking a fallback span.
+_ANCHOR_STOPWORDS = frozenset(
+    "і й та а але в у на з із зі до від для про за під над при по о об без крізь через "
+    "як що щоб бо це цей ця ці той та те тих його її їх він вона воно вони ми ви я ти "
+    "не ні також ще вже лише тільки між серед після перед".split()
+)
+# Ukrainian words carry an internal apostrophe (Прем'єр, П'ять) and hyphen
+# (Івано-Франківськ, 16-поверховий); a bare \w+ splits them, and an anchor then
+# starts mid-word — "Прем'<a>єр підписав</a>".
+_WORD_RE = re.compile(r"\w+(?:[-’'ʼ‘]\w+)*", re.UNICODE)
+_WORD_CHAR_RE = re.compile(r"[\w’'ʼ‘]", re.UNICODE)
+
+
+def _stem(word: str) -> str:
+    """Crude inflection-insensitive key: Ukrainian endings vary (Полтаві/Полтава,
+    вибухи/вибух), so compare on a leading slice rather than the whole word."""
+    return word.lower()[:_ANCHOR_STEM_CHARS]
+
+
+def _fallback_anchor(text: str) -> tuple[int, int]:
+    """Anchor span for a summary whose key_phrase matched nothing: the first word
+    that carries meaning — skipping leading function words and the opening
+    entity run, since the summary is instructed to start with the entity."""
+    words = list(_WORD_RE.finditer(text))
+    if not words:
+        return 0, len(text.split(" ", 1)[0])
+    meaningful = [m for m in words if m.group().lower() not in _ANCHOR_STOPWORDS]
+    if not meaningful:
+        return words[0].start(), words[0].end()
+    # Step past the opening capitalised run (a name, org or place) when there is
+    # anything after it; a summary that is only a name keeps the name.
+    i = 0
+    while i < len(meaningful) - 1 and meaningful[i].group()[:1].isupper():
+        i += 1
+    return meaningful[i].start(), meaningful[i].end()
+
+
+def _resolve_anchor(text: str, key_phrase: str) -> tuple[int, int]:
+    """Locate the span of `text` to hang the link on. Exact match first, then a
+    stem match that survives re-wording and inflection, then the fallback span."""
+    if key_phrase:
+        idx = text.lower().find(key_phrase.lower())
+        if idx != -1:
+            return idx, idx + len(key_phrase)
+        wanted = {
+            _stem(m.group())
+            for m in _WORD_RE.finditer(key_phrase)
+            if m.group().lower() not in _ANCHOR_STOPWORDS and len(m.group()) >= 3
+        }
+        if wanted:
+            hits = [m for m in _WORD_RE.finditer(text) if _stem(m.group()) in wanted]
+            if hits:
+                # Keep the span tight: a phrase scattered across the whole summary
+                # is not one anchor, so fall back to its longest single word.
+                span_words = sum(1 for m in _WORD_RE.finditer(text) if hits[0].start() <= m.start() <= hits[-1].start())
+                if span_words <= len(wanted) + 1:
+                    return hits[0].start(), hits[-1].end()
+                best = max(hits, key=lambda m: len(m.group()))
+                return best.start(), best.end()
+    return _fallback_anchor(text)
 
 
 def _progress_bar(done: int, total: int, width: int = 8) -> str:
@@ -114,6 +187,9 @@ def _format_item_base(item: dict) -> str:
         raw = item["raw_text"] or ""
         summary_text = raw[:60].split("\n")[0]
 
+    # A media chip ("📷 Photo") is a label, not a sentence: the whole chip is the
+    # link, so it stays tappable instead of leaving the emoji outside it.
+    is_media_label = summary_text in _MEDIA_LABEL
     summary_text = _MEDIA_LABEL.get(summary_text, summary_text)
 
     summary = escape(summary_text)
@@ -138,14 +214,7 @@ def _format_item_base(item: dict) -> str:
     key_phrase = (row_get(item, "key_phrase", "") or "").strip()
     if url and summary_text.strip():
         rest_text = summary_text.strip()
-        # Anchor on the key phrase when it appears verbatim in the summary;
-        # otherwise fall back to the first word. Either way the span is grown to
-        # a tappable length by _anchor_link.
-        idx = rest_text.lower().find(key_phrase.lower()) if key_phrase else -1
-        if idx == -1:
-            idx, end = 0, len(rest_text.split(" ", 1)[0])
-        else:
-            end = idx + len(key_phrase)
+        idx, end = (0, len(rest_text)) if is_media_label else _resolve_anchor(rest_text, key_phrase)
         return f'{prefix}{_anchor_link(rest_text, idx, end, url)}{suffix}'
     if url:
         escaped_url = escape(url, quote=True)

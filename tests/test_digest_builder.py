@@ -119,10 +119,42 @@ def test_long_key_phrase_anchor_is_left_intact():
     assert line == '<a href="https://t.me/x/1">Microsoft</a> скоротить 650 працівників'
 
 
-def test_key_phrase_absent_falls_back_to_grown_first_word():
-    # key_phrase not present verbatim (Fed vs Фед) → first word, grown to tappable size.
+def test_key_phrase_absent_falls_back_past_the_leading_entity():
+    # key_phrase not present in any form (Fed vs Фед): the fallback skips the
+    # opening entity and anchors on the verb, not on the summary's first word.
     line = _line("Фед підтримує ставки", "Fed")
-    assert line == '<a href="https://t.me/x/1">Фед підтримує</a> ставки'
+    assert line == 'Фед <a href="https://t.me/x/1">підтримує</a> ставки'
+
+
+def test_reworded_key_phrase_is_matched_by_stem():
+    # The model re-words its own phrase ("вибухи в Полтаві" for a summary that
+    # says "У Полтаві чутно вибухи"); the anchor still lands on those words.
+    line = _line("У Полтаві чутно вибухи", "вибухи в Полтаві")
+    assert line == 'У <a href="https://t.me/x/1">Полтаві чутно вибухи</a>'
+
+
+def test_reinflected_key_phrase_is_matched_by_stem():
+    line = _line("У Києві загорівся 16-поверховий будинок", "16-поверхівка загорілася")
+    assert line == 'У Києві <a href="https://t.me/x/1">загорівся 16-поверховий</a> будинок'
+
+
+def test_scattered_key_phrase_words_anchor_on_one_word_not_the_whole_line():
+    # Matches at both ends of the summary are not one phrase: anchor the longest
+    # matched word rather than wrapping the entire line in the link.
+    line = _line("Bitmine Tom Lee купив 51 000 ETH на 126 мільйонів", "Bitmine купив ETH")
+    assert line == '<a href="https://t.me/x/1">Bitmine</a> Tom Lee купив 51 000 ETH на 126 мільйонів'
+
+
+def test_missing_key_phrase_skips_the_stopword_and_the_place():
+    # No key phrase at all: the verb carries the news, the leading preposition
+    # and place name do not.
+    line = _line("У Полтаві пролунали вибухи", "")
+    assert line == 'У Полтаві <a href="https://t.me/x/1">пролунали</a> вибухи'
+
+
+def test_summary_that_is_only_an_entity_keeps_the_entity_as_anchor():
+    line = _line("Microsoft", "")
+    assert line == '<a href="https://t.me/x/1">Microsoft</a>'
 
 
 def test_dedup_source_links_wrapped_in_parentheses():
@@ -301,3 +333,21 @@ def test_unparsable_published_time_leaves_no_prefix():
     item = {"original_url": "https://t.me/x/1", "summary": "Fed holds rates",
             "raw_text": "", "published_at": "not-a-date", "key_phrase": "Fed"}
     assert digest_builder._format_item_base(item).startswith('<a href=')
+
+
+def test_anchor_before_punctuation_keeps_the_comma_tight():
+    # Re-joining the three parts with a space used to put one before every comma
+    # that followed an anchor — now common, since the fallback anchors mid-sentence.
+    line = _line("Кабмін звільнив, потім призначив міністра", "звільнив")
+    assert line == 'Кабмін <a href="https://t.me/x/1">звільнив</a>, потім призначив міністра'
+
+
+def test_anchor_never_starts_inside_an_apostrophised_word():
+    # A bare \\w+ split "Прем'єр" and anchored from "єр".
+    line = _line("Прем'єр підписав угоду з ЄС", "")
+    assert line == 'Прем&#x27;єр <a href="https://t.me/x/1">підписав</a> угоду з ЄС'
+
+
+def test_hyphenated_place_is_one_word_for_the_anchor():
+    line = _line("У Івано-Франківську відкрили міст", "")
+    assert line == 'У Івано-Франківську <a href="https://t.me/x/1">відкрили</a> міст'

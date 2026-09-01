@@ -9,7 +9,7 @@ Personal AI news digest bot. Collects posts from Telegram channels and RSS feeds
 - **Per-source prompt instructions** — custom AI hints per source (e.g. "keep proper nouns", "focus on numbers", "no merge", "no translate")
 - **Digest** — sent on a per-category schedule, grouped by category → source; same-topic follow-ups within a source are AI-merged into one entry
 - **Content filter** — natural-language rules (e.g. "local traffic accidents without casualties", "ads and promos") that an LLM applies each digest to silently exclude matching items
-- **Cross-source dedup** — when several sources report the same story, only the highest-priority one is shown; the others become clickable source links beside it. Gemini embeddings (`GEMINI_API_KEY`) pre-select candidates and an LLM confirms each is the same event before hiding it, so vocabulary overlap alone never drops a distinct story; fail-open throughout
+- **Cross-source dedup** — when several sources report the same story, only the highest-priority one is shown; the others become clickable source links beside it. `mistral-embed` embeddings (`MISTRAL_API_KEY`) pre-select candidates and an LLM confirms each is the same event before hiding it, so vocabulary overlap alone never drops a distinct story; fail-open throughout
 - **Pending sources** — channels that can't be joined immediately are saved and retried automatically every hour
 - **Full inline-keyboard admin UI** — manage everything from within Telegram, no terminal needed after deploy
 
@@ -26,7 +26,7 @@ Personal AI news digest bot. Collects posts from Telegram channels and RSS feeds
                           Digest builder
                            • group by category / source
                            • AI merges same-topic items
-                           • cross-source dedup (Gemini embeddings + LLM confirm)
+                           • cross-source dedup (embeddings + LLM confirm)
                            • LLM content filter
                            • expandable blockquote per source
                                       │
@@ -87,7 +87,7 @@ src/
       prompts.py                LLM prompt templates
     dedup/
       deduplicator.py           message_id = tg_{channel}_{id} or md5(url:id)
-      embedder.py               Gemini embedding transport + cosine/blob helpers
+      embedder.py               embedding transport (Mistral/Gemini) + cosine/blob helpers
       cross_dedup.py            cross-source dedup + within-source clustering on shared embeddings
       merge.py                  within-source same-event merge (LLM-arbitrated)
   dispatcher/
@@ -135,7 +135,7 @@ SQLite at `data/sentinel.db`.
 | Layer | Tech |
 |---|---|
 | Collectors | Pyrogram 2.0, feedparser |
-| AI | Mistral (`mistral-small`) → Gemini (`3.5-flash-lite`) → Groq (`gpt-oss-120b`) + Gemini embeddings for dedup |
+| AI | Mistral (`mistral-small`) → Gemini (`3.5-flash-lite`) → Groq (`gpt-oss-120b`) + `mistral-embed` for dedup |
 | Storage | SQLite + aiosqlite |
 | Scheduler | APScheduler 3.x |
 | Bot | Pyrogram bot + Bot HTTP API |

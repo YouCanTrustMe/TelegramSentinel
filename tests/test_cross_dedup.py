@@ -85,7 +85,7 @@ async def test_confirm_mutes_keeps_llm_rejected_and_auto_confirms_near_dup(monke
 async def test_confirm_band_pair_reaches_llm_and_mutes(monkeypatch):
     """A cross-source pair in the confirm band (dedup_log_floor <= cos < dedup_threshold)
     must be unioned and LLM-confirmed, not silently dropped — Ukrainian war-news
-    rephrasings of one event routinely sit at 0.80-0.86."""
+    rephrasings of one event routinely sit just above the union floor."""
     marked: list[tuple[int, int]] = []
 
     async def fake_recent(_hours):
@@ -106,7 +106,7 @@ async def test_confirm_band_pair_reaches_llm_and_mutes(monkeypatch):
     monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
     monkeypatch.setattr(cd.settings, "dedup_shadow", False)
 
-    ang = math.radians(34)  # cosine ~0.829, inside the 0.80-0.86 band
+    ang = math.radians(28)  # cosine ~0.883, inside the 0.86-0.92 confirm band
     items = [
         {"id": 1, "summary": "Khmelnytskyi air raid downed 5 drones", "category": "feed",
          "source_id": 10, "source_name": "A", "source_sort_order": 0, "published_at": "1"},
@@ -189,7 +189,7 @@ async def test_near_dup_chain_collapses_to_surviving_primary(monkeypatch):
     monkeypatch.setattr(cd.settings, "dedup_shadow", False)
 
     a = math.radians(3)   # X(id=2) & Z(id=3): cosine ~0.9986 -> near-dup, primary X
-    y = math.radians(33)  # X(id=2) & Y(id=1): cosine ~0.839 -> floor band, Y wins on priority
+    y = math.radians(27)  # X(id=2) & Y(id=1): cosine ~0.891 -> floor band, Y wins on priority
     items = [
         {"id": 1, "summary": "strike variant", "category": "feed",
          "source_id": 30, "source_name": "Y", "source_sort_order": 0, "published_at": "1"},

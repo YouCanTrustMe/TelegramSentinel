@@ -108,9 +108,49 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
         await query.answer()
         await _send_log_tail(query.message)
 
+    @bot.on_message(pf.command("folder_audit") & admin_msg)
+    async def cmd_folder_audit(_, message: Message) -> None:
+        await send_reply(message.chat.id, await _render_folder_audit(), reply_to_message_id=message.id)
+
     @bot.on_message(pf.command("logs") & admin_msg)
     async def cmd_logs(_, message: Message) -> None:
         await _send_log_tail(message)
+
+    async def _render_folder_audit() -> str:
+        from src.collectors.folder_manager import SENTINEL_FOLDER, audit_folder, folder_channel_ids
+        from src.db.models import get_sources_of_type
+
+        try:
+            in_folder = await folder_channel_ids()
+        except Exception as exc:
+            log.warning("Folder audit failed to read the folder: %s", exc)
+            return f"⚠️ Could not read the <b>{SENTINEL_FOLDER}</b> folder: {escape(str(exc))}"
+        if in_folder is None:
+            return f"⚠️ No <b>{SENTINEL_FOLDER}</b> folder on the userbot account."
+
+        sources = [dict(row) for row in await get_sources_of_type("telegram")]
+        report = audit_folder(in_folder, sources)
+        log.info("Folder audit: %d in folder, %d tracked, %d stale, %d missing, %d without chat_id",
+                 report["in_folder"], report["tracked"], len(report["stale"]),
+                 len(report["missing"]), len(report["unknown"]))
+
+        lines = [f"<b>Folder audit</b> · {SENTINEL_FOLDER}",
+                 f"<i>{report['in_folder']} in folder · {report['tracked']} tracked</i>"]
+        if report["stale"]:
+            lines.append(f"\n<b>In folder, not tracked</b> ({len(report['stale'])})")
+            lines.append("<i>a source was removed while its channel was renamed — "
+                         "the userbot may still be a member</i>")
+            lines += [f"· <code>-100{cid}</code>" for cid in report["stale"][:20]]
+        if report["missing"]:
+            lines.append(f"\n<b>Tracked, not in folder</b> ({len(report['missing'])})")
+            lines += [f"· {escape(s['name'])} <i>{s['status']}</i>" for s in report["missing"][:20]]
+        if report["unknown"]:
+            lines.append(f"\n<b>No chat_id stored</b> ({len(report['unknown'])})")
+            lines.append("<i>never resolved, so membership cannot be checked</i>")
+            lines += [f"· {escape(s['name'])}" for s in report["unknown"][:20]]
+        if not (report["stale"] or report["missing"] or report["unknown"]):
+            lines.append("\n✅ Folder and sources agree.")
+        return "\n".join(lines)
 
     async def _send_log_tail(message: Message) -> None:
         log_file = Path(settings.database_path).parent / "logs" / "sentinel.log"

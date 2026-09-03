@@ -34,6 +34,7 @@ from src.db.sources import (
     place_source_at_bottom,
     set_source_prompt_extra,
     get_silent_sources,
+    get_sources_of_type,
     get_source_health,
     reorder_source,
 )
@@ -88,7 +89,7 @@ __all__ = [
     "set_source_chat_id", "find_sources_by_chat_id", "increment_source_fail_count",
     "reset_source_fail_count", "update_source_status", "revive_error_rss_sources", "remove_source", "get_source",
     "get_active_sources", "get_sources_by_category", "reassign_source_category",
-    "place_source_at_bottom", "set_source_prompt_extra", "get_silent_sources", "reorder_source",
+    "place_source_at_bottom", "set_source_prompt_extra", "get_silent_sources", "get_sources_of_type", "reorder_source",
     "get_source_health",
     "is_seen", "save_item", "get_unsent_items", "get_sent_empty_items",
     "update_item_classification", "increment_classify_attempts", "mark_sent", "mark_blocked", "log_digest", "get_recent_digests",

@@ -176,6 +176,17 @@ async def get_source(source_id: int) -> aiosqlite.Row | None:
             return await cur.fetchone()
 
 
+async def get_sources_of_type(type_: str) -> list[aiosqlite.Row]:
+    """Every source of a type, whatever its status — an audit has to see the paused
+    and errored ones too, since the userbot stays a member of their channels."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT * FROM sources WHERE type = ? ORDER BY category ASC, sort_order ASC, name ASC",
+            (type_,),
+        ) as cur:
+            return await cur.fetchall()
+
+
 async def get_active_sources(type_: str | None = None) -> list[aiosqlite.Row]:
     async with get_db() as db:
         if type_:

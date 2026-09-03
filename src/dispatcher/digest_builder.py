@@ -176,7 +176,10 @@ def _format_item(item: dict, dup_links: dict[int, list[tuple[str, str]]] | None 
             if url:
                 links.append(f'<a href="{escape(url, quote=True)}">{escape(name)}</a>')
     if links:
-        return f"{line} ({', '.join(links)})"
+        # Italic including the brackets: the trailing source names are provenance, not
+        # part of the headline, and the slant separates them at a glance from the link
+        # the summary itself carries.
+        return f"{line} <i>({', '.join(links)})</i>"
     return line
 
 

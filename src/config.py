@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # the same event before muting (cross_dedup._confirm_mutes), so the 0.86
     # threshold can't silently drop a distinct cross-source story on vocabulary alone.
     dedup_shadow: bool = False
+    # Which source of a duplicated story stays visible while the others move into the
+    # parenthesised links. A Telegram original is one tap inside the app; an RSS one
+    # leaves for a browser, so it wins over the manual sort_order unless turned off.
+    primary_prefers_telegram: bool = True
     # EVERY threshold below is on the ACTIVE model's cosine scale and does not carry
     # over to another one: mistral-embed puts unrelated same-category news at ~0.83
     # where gemini-embedding-001 put it near 0.60, so the old 0.82 floor would have

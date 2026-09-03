@@ -63,12 +63,17 @@ def _field(item, key, default=None):
     return default if val is None else val
 
 
-def _sort_key(item) -> tuple[float, str]:
-    """Primary selection: lowest source sort_order (highest user priority, same
-    order the digest renders in), tie-broken by earliest published_at."""
+def _sort_key(item) -> tuple[int, float, str]:
+    """Primary selection: a Telegram source first (a t.me original opens in the app in
+    one tap, where an RSS original is a browser trip and often a paywall), then lowest
+    source sort_order (highest user priority, same order the digest renders in),
+    tie-broken by earliest published_at. Set primary_prefers_telegram=false to let
+    sort_order alone decide."""
+    tg = 0 if (settings.primary_prefers_telegram
+               and _field(item, "source_type") == "telegram") else 1
     so = _field(item, "source_sort_order")
     so = so if isinstance(so, (int, float)) else 1e9
-    return (so, _field(item, "published_at", "9999") or "9999")
+    return (tg, so, _field(item, "published_at", "9999") or "9999")
 
 
 class _UnionFind:

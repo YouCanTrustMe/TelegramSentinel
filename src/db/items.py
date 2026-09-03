@@ -47,7 +47,7 @@ async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlit
         if categories:
             placeholders = ",".join("?" * len(categories))
             query = f"""SELECT items.*, sources.name AS source_name, sources.prompt_extra AS source_prompt_extra,
-                      sources.sort_order AS source_sort_order
+                      sources.sort_order AS source_sort_order, sources.type AS source_type
                FROM items
                LEFT JOIN sources ON items.source_id = sources.id
                WHERE items.sent = 0 AND items.category IN ({placeholders})
@@ -56,7 +56,7 @@ async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlit
                 return await cur.fetchall()
         async with db.execute(
             """SELECT items.*, sources.name AS source_name, sources.prompt_extra AS source_prompt_extra,
-                  sources.sort_order AS source_sort_order
+                  sources.sort_order AS source_sort_order, sources.type AS source_type
                FROM items
                LEFT JOIN sources ON items.source_id = sources.id
                WHERE items.sent = 0

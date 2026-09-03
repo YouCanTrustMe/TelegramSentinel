@@ -351,3 +351,24 @@ def test_regroup_never_crosses_categories():
     vec = {2: _band_vec(0), 3: _band_vec(1)}  # cosine ~1.0, would otherwise collapse
 
     assert cd._regroup_rejected([(2, 1), (3, 1)], [{2, 3}], item_by_id, vec) == {}
+
+def test_sort_key_prefers_a_telegram_original_over_a_higher_ranked_feed():
+    tg = {"id": 1, "source_type": "telegram", "source_sort_order": 9, "published_at": "2026-09-03"}
+    rss = {"id": 2, "source_type": "rss", "source_sort_order": 0, "published_at": "2026-09-03"}
+
+    assert min([tg, rss], key=cd._sort_key) is tg
+
+
+def test_sort_key_falls_back_to_sort_order_when_the_preference_is_off(monkeypatch):
+    monkeypatch.setattr(cd.settings, "primary_prefers_telegram", False)
+    tg = {"id": 1, "source_type": "telegram", "source_sort_order": 9, "published_at": "2026-09-03"}
+    rss = {"id": 2, "source_type": "rss", "source_sort_order": 0, "published_at": "2026-09-03"}
+
+    assert min([tg, rss], key=cd._sort_key) is rss
+
+
+def test_sort_key_keeps_sort_order_between_two_telegram_sources():
+    early = {"id": 1, "source_type": "telegram", "source_sort_order": 0, "published_at": "2026-09-03T10:00"}
+    late = {"id": 2, "source_type": "telegram", "source_sort_order": 3, "published_at": "2026-09-03T09:00"}
+
+    assert min([early, late], key=cd._sort_key) is early

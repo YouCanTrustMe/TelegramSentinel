@@ -337,6 +337,12 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
     for row in window:
         if row["id"] in current_ids or not row["sent"]:
             continue
+        # Current items with no readable text are never embedded (ensure_embeddings
+        # skips them), but a stored vector can still exist — a backfill that predates
+        # that guard, say. All placeholders embed to nearly the same point, so letting
+        # one into the comparison pool offers the digest a meaningless primary.
+        if _is_placeholder(row_get(row, "summary", "") or ""):
+            continue
         v = from_blob(row["embedding"])
         if v is not None:
             sent_pool[row["category"] or "other"].append(

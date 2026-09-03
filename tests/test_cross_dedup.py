@@ -7,6 +7,7 @@ import numpy as np
 
 import src.processor.dedup.cross_dedup as cd
 from src.processor.dedup.cross_dedup import _UnionFind, _is_placeholder, cluster_within_source
+from src.processor.dedup.embedder import to_blob
 
 
 def test_union_find_groups_transitively():
@@ -372,3 +373,39 @@ def test_sort_key_keeps_sort_order_between_two_telegram_sources():
     late = {"id": 2, "source_type": "telegram", "source_sort_order": 3, "published_at": "2026-09-03T09:00"}
 
     assert min([early, late], key=cd._sort_key) is early
+
+
+async def test_sent_pool_ignores_placeholder_vectors(monkeypatch):
+    """A media-only post carries no readable text, so every one of them embeds to
+    nearly the same point. Current items are already kept out of the vector map; a
+    stored vector from an older backfill must not sneak into the sent pool either."""
+    marked: list[tuple[int, int]] = []
+
+    async def fake_recent(_hours):
+        return [{"id": 99, "category": "feed", "source_id": 7, "published_at": "2026-09-01",
+                 "sent": 1, "embedding": to_blob(_vec(1.0, 0.0)), "summary": "no text",
+                 "source_sort_order": 0}]
+
+    async def fake_mark(mid, pid):
+        marked.append((mid, pid))
+
+    async def fake_links(_ids):
+        return {}
+
+    monkeypatch.setattr(cd, "get_recent_embedded_items", fake_recent)
+    monkeypatch.setattr(cd, "mark_duplicate", fake_mark)
+    monkeypatch.setattr(cd, "get_duplicate_links", fake_links)
+    monkeypatch.setattr(cd.settings, "dedup_shadow", False)
+
+    items = [
+        {"id": 1, "category": "feed", "source_id": 1, "source_sort_order": 0,
+         "published_at": "2026-09-03", "summary": "Real news about a strike", "source_type": "telegram"},
+        {"id": 2, "category": "feed", "source_id": 2, "source_sort_order": 1,
+         "published_at": "2026-09-03", "summary": "Another unrelated story", "source_type": "telegram"},
+    ]
+    vec = {1: _vec(1.0, 0.0), 2: _vec(0.0, 1.0)}  # orthogonal: only the pool could link them
+
+    survivors, _ = await cd.deduplicate(items, vec)
+
+    assert [it["id"] for it in survivors] == [1, 2]
+    assert marked == []

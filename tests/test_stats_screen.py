@@ -27,7 +27,7 @@ def test_numbers_are_not_hidden_behind_spoilers():
 
 def test_quiet_sources_lead_the_screen():
     text = stats_text(_state(quiet=[("Import AI", 11), ("Index.hr", 6)]))
-    quiet_at = text.index("⏸ Quiet")
+    quiet_at = text.index("💤 Quiet")  # ⏸ now means paused-by-hand
     assert quiet_at < text.index("🌍 world")
     assert "Import AI · 11d" in text
 

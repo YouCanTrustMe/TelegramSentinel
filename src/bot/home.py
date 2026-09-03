@@ -20,6 +20,7 @@ from src.db.models import (
     get_error_sources,
     get_last_digest,
     get_pending_sources,
+    get_paused_sources,
     get_silent_sources,
 )
 
@@ -70,8 +71,10 @@ def home_text(state: dict) -> str:
         # A source the collector gave up on is the loudest thing on this screen:
         # it stopped producing and nothing else says so.
         status = f"⚠️ {state['errored']} failing"
+    elif state["paused"]:
+        status = f"⏸ {state['paused']} paused"
     elif quiet:
-        status = f"⏸ {len(quiet)} quiet"
+        status = f"💤 {len(quiet)} quiet"
     else:
         status = "all clear"
 
@@ -105,7 +108,7 @@ def home_text(state: dict) -> str:
         )
         more = f" +{len(quiet) - 3}" if len(quiet) > 3 else ""
         lines.append("")
-        lines.append(f"<i>⏸ quiet 5+ days: {names}{more}</i>")
+        lines.append(f"<i>💤 quiet 5+ days: {names}{more}</i>")
 
     return "\n".join(lines)
 
@@ -135,6 +138,7 @@ async def gather_home_state() -> dict:
     active = await get_active_sources()
     pending_sources = await get_pending_sources()
     errored = await get_error_sources()
+    paused = await get_paused_sources()
     silent = await get_silent_sources(_QUIET_THRESHOLD_HOURS)
     last = await get_last_digest()
 
@@ -154,8 +158,9 @@ async def gather_home_state() -> dict:
         "next": next_fire(list(slots_by_time(cats)), now),
         "pending": await count_unsent_items(),
         "categories": len(cats),
-        "sources": len(active) + len(pending_sources) + len(errored),
+        "sources": len(active) + len(pending_sources) + len(errored) + len(paused),
         "errored": len(errored),
+        "paused": len(paused),
         "filters": len(await get_blocked_words()),
         "last_digest": last_digest,
         # hours_silent is NULL for a source that has never produced an item — that

@@ -19,7 +19,7 @@ def stats_text(state: dict) -> str:
 
     if state["quiet"]:
         lines.append("")
-        lines.append("<i>⏸ Quiet</i>")
+        lines.append("<i>💤 Quiet</i>")
         lines.append("   ·   ".join(
             f"{escape(name)} · {f'{days}d' if days is not None else 'never'}"
             for name, days in state["quiet"]

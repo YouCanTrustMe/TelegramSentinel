@@ -49,6 +49,14 @@ async def get_error_sources(category: str | None = None) -> list[aiosqlite.Row]:
             return await cur.fetchall()
 
 
+async def get_paused_sources() -> list[aiosqlite.Row]:
+    """Sources put on hold by hand (`status='paused'`): not collected, not summarised,
+    not shown — and easy to forget, so the home screen counts them."""
+    async with get_db() as db:
+        async with db.execute("SELECT * FROM sources WHERE status = 'paused'") as cur:
+            return await cur.fetchall()
+
+
 async def set_source_pending_msg_id(source_id: int, msg_id: int | None) -> None:
     async with get_db() as db:
         await db.execute("UPDATE sources SET pending_msg_id = ? WHERE id = ?", (msg_id, source_id))

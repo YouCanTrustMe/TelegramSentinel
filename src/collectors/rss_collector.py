@@ -175,6 +175,48 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
     return saved
 
 
+async def skip_feed_to_head(source_id: int, name: str, url: str, category: str) -> int | None:
+    """Record everything the feed currently offers as seen-and-retired, so a resumed
+    source starts from now instead of replaying the whole pause.
+
+    An RSS feed has no cursor — the collector's only memory is the message_id of each
+    entry it has stored — so "skip what happened while paused" has to mean storing those
+    entries and retiring them, the same thing pausing does to the queue it inherits."""
+    try:
+        feed = await _parse_with_ua_fallback(url, name)
+    except Exception as exc:
+        # None, not 0: "the feed did not answer" and "the feed had nothing new" lead to
+        # opposite promises on the resume screen.
+        log.warning("Could not read '%s' to skip its backlog on resume: %s", name, exc)
+        return None
+    saved = 0
+    for entry in feed.entries:
+        entry_url = entry.get("link", "")
+        message_id = make_message_id("rss", url, entry_url or entry.get("id", url))
+        if await is_duplicate(message_id):
+            continue
+        raw_text = _compose_raw_text(_strip_html(entry.get("title", "")), _strip_html(entry.get("summary", "")))
+        if not raw_text:
+            continue
+        await save_item(
+            source_id=source_id,
+            message_id=message_id,
+            raw_text=raw_text,
+            original_url=entry_url or None,
+            published_at=None,
+            # Not empty: an empty summary on a sent row is what the classifier's backfill
+            # hunts for, and re-summarising an entry we deliberately never showed would
+            # put it back into the dedup comparison pool.
+            summary=raw_text[:200],
+            category=category,
+            processed_at=datetime.now(timezone.utc).isoformat(),
+            key_phrase="",
+        )
+        saved += 1
+    log.info("RSS '%s': marked %d entry/entries as seen without showing them", name, saved)
+    return saved
+
+
 async def poll_rss_once() -> None:
     try:
         sources = await get_active_sources(type_="rss")

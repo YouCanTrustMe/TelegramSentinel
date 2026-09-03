@@ -68,6 +68,7 @@ def _state(**over):
         "next": ("19:00", 160), "pending": 34, "categories": 5, "sources": 41,
         "filters": 12, "last_digest": {"issue": 243, "time": "14:00", "items": 61},
         "errored": 0,
+        "paused": 0,
         "quiet": [],
     }
     state.update(over)
@@ -90,7 +91,7 @@ def test_a_failing_source_outranks_a_quiet_one_in_the_status():
 
 def test_home_text_names_the_quiet_sources():
     text = home_text(_state(quiet=[("Import AI", 11), ("Index.hr", 6)]))
-    assert "⏸ 2 quiet" in text
+    assert "💤 2 quiet" in text
     assert "Import AI 11d · Index.hr 6d" in text
 
 
@@ -138,3 +139,10 @@ def test_home_digest_button_asks_before_sending():
     # The button opens a confirmation, never the send itself.
     assert "home_digest" in data
     assert "home_digest_go" not in data
+
+
+def test_home_status_calls_out_paused_sources():
+    """A paused source produces nothing on purpose — but it is exactly the kind of
+    thing that gets forgotten, so the header says so once nothing is failing."""
+    assert "⏸ 2 paused" in home_text(_state(paused=2))
+    assert "⚠️ 1 failing" in home_text(_state(paused=2, errored=1))  # failing still wins

@@ -173,7 +173,7 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                     src_text = _source_view_text(s, await get_source_health(src_id))
                     await message.reply(
                         f"✅ Renamed.\n\n{src_text}",
-                        reply_markup=_source_view_keyboard(src_id, cat_name, source_link(s["type"], s["url"])),
+                        reply_markup=_source_view_keyboard(src_id, cat_name, source_link(s["type"], s["url"]), s["status"] == "paused", s["status"] == "pending"),
                     )
                 else:
                     await message.reply(f"✅ Renamed to <b>{escape(new_name)}</b>.")
@@ -221,7 +221,9 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
             log.info("Source prompt updated: id=%s", src_id)
             await message.reply(
                 f"✅ Prompt set for <b>{escape(s['name']) if s else str(src_id)}</b>:\n<i>{escape(text)}</i>",
-                reply_markup=_source_view_keyboard(src_id, s["category"] if s else ""),
+                reply_markup=_source_view_keyboard(src_id, s["category"] if s else "", None,
+                                                   bool(s) and s["status"] == "paused",
+                                                   bool(s) and s["status"] == "pending"),
             )
 
         elif action == "bulk_prompt_category":

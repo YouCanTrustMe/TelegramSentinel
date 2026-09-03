@@ -23,6 +23,7 @@ from src.db.models import (
     add_category,
     add_source,
     category_exists,
+    discard_unsent_items,
     find_sources_by_chat_id,
     get_categories,
     get_source,
@@ -32,8 +33,10 @@ from src.db.models import (
     remove_source,
     reorder_source,
     set_source_chat_id,
+    set_source_last_message_id,
     set_source_pending_msg_id,
     set_source_prompt_extra,
+    update_source_status,
 )
 
 log = logging.getLogger(__name__)
@@ -130,7 +133,7 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
             return
         await query.message.edit_text(
             _source_view_text(s, await get_source_health(src_id)),
-            reply_markup=_source_view_keyboard(src_id, s["category"], source_link(s["type"], s["url"])),
+            reply_markup=_source_view_keyboard(src_id, s["category"], source_link(s["type"], s["url"]), s["status"] == "paused", s["status"] == "pending"),
         )
 
     @bot.on_callback_query(pf.regex(r"^src_reassign:") & admin_cb)
@@ -158,10 +161,81 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
             text = _source_view_text(s, await get_source_health(src_id))
             await query.message.edit_text(
                 f"✅ Reassigned.\n\n{text}",
-                reply_markup=_source_view_keyboard(src_id, cat_name, source_link(s["type"], s["url"])),
+                reply_markup=_source_view_keyboard(src_id, cat_name, source_link(s["type"], s["url"]), s["status"] == "paused", s["status"] == "pending"),
             )
         else:
             await query.message.edit_text("✅ Reassigned.")
+
+    async def _show_source(query: CallbackQuery, src_id: int, prefix: str = "") -> None:
+        s = await get_source(src_id)
+        if not s:
+            await query.answer("Source not found.", show_alert=True)
+            return
+        text = _source_view_text(s, await get_source_health(src_id))
+        await query.message.edit_text(
+            f"{prefix}{text}" if prefix else text,
+            reply_markup=_source_view_keyboard(src_id, s["category"], source_link(s["type"], s["url"]),
+                                               s["status"] == "paused", s["status"] == "pending"),
+        )
+
+    @bot.on_callback_query(pf.regex(r"^src_pause:") & admin_cb)
+    async def cb_src_pause(_, query: CallbackQuery) -> None:
+        src_id = int(query.data.split(":", 1)[1])
+        s = await get_source(src_id)
+        if not s:
+            await query.answer("Source not found.", show_alert=True)
+            return
+        await update_source_status(src_id, "paused")
+        dropped = await discard_unsent_items(src_id)
+        log.info("Source paused: %s (id=%d, %s) | %d queued item(s) retired unshown",
+                 s["name"], src_id, s["type"], dropped)
+        await query.answer("Paused.")
+        note = "⏸ <b>Paused.</b>"
+        if dropped:
+            note += f" <i>{dropped} queued item(s) dropped.</i>"
+        await _show_source(query, src_id, note + "\n\n")
+
+    @bot.on_callback_query(pf.regex(r"^src_resume:") & admin_cb)
+    async def cb_src_resume(_, query: CallbackQuery) -> None:
+        src_id = int(query.data.split(":", 1)[1])
+        s = await get_source(src_id)
+        if not s:
+            await query.answer("Source not found.", show_alert=True)
+            return
+        skipped = await _skip_to_head(s)
+        await update_source_status(src_id, "active")
+        log.info("Source resumed: %s (id=%d, %s) | skipped to head=%s",
+                 s["name"], src_id, s["type"], skipped)
+        await query.answer("Resumed.")
+        if skipped is None:
+            note = ("▶️ <b>Resumed</b> — but the source did not answer just now, so the next "
+                    "poll may still bring what it published during the pause.\n\n")
+        else:
+            note = "▶️ <b>Resumed</b> — collecting from now on, the pause is not back-filled.\n\n"
+        await _show_source(query, src_id, note)
+
+    async def _skip_to_head(source) -> int | None:
+        """Start a resumed source from now instead of replaying the pause. Telegram has a
+        bookmark to move; RSS has none, so its current entries are stored and retired
+        unshown. Returns how much was skipped, or None when the source could not be
+        reached — which is the difference between promising "not back-filled" and not."""
+        if source["type"] == "telegram":
+            try:
+                chat_ref = source["chat_id"] or source["url"]
+                async for message in userbot.get_chat_history(chat_ref, limit=1):
+                    await set_source_last_message_id(source["id"], message.id)
+                    return message.id
+                return 0  # reachable and empty: nothing to skip past
+            except Exception as exc:
+                log.warning("Could not move '%s' bookmark to the channel head on resume: %s",
+                            source["name"], exc)
+                return None
+        from src.collectors.rss_collector import skip_feed_to_head
+
+        stored = await skip_feed_to_head(source["id"], source["name"], source["url"], source["category"])
+        if stored:
+            await discard_unsent_items(source["id"])
+        return stored
 
     @bot.on_callback_query(pf.regex(r"^src_del:") & admin_cb)
     async def cb_src_del(_, query: CallbackQuery) -> None:

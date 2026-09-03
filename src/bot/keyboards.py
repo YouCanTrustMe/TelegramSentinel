@@ -12,6 +12,7 @@ from src.db.models import (
     get_categories,
     get_error_sources,
     get_pending_sources,
+    get_paused_sources,
     get_silent_sources,
     get_word_category_map,
 )
@@ -72,7 +73,7 @@ def _category_label(cat, source_count: int, quiet_count: int = 0) -> str:
     return _clip(f"{cat['emoji']} {cat['name']} · {source_count}{quiet} · {_times_label(cat['digest_time'])}")
 
 
-_STATUS_ICON = {"pending": "⏳", "error": "⚠️"}
+_STATUS_ICON = {"pending": "⏳", "error": "⚠️", "paused": "⏸"}
 
 
 def _source_label(source) -> str:
@@ -103,8 +104,9 @@ async def _categories_keyboard(cats, page: int = 0, reorder: bool = False) -> In
     all_sources = await get_active_sources()
     pending = await get_pending_sources()
     errored = await get_error_sources()
+    paused = await get_paused_sources()
     src_count: dict[str, int] = {}
-    for s in list(all_sources) + list(pending) + list(errored):
+    for s in list(all_sources) + list(pending) + list(errored) + list(paused):
         src_count[s["category"]] = src_count.get(s["category"], 0) + 1
     quiet_count: dict[str, int] = {}
     for row in await get_silent_sources(_QUIET_THRESHOLD_HOURS):
@@ -204,19 +206,29 @@ def _cat_edit_keyboard(cat_name: str) -> InlineKeyboardMarkup:
     ])
 
 
-def _source_view_keyboard(source_id: int, cat_name: str, url: str | None = None) -> InlineKeyboardMarkup:
+def _source_view_keyboard(source_id: int, cat_name: str, url: str | None = None,
+                          paused: bool = False, pending: bool = False) -> InlineKeyboardMarkup:
     """The first row is the one that gets used: open the source, or edit how it is
-    summarised. The rest are rare verbs and share a row."""
+    summarised. The rest are rare verbs and share a row. Pause sits next to Remove
+    because it is the reversible version of the same intent."""
     top = [InlineKeyboardButton("📝 Prompt", callback_data=f"src_prompt:{source_id}")]
     if url:
         top.insert(0, InlineKeyboardButton("↗ Open", url=url))
+    verbs = [
+        InlineKeyboardButton("✏️ Rename", callback_data=f"src_rename:{source_id}"),
+        InlineKeyboardButton("🔄 Move", callback_data=f"src_reassign:{source_id}"),
+    ]
+    remove = [InlineKeyboardButton("🗑 Remove", callback_data=f"src_del:{source_id}")]
+    # A pending source has not been joined yet: pausing it would drop it out of the
+    # activation sweep, and resuming would call it active without anyone ever joining.
+    if pending:
+        return InlineKeyboardMarkup([top, verbs, remove,
+                                     [InlineKeyboardButton("« Back", callback_data=f"cat_view:{cat_name}")]])
+    pause = ("▶️ Resume", "src_resume") if paused else ("⏸ Pause", "src_pause")
     return InlineKeyboardMarkup([
         top,
-        [
-            InlineKeyboardButton("✏️ Rename", callback_data=f"src_rename:{source_id}"),
-            InlineKeyboardButton("🔄 Move", callback_data=f"src_reassign:{source_id}"),
-            InlineKeyboardButton("🗑 Remove", callback_data=f"src_del:{source_id}"),
-        ],
+        verbs,
+        [InlineKeyboardButton(pause[0], callback_data=f"{pause[1]}:{source_id}")] + remove,
         [InlineKeyboardButton("« Back", callback_data=f"cat_view:{cat_name}")],
     ])
 
@@ -225,16 +237,19 @@ def _source_view_text(source, health: dict) -> str:
     """The source screen answers one question — is this thing still worth keeping —
     so freshness and weekly volume lead, and the machinery (url, type) does not."""
     pending = source["status"] == "pending"
-    icon = "⏳" if pending else ("📡" if source["type"] == "telegram" else "🔗")
+    paused = source["status"] == "paused"
+    icon = _STATUS_ICON.get(source["status"]) or ("📡" if source["type"] == "telegram" else "🔗")
     kind = "tg" if source["type"] == "telegram" else "rss"
     lines = [f"<b>{icon} {escape(source['name'])}</b>  <i>{kind} · {escape(source['category'])}</i>", ""]
 
     if pending:
         lines.append("<i>⏳ Pending — not joined yet, nothing collected.</i>")
+    elif paused:
+        lines.append("<i>⏸ Paused — nothing collected, summarised or shown. Still here, still joined.</i>")
     else:
         hours = health["hours_since"]
         quiet = hours is not None and hours >= _QUIET_THRESHOLD_HOURS
-        freshness = "⏸ silent " + ago(hours) if quiet or hours is None else "Last item <b>" + ago(hours) + "</b>"
+        freshness = "💤 silent " + ago(hours) if quiet or hours is None else "Last item <b>" + ago(hours) + "</b>"
         total = health["week_total"]
         line = f"{freshness} · <b>{total}</b> in 7d"
         if health["week_muted"]:
@@ -367,7 +382,7 @@ async def _blocked_keyboard(words, page: int = 0) -> InlineKeyboardMarkup:
 async def render_categories(cats) -> str:
     """The list title with live counts, so every entry point renders the same screen."""
     sources = (list(await get_active_sources()) + list(await get_pending_sources())
-               + list(await get_error_sources()))
+               + list(await get_error_sources()) + list(await get_paused_sources()))
     quiet = len(await get_silent_sources(_QUIET_THRESHOLD_HOURS))
     return _categories_text(cats, len(sources), quiet)
 
@@ -405,8 +420,10 @@ async def _cat_view_text(cat_name: str) -> tuple[str, list]:
     cats = await get_categories()
     active = [s for s in await get_active_sources() if s["category"] == cat_name]
     # Errored sources belong on this screen more than anywhere else: it is where
-    # they get fixed or removed.
-    pending = list(await get_pending_sources(cat_name)) + list(await get_error_sources(cat_name))
+    # they get fixed or removed — and a paused one is only reachable here, since the
+    # Resume button lives on its source screen.
+    pending = (list(await get_pending_sources(cat_name)) + list(await get_error_sources(cat_name))
+               + [s for s in await get_paused_sources() if s["category"] == cat_name])
     cat = next((c for c in cats if c["name"] == cat_name), None)
     emoji = cat["emoji"] if cat else "📌"
     digest_time = cat["digest_time"] if cat else _DEFAULT_DIGEST_TIME

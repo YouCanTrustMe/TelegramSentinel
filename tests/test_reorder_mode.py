@@ -37,6 +37,7 @@ def _no_db(monkeypatch):
     monkeypatch.setattr(keyboards, "get_pending_sources", _none)
     monkeypatch.setattr(keyboards, "get_silent_sources", _none)
     monkeypatch.setattr(keyboards, "get_error_sources", _none)
+    monkeypatch.setattr(keyboards, "get_paused_sources", _none)
 
 
 @pytest.mark.asyncio

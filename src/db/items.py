@@ -50,7 +50,8 @@ async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlit
                       sources.sort_order AS source_sort_order, sources.type AS source_type
                FROM items
                LEFT JOIN sources ON items.source_id = sources.id
-               WHERE items.sent = 0 AND items.category IN ({placeholders})
+               WHERE items.sent = 0 AND COALESCE(sources.status, '') != 'paused'
+                 AND items.category IN ({placeholders})
                ORDER BY category, sources.sort_order ASC, source_id, published_at ASC"""
             async with db.execute(query, categories) as cur:
                 return await cur.fetchall()
@@ -59,7 +60,7 @@ async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlit
                   sources.sort_order AS source_sort_order, sources.type AS source_type
                FROM items
                LEFT JOIN sources ON items.source_id = sources.id
-               WHERE items.sent = 0
+               WHERE items.sent = 0 AND COALESCE(sources.status, '') != 'paused'
                ORDER BY category, sources.sort_order ASC, source_id, published_at ASC"""
         ) as cur:
             return await cur.fetchall()
@@ -171,6 +172,36 @@ async def increment_classify_attempts(item_id: int) -> int:
 
 
 @retry_on_locked
+async def discard_unsent_items(source_id: int) -> int:
+    """Retire whatever a source had queued but never shown, without deleting it.
+
+    Pausing a source has to silence it NOW. Leaving the queue in place would strand it:
+    nothing classifies it (the classifier reads the same unsent query), the home screen
+    counts it as waiting forever, retention only prunes sent rows, and resuming would
+    ship a stale backlog — which is the opposite of the "not back-filled" promise the
+    resume makes. Marking it sent retires the rows and lets retention collect them."""
+    async with get_db() as db:
+        # The vector goes with it. `sent = 1` alone would enrol these rows in the
+        # cross-digest comparison pool, where a real story from another source could be
+        # muted as a duplicate of an item NOBODY EVER SAW — and a mute against the sent
+        # pool renders no link, so the story would simply be gone.
+        # The summary is filled from the raw text for the same reason: a sent row with an
+        # empty summary is precisely what the classifier's backfill picks up, and it would
+        # re-summarise these, re-embed them, and hand them straight back to that pool.
+        cur = await db.execute(
+            """UPDATE items
+               SET sent = 1,
+                   embedding = NULL,
+                   summary = CASE WHEN trim(COALESCE(summary, '')) = ''
+                                  THEN substr(raw_text, 1, 200) ELSE summary END
+               WHERE source_id = ? AND sent = 0""",
+            (source_id,),
+        )
+        await db.commit()
+        return cur.rowcount
+
+
+@retry_on_locked
 async def mark_sent(item_ids: list[int]) -> None:
     async with get_db() as db:
         await db.executemany(
@@ -215,9 +246,16 @@ async def get_recent_digests(hours: int) -> list:
 
 
 async def count_unsent_items() -> int:
+    """The queue the home screen reports. Paused sources are excluded for the same
+    reason they are excluded from the digest: their items are never going to be shown,
+    and counting them leaves a number that only ever grows."""
     async with get_db() as db:
-        async with db.execute("SELECT COUNT(*) AS n FROM items WHERE sent = 0") as cur:
-            return (await cur.fetchone())["n"]
+        async with db.execute(
+            """SELECT COUNT(*) FROM items
+               LEFT JOIN sources ON items.source_id = sources.id
+               WHERE items.sent = 0 AND COALESCE(sources.status, '') != 'paused'"""
+        ) as cur:
+            return (await cur.fetchone())[0]
 
 
 async def get_last_digest() -> aiosqlite.Row | None:

@@ -1,14 +1,25 @@
 """Database foundation: the shared connection context manager, migration
 runner and generic app-settings access. Domain modules (sources, items,
 categories, blocked) build on top of get_db()."""
+import asyncio
 import logging
+import sqlite3
 import aiosqlite
 from contextlib import asynccontextmanager
+from functools import wraps
 from pathlib import Path
 
 from src.config import settings
 
 log = logging.getLogger(__name__)
+
+
+# A dozen RSS feeds are polled in parallel, each writing through its own connection,
+# while the collector and the digest write through theirs. Under a disk stall on the
+# 1 GB box that queue outgrew the old 5s wait and surfaced as "database is locked".
+_BUSY_TIMEOUT_MS = 30000
+_LOCK_RETRIES = 3
+_LOCK_RETRY_DELAY = 0.4
 
 
 @asynccontextmanager
@@ -17,8 +28,31 @@ async def get_db():
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA foreign_keys = ON")
         # collectors + scheduler write concurrently through their own connections
-        await db.execute("PRAGMA busy_timeout = 5000")
+        await db.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        # WAL already survives a crash at NORMAL; it only loses the last commits on a
+        # host power cut, and that trade buys an fsync-free commit on a slow volume.
+        await db.execute("PRAGMA synchronous = NORMAL")
         yield db
+
+
+def retry_on_locked(func):
+    """Retry a write that lost the race for the write lock. busy_timeout covers the
+    common contention, but a writer that is itself mid-transaction gets SQLITE_BUSY
+    returned immediately, without the busy handler ever running — one retry then costs
+    a fraction of a second and saves the caller's whole pass (an RSS feed used to drop
+    the rest of its entries for a full poll interval)."""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        for attempt in range(1, _LOCK_RETRIES + 1):
+            try:
+                return await func(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == _LOCK_RETRIES:
+                    raise
+                log.warning("DB write %s locked, retry %d/%d in %.1fs",
+                            func.__name__, attempt, _LOCK_RETRIES - 1, _LOCK_RETRY_DELAY)
+                await asyncio.sleep(_LOCK_RETRY_DELAY * attempt)
+    return wrapper
 
 
 def _split_sql_statements(sql: str) -> list[str]:

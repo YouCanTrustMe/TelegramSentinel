@@ -2,7 +2,7 @@
 digest, classification backfill helpers and the digest log."""
 import aiosqlite
 
-from src.db.base import get_db
+from src.db.base import get_db, retry_on_locked
 
 
 async def is_seen(message_id: str) -> bool:
@@ -13,6 +13,7 @@ async def is_seen(message_id: str) -> bool:
             return await cur.fetchone() is not None
 
 
+@retry_on_locked
 async def save_item(
     source_id: int,
     message_id: str,
@@ -64,6 +65,7 @@ async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlit
             return await cur.fetchall()
 
 
+@retry_on_locked
 async def set_item_embeddings(pairs: list[tuple[int, bytes]]) -> None:
     """Store many item embeddings in one connection/commit (called per digest for
     every freshly embedded item)."""
@@ -77,6 +79,7 @@ async def set_item_embeddings(pairs: list[tuple[int, bytes]]) -> None:
         await db.commit()
 
 
+@retry_on_locked
 async def mark_duplicate(item_id: int, primary_id: int) -> None:
     """Mute a cross-source duplicate: point it at its primary and mark it sent so
     it never enters a digest on its own. The row is kept so the digest can render
@@ -145,6 +148,7 @@ async def get_sent_empty_items(limit: int = 5) -> list[aiosqlite.Row]:
             return await cur.fetchall()
 
 
+@retry_on_locked
 async def update_item_classification(item_id: int, summary: str, key_phrase: str) -> None:
     async with get_db() as db:
         await db.execute(
@@ -166,6 +170,7 @@ async def increment_classify_attempts(item_id: int) -> int:
             return row[0] if row else 0
 
 
+@retry_on_locked
 async def mark_sent(item_ids: list[int]) -> None:
     async with get_db() as db:
         await db.executemany(
@@ -175,6 +180,7 @@ async def mark_sent(item_ids: list[int]) -> None:
         await db.commit()
 
 
+@retry_on_locked
 async def mark_blocked(reasons: list[tuple[int, str]]) -> None:
     """Mark content-filtered items sent and record which rule blocked each, so the
     filter can be audited later (which rule fires, on what) with a query instead of

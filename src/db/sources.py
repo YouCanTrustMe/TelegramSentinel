@@ -3,7 +3,7 @@ and silence detection."""
 import logging
 import aiosqlite
 
-from src.db.base import get_db
+from src.db.base import get_db, retry_on_locked
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +55,7 @@ async def set_source_pending_msg_id(source_id: int, msg_id: int | None) -> None:
         await db.commit()
 
 
+@retry_on_locked
 async def set_source_last_message_id(source_id: int, msg_id: int) -> None:
     async with get_db() as db:
         await db.execute(
@@ -88,6 +89,7 @@ async def update_source_url(source_id: int, url: str) -> None:
         await db.commit()
 
 
+@retry_on_locked
 async def set_source_chat_id(source_id: int, chat_id: int) -> None:
     async with get_db() as db:
         await db.execute(
@@ -110,6 +112,7 @@ async def find_sources_by_chat_id(chat_id: int, exclude_id: int | None = None) -
             return await cur.fetchall()
 
 
+@retry_on_locked
 async def increment_source_fail_count(source_id: int) -> int:
     async with get_db() as db:
         await db.execute("UPDATE sources SET fail_count = fail_count + 1 WHERE id = ?", (source_id,))
@@ -119,6 +122,7 @@ async def increment_source_fail_count(source_id: int) -> int:
             return int(row["fail_count"]) if row else 0
 
 
+@retry_on_locked
 async def reset_source_fail_count(source_id: int) -> None:
     async with get_db() as db:
         # `fail_count != 0` keeps the common healthy-poll case a no-op (no WAL write).
@@ -126,6 +130,7 @@ async def reset_source_fail_count(source_id: int) -> None:
         await db.commit()
 
 
+@retry_on_locked
 async def update_source_status(source_id: int, status: str) -> None:
     async with get_db() as db:
         await db.execute("UPDATE sources SET status = ? WHERE id = ?", (status, source_id))

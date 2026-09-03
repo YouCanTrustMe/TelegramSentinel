@@ -387,3 +387,25 @@ def test_routing_has_no_dead_entries():
             assert provider in llm_client.PROVIDERS, f"{task} routes to unknown provider {provider}"
         providers = [p for p, _ in chain]
         assert len(set(providers)) >= 2, f"{task} has no failover onto a separate quota"
+
+
+
+def test_reserve_token_queues_callers_that_arrive_together():
+    """The filter now fires several chunks at once — the first concurrent caller of
+    llm_json. Each reservation must get its own slot in the queue, not the same wait."""
+    rate, capacity = 1.0, 6.0          # 60 rpm
+    bucket = [capacity, 0.0]
+    waits = [llm_client._reserve_token(bucket, 0.0, rate, capacity) for _ in range(10)]
+
+    assert waits[:6] == [0.0] * 6      # the full bucket is spent immediately
+    assert waits[6:] == [1.0, 2.0, 3.0, 4.0]   # then one caller per second, in order
+
+
+def test_reserve_token_refills_over_time():
+    rate, capacity = 1.0, 6.0
+    bucket = [0.0, 0.0]
+
+    assert llm_client._reserve_token(bucket, 3.0, rate, capacity) == 0.0   # 3 refilled
+    assert bucket[0] == 2.0
+    assert llm_client._reserve_token(bucket, 100.0, rate, capacity) == 0.0
+    assert bucket[0] == capacity - 1                                       # capped at capacity

@@ -257,24 +257,30 @@ _buckets: dict[str, list[float]] = {}  # provider -> [tokens, last_refill]
 _bucket_lock = asyncio.Lock()
 
 
+def _reserve_token(bucket: list[float], now: float, rate: float, capacity: float) -> float:
+    """Refill the bucket, take one token — into deficit when it is empty — and return
+    how long the caller must wait for the token it just reserved.
+
+    Reserving before the wait is what makes concurrent callers queue: debiting after
+    the sleep instead let them all read the same drained bucket, sleep the same
+    duration and fire together with the deficit clamped away, which is the 429 burst
+    this limiter exists to prevent."""
+    bucket[0] = min(capacity, bucket[0] + (now - bucket[1]) * rate)
+    bucket[1] = now
+    bucket[0] -= 1.0
+    return -bucket[0] / rate if bucket[0] < 0 else 0.0
+
+
 async def _rate_gate(provider: str) -> None:
     rpm = PROVIDERS[provider]["rpm"]
     rate = rpm / 60.0
     capacity = max(2.0, rpm / 10.0)
     async with _bucket_lock:
         now = time.monotonic()
-        b = _buckets.setdefault(provider, [capacity, now])
-        b[0] = min(capacity, b[0] + (now - b[1]) * rate)
-        b[1] = now
-        if b[0] < 1.0:
-            wait = (1.0 - b[0]) / rate
-        else:
-            wait = 0.0
-            b[0] -= 1.0
+        bucket = _buckets.setdefault(provider, [capacity, now])
+        wait = _reserve_token(bucket, now, rate, capacity)
     if wait > 0:
         await asyncio.sleep(wait)
-        async with _bucket_lock:
-            _buckets[provider][0] = max(0.0, _buckets[provider][0] - 1.0)
 
 
 # ---- shared HTTP session ----

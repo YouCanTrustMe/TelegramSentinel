@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -377,6 +378,13 @@ async def _embed_classified(pairs: list[tuple[int, str]]) -> None:
 
 _FILTER_BLOCK_THRESHOLD = 8
 
+# Items per filter call. Measured 2026-09-03 on a 120-item prod feed batch: at 25 the
+# model caught 3 of 6 real air-raid posts, at 10 it caught 6 of 6 with no new false
+# block — recall falls off with batch size, not with the wording of the rule. Chunks
+# run concurrently (bounded) so the extra calls do not stretch the digest build.
+_FILTER_CHUNK = 10
+_FILTER_CONCURRENCY = 4
+
 
 async def check_blocked_filters(
     items: list[dict],
@@ -398,10 +406,12 @@ async def check_blocked_filters(
 
     item_category = {item["id"]: (item.get("category") or "other") for item in items}
     scopes = rule_scopes if rule_scopes is not None else [None] * len(rules)
-    _CHUNK = 25
     result: dict[int, str] = {}
-    for i in range(0, len(items), _CHUNK):
-        chunk = items[i:i + _CHUNK]
+    # Per call, not module level: an asyncio.Semaphore binds to the first loop that
+    # contends on it and then raises in any other one.
+    slots = asyncio.Semaphore(_FILTER_CONCURRENCY)
+
+    async def check_chunk(chunk: list[dict]) -> dict | None:
         # Show the model only rules that can apply to the categories in this chunk
         # (items are category-ordered, so a chunk is usually one category): fewer
         # input tokens and fewer chances to mis-match an irrelevant rule. Original
@@ -409,21 +419,31 @@ async def check_blocked_filters(
         chunk_cats = {item_category[item["id"]] for item in chunk}
         applicable = [j for j, sc in enumerate(scopes) if sc is None or (sc & chunk_cats)]
         if not applicable:
-            continue
+            return None
         numbered_rules = "\n".join(f"{j}. {rules[j]}" for j in applicable)
         numbered_items = "\n".join(
             f"{item['id']} [{item.get('source', '?')}/{item.get('category', '?')}]: {(item['text'] or '')[:150]}"
             for item in chunk
         )
         user_msg = f"Filter rules:\n{numbered_rules}\n\nItems:\n{numbered_items}"
-        data = await llm_json(
-            messages=[
-                {"role": "system", "content": _FILTER_SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            max_retries=3,
-            task="filter",
-        )
+        async with slots:
+            return await llm_json(
+                messages=[
+                    {"role": "system", "content": _FILTER_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                max_retries=3,
+                task="filter",
+            )
+
+    chunks = [items[i:i + _FILTER_CHUNK] for i in range(0, len(items), _FILTER_CHUNK)]
+    answers = await asyncio.gather(*(check_chunk(c) for c in chunks), return_exceptions=True)
+    for data in answers:
+        if isinstance(data, asyncio.CancelledError):
+            raise data  # a cancelled digest must unwind, not carry on filtering
+        if isinstance(data, Exception):
+            log.warning("Filter: chunk failed, its items pass through unfiltered: %s", data)
+            continue
         if not data or not isinstance(data.get("blocked"), list):
             continue
         for entry in data["blocked"]:

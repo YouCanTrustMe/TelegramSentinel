@@ -156,3 +156,68 @@ def test_check_blocked_filters_drops_out_of_scope_block(monkeypatch):
     monkeypatch.setattr(classifier, "llm_json", fake_llm)
     out = asyncio.run(classifier.check_blocked_filters(items, rules, scopes))
     assert out == {}
+
+
+def test_check_blocked_filters_splits_into_small_chunks(monkeypatch):
+    """Recall of the semantic filter falls off with batch size — measured on prod feed
+    items, a 25-item call caught 3 of 6 air-raid posts where a 10-item call caught 6.
+    Every item must still be judged exactly once across the chunks."""
+    import asyncio
+    items = [{"id": i, "text": f"item {i}", "source": "s", "category": "feed"}
+             for i in range(1, 26)]
+    seen: list[int] = []
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        body = messages[-1]["content"]
+        ids = [int(line.split(" ")[0]) for line in body.split("Items:\n")[1].splitlines()]
+        seen.extend(ids)
+        return {"blocked": [{"id": ids[0], "rule": 0, "confidence": 10}]}
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    monkeypatch.setattr(classifier, "_FILTER_CHUNK", 10)
+    out = asyncio.run(classifier.check_blocked_filters(items, ["a rule"]))
+
+    assert sorted(seen) == [i["id"] for i in items]   # every item judged once
+    assert len(out) == 3                              # one block per chunk of 10/10/5
+
+
+def test_check_blocked_filters_survives_one_failing_chunk(monkeypatch):
+    """A chunk that errors must pass its own items through unfiltered, not abort the
+    filter for the whole digest (fail-open, as everywhere else in the pipeline)."""
+    import asyncio
+    items = [{"id": i, "text": f"item {i}", "source": "s", "category": "feed"}
+             for i in range(1, 21)]
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        body = messages[-1]["content"]
+        first = int(body.split("Items:\n")[1].splitlines()[0].split(" ")[0])
+        if first == 1:
+            raise RuntimeError("provider exploded")
+        return {"blocked": [{"id": first, "rule": 0, "confidence": 10}]}
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    monkeypatch.setattr(classifier, "_FILTER_CHUNK", 10)
+    out = asyncio.run(classifier.check_blocked_filters(items, ["a rule"]))
+
+    assert out == {11: "a rule"}
+
+
+def test_check_blocked_filters_works_across_separate_event_loops(monkeypatch):
+    """The concurrency gate must not be a module-level Semaphore: it would bind to the
+    first loop that contends on it and raise in every later one, which — behind
+    return_exceptions — degrades silently into a filter that blocks nothing."""
+    import asyncio
+    items = [{"id": i, "text": f"item {i}", "source": "s", "category": "feed"}
+             for i in range(1, 61)]  # 6 chunks > the concurrency limit
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        first = int(messages[-1]["content"].split("Items:\n")[1].splitlines()[0].split(" ")[0])
+        await asyncio.sleep(0)
+        return {"blocked": [{"id": first, "rule": 0, "confidence": 10}]}
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    first_run = asyncio.run(classifier.check_blocked_filters(items, ["a rule"]))
+    second_run = asyncio.run(classifier.check_blocked_filters(items, ["a rule"]))
+
+    assert first_run == second_run
+    assert len(first_run) == 6

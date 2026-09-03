@@ -3,6 +3,7 @@ the Bot API retry_after parser, message-id construction and SQL statement split.
 from src.db.base import _split_sql_statements
 from src.dispatcher.sender import _retry_after
 from src.processor.dedup.deduplicator import make_message_id
+import src.scheduler as scheduler
 from src.scheduler import _pre_classify_time, _pre_collect_time, _summarize_digest_health
 
 
@@ -74,3 +75,54 @@ def test_split_sql_respects_quoted_semicolons():
     stmts = [s.strip() for s in _split_sql_statements(sql) if s.strip()]
     assert len(stmts) == 2
     assert stmts[0].startswith("CREATE TABLE")
+
+
+def test_new_silent_sources_pushes_each_source_once():
+    rows = [{"id": 79, "name": "MarketWatch"}, {"id": 82, "name": "Import AI"}]
+
+    fresh, state = scheduler._new_silent_sources(rows, set())
+    assert [r["id"] for r in fresh] == [79, 82]
+    assert state == {79, 82}
+
+    fresh, state = scheduler._new_silent_sources(rows, state)
+    assert fresh == []            # same two next morning: no second push
+    assert state == {79, 82}
+
+
+def test_a_source_that_recovers_can_alert_again():
+    """The memo holds only sources that are silent RIGHT NOW, so one that starts
+    publishing again drops out and is free to raise the alarm if it dies later."""
+    fresh, state = scheduler._new_silent_sources([{"id": 79, "name": "MarketWatch"}], {79, 82})
+
+    assert fresh == []
+    assert state == {79}          # 82 recovered -> forgotten
+
+    fresh, _ = scheduler._new_silent_sources(
+        [{"id": 79, "name": "MarketWatch"}, {"id": 82, "name": "Import AI"}], state)
+    assert [r["id"] for r in fresh] == [82]
+
+
+def test_silent_source_line_reports_a_source_that_never_published():
+    line = scheduler._silent_source_line(
+        {"id": 22, "name": "Zagreb up to you", "type": "telegram",
+         "last_item_at": None, "hours_silent": None})
+
+    assert "never" in line and "Zagreb up to you" in line
+
+
+def test_a_source_added_today_is_not_reported_as_silent():
+    """A source that has never produced is only suspicious once it has had the whole
+    window to produce — otherwise every new source alerts the morning after."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 9, 4, 5, 15, tzinfo=timezone.utc)
+    rows = [
+        {"id": 1, "name": "Added today", "last_item_at": None,
+         "created_at": (now - timedelta(hours=6)).isoformat()},
+        {"id": 2, "name": "Never produced, added in July", "last_item_at": None,
+         "created_at": (now - timedelta(days=60)).isoformat()},
+    ]
+
+    fresh, state = scheduler._new_silent_sources(rows, set(), now=now)
+
+    assert [r["id"] for r in fresh] == [2]
+    assert state == {2}          # the young one is not memoised either, so it can alert later

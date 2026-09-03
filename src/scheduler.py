@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -62,6 +63,68 @@ async def _digest_health_job() -> None:
         log.warning(alert)
     else:
         log.info(line)
+
+
+# The digest, home and /stats already list sources quiet for 5 days, but a passive
+# list is read past: MarketWatch sat in it for a year (HTTP 200, fail_count 0, last
+# item 2025-07-03) before anyone noticed. This second, much longer tier pushes once.
+_SILENT_SOURCE_ALERT_HOURS = 336
+
+
+def _too_young_to_judge(row, now: datetime, threshold_hours: int) -> bool:
+    """A source that has never produced anything is only suspicious once it has had the
+    full window to produce: a source added this morning is silent by definition."""
+    if row_get(row, "last_item_at"):
+        return False
+    created = row_get(row, "created_at")
+    if not created:
+        return False
+    try:
+        stamp = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return (now - stamp) < timedelta(hours=threshold_hours)
+
+
+def _new_silent_sources(rows: list, already_alerted: set[int], now: datetime | None = None,
+                        threshold_hours: int = _SILENT_SOURCE_ALERT_HOURS) -> tuple[list, set[int]]:
+    """Split the long-silent sources into the ones worth pushing now and the full set
+    to remember. A source drops out of the memo when it publishes again, so it can
+    raise the alarm a second time if it dies again. Pure: unit-testable without a DB."""
+    now = now or datetime.now(timezone.utc)
+    old_enough = [r for r in rows if not _too_young_to_judge(r, now, threshold_hours)]
+    current = {int(row_get(r, "id")) for r in old_enough}
+    fresh = [r for r in old_enough if int(row_get(r, "id")) not in already_alerted]
+    return fresh, current
+
+
+def _silent_source_line(row) -> str:
+    last = row_get(row, "last_item_at")
+    hours = row_get(row, "hours_silent")
+    age = f"{int(hours) // 24}d" if hours is not None else "never"
+    return f"{row_get(row, 'name')} ({row_get(row, 'type')}, last item {last or 'never'}, silent {age})"
+
+
+async def _silent_sources_job() -> None:
+    """Alert once per source that keeps answering but stopped publishing. Logged at
+    WARNING, which the admin-alert handler forwards — no second admin_alert call, or
+    the admin gets it twice."""
+    from src.db.models import get_app_setting, get_silent_sources, set_app_setting
+
+    rows = await get_silent_sources(_SILENT_SOURCE_ALERT_HOURS)
+    stored = await get_app_setting("silent_sources_alerted") or ""
+    already = {int(part) for part in stored.split(",") if part.strip().isdigit()}
+    fresh, current = _new_silent_sources(rows, already)
+    if fresh:
+        log.warning("Silent source(s) past %dh: %s",
+                    _SILENT_SOURCE_ALERT_HOURS, "; ".join(_silent_source_line(r) for r in fresh))
+    else:
+        log.info("Silent-source check: %d source(s) past %dh, none new",
+                 len(rows), _SILENT_SOURCE_ALERT_HOURS)
+    if current != already:
+        await set_app_setting("silent_sources_alerted", ",".join(str(i) for i in sorted(current)))
 
 
 async def _revive_rss_job() -> None:
@@ -217,6 +280,15 @@ async def _add_maintenance_jobs() -> None:
         verify_llm_providers,
         CronTrigger(hour=4, minute=30, timezone=settings.digest_timezone),
         id="verify_llm",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    _scheduler.add_job(
+        _silent_sources_job,
+        CronTrigger(hour=5, minute=15, timezone=settings.digest_timezone),
+        id="silent_sources",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

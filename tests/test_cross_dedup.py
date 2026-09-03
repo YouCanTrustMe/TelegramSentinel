@@ -279,3 +279,75 @@ async def test_confirm_mutes_fails_open_on_llm_error(monkeypatch):
     confirmed = await cd._confirm_mutes({2: 1}, item_by_id, {}, vec, {})
 
     assert confirmed == {}  # LLM error -> nothing muted (no real story hidden)
+
+
+def _band_vec(deg):
+    a = math.radians(deg)
+    return _vec(math.cos(a), math.sin(a))
+
+
+async def test_confirm_mutes_regroups_candidates_rejected_against_a_weak_primary(monkeypatch):
+    """Prod 2026-09-02: two sources reported one downed Ka-27 (cosine 0.966) and both
+    were delivered — union-find had chained them onto an unrelated primary, and the
+    confirm step only asks "same event as the PRIMARY?". The LLM's own partition puts
+    the two together, so the pair must collapse without a second call."""
+    calls = {"n": 0}
+
+    async def fake_group_by_topic(inputs, prompt_extra=None):
+        calls["n"] += 1
+        ids = {i["id"] for i in inputs}
+        groups = [{"ids": [1], "summary": "weak anchor", "key_phrase": ""}]
+        groups.append({"ids": sorted(ids - {1}), "summary": "one event", "key_phrase": ""})
+        return groups
+
+    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
+
+    item_by_id = {
+        1: {"id": 1, "summary": "anchor", "source_id": 10, "source_sort_order": 0},
+        2: {"id": 2, "summary": "Ka-27 destroyed", "source_id": 11, "source_sort_order": 1},
+        3: {"id": 3, "summary": "destruction of a Ka-27 confirmed", "source_id": 12, "source_sort_order": 2},
+    }
+    vec = {1: _band_vec(0), 2: _band_vec(28), 3: _band_vec(29)}  # 2~3 ≈ 1.0, both ~0.88 to 1
+
+    confirmed = await cd._confirm_mutes({2: 1, 3: 1}, item_by_id, {}, vec, {})
+
+    assert calls["n"] == 1
+    assert 2 not in confirmed              # lowest sort_order survives
+    assert confirmed[3] == 2               # the other is muted under it, not under the anchor
+
+
+async def test_regroup_requires_the_pair_to_clear_the_cosine_floor(monkeypatch):
+    """Embeddings stay the gate: an LLM that lumps two candidates together cannot mute
+    a pair whose own vectors never linked them."""
+    item_by_id = {
+        2: {"id": 2, "summary": "a", "source_id": 11, "source_sort_order": 1},
+        3: {"id": 3, "summary": "b", "source_id": 12, "source_sort_order": 2},
+    }
+    vec = {2: _band_vec(0), 3: _band_vec(60)}  # cosine 0.5, far below the floor
+
+    out = cd._regroup_rejected([(2, 1), (3, 1)], [{2, 3}], item_by_id, vec)
+
+    assert out == {}
+
+
+async def test_regroup_leaves_same_source_pairs_to_the_within_source_merge():
+    item_by_id = {
+        2: {"id": 2, "summary": "a", "source_id": 11, "source_sort_order": 1},
+        3: {"id": 3, "summary": "b", "source_id": 11, "source_sort_order": 1},
+    }
+    vec = {2: _band_vec(0), 3: _band_vec(1)}
+
+    assert cd._regroup_rejected([(2, 1), (3, 1)], [{2, 3}], item_by_id, vec) == {}
+
+
+def test_regroup_never_crosses_categories():
+    """One confirm call packs primaries from several categories, so its partition can
+    hold a group spanning them. Muting across a category boundary would render the
+    duplicate's link under a primary the reader meets in a different section."""
+    item_by_id = {
+        2: {"id": 2, "summary": "a", "source_id": 11, "source_sort_order": 1, "category": "crypto"},
+        3: {"id": 3, "summary": "b", "source_id": 12, "source_sort_order": 2, "category": "finance"},
+    }
+    vec = {2: _band_vec(0), 3: _band_vec(1)}  # cosine ~1.0, would otherwise collapse
+
+    assert cd._regroup_rejected([(2, 1), (3, 1)], [{2, 3}], item_by_id, vec) == {}

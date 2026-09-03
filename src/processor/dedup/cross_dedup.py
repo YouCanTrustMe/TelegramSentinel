@@ -219,8 +219,10 @@ async def _confirm_mutes(
         if not placed:
             batches.append((list(inputs), {pid}, {x["id"] for x in inputs}))
 
-    # One LLM call per batch; collect, per primary, the ids the LLM put in its event group.
+    # One LLM call per batch; collect, per primary, the ids the LLM put in its event group,
+    # and keep EVERY group it returned (see _regroup_rejected).
     same_group_of: dict[int, set[int]] = defaultdict(set)
+    event_groups: list[set[int]] = []
     for b_inputs, b_pids, _b_ids in batches:
         try:
             groups = await group_by_topic(b_inputs)
@@ -230,9 +232,11 @@ async def _confirm_mutes(
             continue
         for g in groups:
             ids = set(g.get("ids", []))
+            event_groups.append(ids)
             for pid in b_pids & ids:
                 same_group_of[pid].update(ids)
 
+    rejected: list[tuple[int, int]] = []  # (candidate id, the primary it was compared against)
     for pid, dups in by_primary.items():
         for d in dups:
             if d in confirmed:  # near-dup auto-confirmed above
@@ -240,8 +244,75 @@ async def _confirm_mutes(
             if d in same_group_of.get(pid, ()):
                 confirmed[d] = pid
             else:
-                log.info("B1: kept item id=%d — LLM says different event from primary id=%d", d, pid)
+                rejected.append((d, pid))
+
+    confirmed.update(_regroup_rejected(rejected, event_groups, item_by_id, vec))
     return confirmed
+
+
+def _regroup_rejected(
+    rejected: list[tuple[int, int]],
+    event_groups: list[set[int]],
+    item_by_id: dict,
+    vec: dict[int, np.ndarray],
+) -> dict[int, int]:
+    """Second reading of the SAME partition, no extra LLM call.
+
+    Union-find chains a cluster transitively (A~B~C), but the confirm step only asks
+    "is this candidate the same event as the PRIMARY?". When the primary is the weak
+    link, every candidate is rejected and the whole cluster survives — even where the
+    candidates are plainly the same event as EACH OTHER (observed on prod: two sources
+    on one downed Ka-27, cosine 0.966, both delivered because both were compared only
+    against an unrelated primary). group_by_topic returns a full partition, so the
+    groups that hold no primary are exactly those pairings; use them.
+
+    Embeddings stay the gate: two rejected candidates are only collapsed when their own
+    cosine also clears dedup_log_floor, so an LLM that over-groups cannot mute a pair
+    the vectors never linked. Category is a gate too: one confirm call carries primaries
+    from several categories, so a group can span them — but every other mute path
+    clusters strictly per category, and a link belongs under a primary the reader sees
+    in the same section."""
+    if not rejected:
+        return {}
+    primary_of = dict(rejected)
+    uf = _UnionFind()
+    for ids in event_groups:
+        by_cat: dict[str, list[int]] = defaultdict(list)
+        for i in ids:
+            if i in primary_of:
+                by_cat[_field(item_by_id[i], "category", "other") or "other"].append(i)
+        for members in by_cat.values():
+            for other in members[1:]:
+                uf.union(members[0], other)
+
+    comps: dict[int, list[int]] = defaultdict(list)
+    for d, _pid in rejected:
+        comps[uf.find(d)].append(d)
+
+    out: dict[int, int] = {}
+    for members in comps.values():
+        if len(members) < 2:
+            continue
+        survivor = min(members, key=lambda i: _sort_key(item_by_id[i]))
+        survivor_src = _field(item_by_id[survivor], "source_id")
+        svec = vec.get(survivor)
+        for mid in members:
+            if mid == survivor or _field(item_by_id[mid], "source_id") == survivor_src:
+                continue
+            mvec = vec.get(mid)
+            if svec is None or mvec is None:
+                continue
+            score = cosine(mvec, svec)
+            if score < settings.dedup_log_floor:
+                continue
+            out[mid] = survivor
+            log.info("B1: regrouped item id=%d -> primary id=%d | cosine=%.3f | same LLM event group, "
+                     "though both were rejected against their own primary", mid, survivor, score)
+
+    for d, pid in rejected:
+        if d not in out:
+            log.info("B1: kept item id=%d — LLM says different event from primary id=%d", d, pid)
+    return out
 
 
 async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, dict[int, list[tuple[str, str]]]]:

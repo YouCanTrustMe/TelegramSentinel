@@ -82,7 +82,10 @@ def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
         uid = query.from_user.id
         _pending[uid] = {"action": "add_blocked_word", "step": 0, "data": {}}
         await query.message.edit_text(
-            "Enter a filter rule description (e.g. 'space launches and commercial rockets'):",
+            "Enter a filter rule description (e.g. 'space launches and commercial rockets').\n"
+            "Start with <code>=</code> to match the text literally instead of asking the model — "
+            "the rest of the line is looked for anywhere in the post, so keep it specific "
+            "(e.g. <code>= all clear</code>):",
             reply_markup=_back_kb("blocked_list"),
         )
 

@@ -221,3 +221,121 @@ def test_check_blocked_filters_works_across_separate_event_loops(monkeypatch):
 
     assert first_run == second_run
     assert len(first_run) == 6
+def test_literal_rule_blocks_without_calling_the_model(monkeypatch):
+    """A "=" rule is matched in code: the air-raid all-clears a channel posts all day
+    are identical strings, and the semantic filter caught them only about half the time."""
+    import asyncio
+    items = [
+        {"id": 1, "text": "🟢 Хмельницький район - ВІДБІЙ ТРИВОГИ!", "source": "s", "category": "feed"},
+        {"id": 2, "text": "Рада переїхала в підвал через тривоги", "source": "s", "category": "feed"},
+    ]
+    rules = ["= відбій тривоги"]
+    called = {"n": 0}
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        called["n"] += 1
+        return {"blocked": []}
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    out = asyncio.run(classifier.check_blocked_filters(items, rules))
+
+    assert out == {1: "= відбій тривоги"}
+    assert called["n"] == 0  # the only rule was literal, so nothing to ask
+
+
+def test_literal_rule_normalizes_whitespace_and_case(monkeypatch):
+    import asyncio
+    items = [{"id": 1, "text": "🟢 Шепетівський  район  -\nвідбій\tтривоги!", "source": "s", "category": "feed"}]
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        raise AssertionError("literal rules must not reach the model")
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    assert asyncio.run(classifier.check_blocked_filters(items, ["= ВІДБІЙ ТРИВОГИ"])) == {1: "= ВІДБІЙ ТРИВОГИ"}
+
+
+def test_literal_rule_respects_its_category_scope(monkeypatch):
+    import asyncio
+    items = [{"id": 1, "text": "відбій тривоги", "source": "s", "category": "crypto"}]
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        return {"blocked": []}
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    out = asyncio.run(classifier.check_blocked_filters(items, ["= відбій тривоги"], [{"feed"}]))
+
+    assert out == {}
+
+
+def test_semantic_rules_still_run_for_items_no_literal_rule_caught(monkeypatch):
+    """Mixed rule set: the literal one short-circuits its own item, the rest of the
+    batch still goes to the model, and the literal rule is not shown to it."""
+    import asyncio
+    items = [
+        {"id": 1, "text": "відбій тривоги", "source": "s", "category": "feed"},
+        {"id": 2, "text": "buy now via this referral link", "source": "s", "category": "feed"},
+    ]
+    rules = ["= відбій тривоги", "advertising and promo posts"]
+    seen: list[str] = []
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        body = messages[-1]["content"]
+        seen.append(body)
+        return {"blocked": [{"id": 2, "rule": 1, "confidence": 9}]}
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    out = asyncio.run(classifier.check_blocked_filters(items, rules))
+
+    assert out == {1: "= відбій тривоги", 2: "advertising and promo posts"}
+    assert len(seen) == 1
+    assert "відбій" not in seen[0]           # neither the literal rule nor its item
+    assert "1. advertising" in seen[0]       # rule indices stay aligned with `rules`
+
+
+def test_block_is_dropped_when_the_chunk_never_saw_that_rule(monkeypatch):
+    """The numbered rule list has gaps — out-of-scope and literal rules are left out —
+    so an index the chunk was never shown is drift. Blocking on it would record the
+    wrong rule, and a literal rule carries no scope for the out_of_scope guard."""
+    import asyncio
+    items = [{"id": 1, "text": "ordinary news", "source": "s", "category": "feed"}]
+    rules = ["= відбій тривоги", "advertising and promo posts"]
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        return {"blocked": [{"id": 1, "rule": 0, "confidence": 10}]}  # the literal rule
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    assert asyncio.run(classifier.check_blocked_filters(items, rules)) == {}
+
+
+def test_verdict_for_an_item_outside_the_chunk_is_ignored(monkeypatch):
+    """Item ids are consecutive and chunks are adjacent slices, so one drifted digit
+    names a real item of the next chunk — which would be dropped from the digest under
+    a rule it never matched."""
+    import asyncio
+    items = [{"id": i, "text": f"item {i}", "source": "s", "category": "feed"}
+             for i in (11, 12, 13)]
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        return {"blocked": [{"id": 21, "rule": 0, "confidence": 10}]}  # not in this batch
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    assert asyncio.run(classifier.check_blocked_filters(items, ["a rule"])) == {}
+
+
+def test_a_bare_equals_rule_matches_nothing_and_never_reaches_the_model(monkeypatch):
+    """"=" with no pattern would otherwise be handed to the model as an empty semantic
+    rule, which matches anything."""
+    import asyncio
+    items = [{"id": 1, "text": "ordinary news", "source": "s", "category": "feed"}]
+    seen: list[str] = []
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        seen.append(messages[-1]["content"])
+        return {"blocked": []}
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    out = asyncio.run(classifier.check_blocked_filters(items, ["=", "advertising posts"]))
+
+    assert out == {}
+    assert seen and "0. =" not in seen[0]
+    assert "1. advertising posts" in seen[0]

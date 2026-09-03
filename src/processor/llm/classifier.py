@@ -385,16 +385,44 @@ _FILTER_BLOCK_THRESHOLD = 8
 _FILTER_CHUNK = 10
 _FILTER_CONCURRENCY = 4
 
+# A rule written as "= <text>" is matched literally by this code, never sent to the
+# model. Channels that post the same template line all day (air-raid all-clears) are
+# caught with certainty and for free, where the semantic filter is a coin flip on them;
+# the trade is that a literal rule is blind to any rewording.
+_LITERAL_RULE_PREFIX = "="
+
+
+def _normalize_for_match(text: str) -> str:
+    return " ".join((text or "").split()).casefold()
+
+
+def _literal_rules(rules: list[str]) -> dict[int, str]:
+    """{rule index: pattern} for the rules written as literals. A bare "=" has no
+    pattern; it maps to the empty string, which matches nothing and — because it stays
+    in this map — is never shown to the model as a semantic rule that matches anything."""
+    out: dict[int, str] = {}
+    for j, rule in enumerate(rules):
+        stripped = (rule or "").strip()
+        if not stripped.startswith(_LITERAL_RULE_PREFIX):
+            continue
+        pattern = _normalize_for_match(stripped[len(_LITERAL_RULE_PREFIX):])
+        if not pattern:
+            log.warning("Filter: rule %r has no pattern after '=', ignoring it", rule)
+        out[j] = pattern
+    return out
+
 
 async def check_blocked_filters(
     items: list[dict],
     rules: list[str],
     rule_scopes: list[set[str] | None] | None = None,
 ) -> dict[int, str]:
-    """Check items against semantic filter rules via LLM.
+    """Check items against filter rules.
 
     items: list of {"id": int, "text": str, "source": str, "category": str}
-    rules: list of rule description strings
+    rules: list of rule description strings. A rule starting with "=" is matched
+        literally in code (whitespace-normalised, case-insensitive substring) and
+        never reaches the model; every other rule is judged semantically by the LLM.
     rule_scopes: aligned with `rules`; each entry is the set of categories a rule
         applies to, or None for "all categories". A blocked match is discarded if
         the rule does not cover the item's category (guards against model drift).
@@ -411,15 +439,34 @@ async def check_blocked_filters(
     # contends on it and then raises in any other one.
     slots = asyncio.Semaphore(_FILTER_CONCURRENCY)
 
-    async def check_chunk(chunk: list[dict]) -> dict | None:
+    literal = _literal_rules(rules)
+    to_judge = items
+    if literal:
+        to_judge = []
+        for item in items:
+            haystack = _normalize_for_match(item.get("text", ""))
+            hit = next(
+                (j for j, pattern in literal.items()
+                 if pattern and pattern in haystack
+                 and not (scopes[j] and item_category.get(item["id"]) not in scopes[j])),
+                None,
+            )
+            if hit is None:
+                to_judge.append(item)
+                continue
+            result[item["id"]] = rules[hit]
+            log.info("Filter: blocked item id=%s | literal rule=%r", item["id"], rules[hit])
+
+    async def check_chunk(chunk: list[dict]) -> tuple[dict | None, set[int], set]:
         # Show the model only rules that can apply to the categories in this chunk
         # (items are category-ordered, so a chunk is usually one category): fewer
         # input tokens and fewer chances to mis-match an irrelevant rule. Original
         # rule indices are preserved so rule_scopes/rules stay aligned for validation.
         chunk_cats = {item_category[item["id"]] for item in chunk}
-        applicable = [j for j, sc in enumerate(scopes) if sc is None or (sc & chunk_cats)]
+        applicable = [j for j, sc in enumerate(scopes)
+                      if j not in literal and (sc is None or (sc & chunk_cats))]
         if not applicable:
-            return None
+            return None, set(), set()
         numbered_rules = "\n".join(f"{j}. {rules[j]}" for j in applicable)
         numbered_items = "\n".join(
             f"{item['id']} [{item.get('source', '?')}/{item.get('category', '?')}]: {(item['text'] or '')[:150]}"
@@ -427,7 +474,7 @@ async def check_blocked_filters(
         )
         user_msg = f"Filter rules:\n{numbered_rules}\n\nItems:\n{numbered_items}"
         async with slots:
-            return await llm_json(
+            data = await llm_json(
                 messages=[
                     {"role": "system", "content": _FILTER_SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg},
@@ -435,15 +482,17 @@ async def check_blocked_filters(
                 max_retries=3,
                 task="filter",
             )
+        return data, set(applicable), {item["id"] for item in chunk}
 
-    chunks = [items[i:i + _FILTER_CHUNK] for i in range(0, len(items), _FILTER_CHUNK)]
+    chunks = [to_judge[i:i + _FILTER_CHUNK] for i in range(0, len(to_judge), _FILTER_CHUNK)]
     answers = await asyncio.gather(*(check_chunk(c) for c in chunks), return_exceptions=True)
-    for data in answers:
-        if isinstance(data, asyncio.CancelledError):
-            raise data  # a cancelled digest must unwind, not carry on filtering
-        if isinstance(data, Exception):
-            log.warning("Filter: chunk failed, its items pass through unfiltered: %s", data)
+    for answer in answers:
+        if isinstance(answer, asyncio.CancelledError):
+            raise answer  # a cancelled digest must unwind, not carry on filtering
+        if isinstance(answer, Exception):
+            log.warning("Filter: chunk failed, its items pass through unfiltered: %s", answer)
             continue
+        data, shown, judged_ids = answer
         if not data or not isinstance(data.get("blocked"), list):
             continue
         for entry in data["blocked"]:
@@ -452,6 +501,18 @@ async def check_blocked_filters(
             confidence = entry.get("confidence", 10)
             scope = rule_scopes[rule_idx] if (rule_scopes and isinstance(rule_idx, int) and 0 <= rule_idx < len(rule_scopes)) else None
             out_of_scope = bool(scope) and item_category.get(item_id) not in scope
+            # A verdict only counts for what the chunk actually carried. The numbered
+            # rule list has gaps (out-of-scope and literal rules are left out), and item
+            # ids are consecutive, so one drifted digit lands on a real item of the
+            # neighbouring chunk — which would then be dropped from the digest under a
+            # rule it never matched, and a literal rule carries no scope for the
+            # out_of_scope guard to catch.
+            if item_id not in judged_ids:
+                log.info("Filter: ignored verdict for item id=%s — not in the judged chunk", item_id)
+                continue
+            if isinstance(rule_idx, int) and rule_idx not in shown:
+                log.info("Filter: kept item id=%s | rule index %s was not shown to this chunk", item_id, rule_idx)
+                continue
             if (
                 isinstance(item_id, int)
                 and isinstance(rule_idx, int)

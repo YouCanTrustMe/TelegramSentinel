@@ -409,3 +409,111 @@ def test_reserve_token_refills_over_time():
     assert bucket[0] == 2.0
     assert llm_client._reserve_token(bucket, 100.0, rate, capacity) == 0.0
     assert bucket[0] == capacity - 1                                       # capped at capacity
+
+
+def test_a_model_that_only_ever_429s_is_parked_not_re_probed(monkeypatch):
+    """A rolling limit clears in a minute; a WITHDRAWN model answers 429 forever. On
+    2026-09-04 mistral-small 429'd a single call on an idle key, and the 60s cooldown
+    had the pipeline re-probing it every 20 minutes all day."""
+    tag = "mistral/mistral-small-latest"
+    llm_client._throttle_streak.pop(tag, None)
+    clock = [1000.0]
+    monkeypatch.setattr(llm_client.time, "monotonic", lambda: clock[0])
+
+    verdicts = []
+    for _ in range(llm_client._THROTTLE_STREAK_DEAD):
+        verdicts.append(llm_client._note_throttled(tag))
+        clock[0] += 20 * 60          # one classify pass apart, as in prod
+
+    assert verdicts[:-1] == [False] * (llm_client._THROTTLE_STREAK_DEAD - 1)
+    assert verdicts[-1] is True
+
+
+def test_a_concurrent_burst_of_429s_is_contention_not_retirement(monkeypatch):
+    """The content filter gathers its chunks in parallel, so one RPM burst can return
+    six 429s inside a second. Parking a healthy model for a day over that would be far
+    worse than the log noise the parking exists to stop."""
+    tag = "mistral/ministral-14b-latest"
+    llm_client._throttle_streak.pop(tag, None)
+    clock = [1000.0]
+    monkeypatch.setattr(llm_client.time, "monotonic", lambda: clock[0])
+
+    verdicts = []
+    for _ in range(llm_client._THROTTLE_STREAK_DEAD + 4):
+        verdicts.append(llm_client._note_throttled(tag))
+        clock[0] += 0.05
+
+    assert verdicts == [False] * len(verdicts)
+
+
+def test_one_success_clears_the_throttle_streak(monkeypatch):
+    """Ordinary contention: a 429 here and there with calls succeeding in between must
+    never add up to 'withdrawn'."""
+    tag = "mistral/ministral-14b-latest"
+    llm_client._throttle_streak.pop(tag, None)
+    clock = [1000.0]
+    monkeypatch.setattr(llm_client.time, "monotonic", lambda: clock[0])
+
+    for _ in range(llm_client._THROTTLE_STREAK_DEAD - 1):
+        assert llm_client._note_throttled(tag) is False
+        clock[0] += 20 * 60
+    llm_client._bump(tag, "ok")
+
+    assert llm_client._note_throttled(tag) is False
+    assert llm_client._throttle_streak[tag][0] == 1
+
+
+def test_the_park_resets_the_streak_so_a_recovered_model_gets_a_clean_slate(monkeypatch):
+    """The park's own re-probe is a single call. If the streak survived the park, one
+    429 on that probe would re-park the model for another day, and so on forever."""
+    tag = "mistral/mistral-small-latest"
+    llm_client._throttle_streak.pop(tag, None)
+    clock = [1000.0]
+    monkeypatch.setattr(llm_client.time, "monotonic", lambda: clock[0])
+
+    for _ in range(llm_client._THROTTLE_STREAK_DEAD - 1):
+        llm_client._note_throttled(tag)
+        clock[0] += 20 * 60
+    assert llm_client._note_throttled(tag) is True
+
+    llm_client._throttle_streak.pop(tag, None)   # what the park does
+    clock[0] += llm_client._BILLING_DOWN_SECONDS
+
+    assert llm_client._note_throttled(tag) is False   # one 429 after the park is not a verdict
+
+
+def test_an_old_isolated_429_does_not_count_towards_retirement(monkeypatch):
+    """Without a staleness cut the span check is vacuous: one stray 429 from yesterday
+    plus one concurrent burst today would satisfy both the count and the span, and park
+    a perfectly healthy model for a day."""
+    tag = "groq/openai/gpt-oss-120b"
+    llm_client._throttle_streak.pop(tag, None)
+    clock = [1000.0]
+    monkeypatch.setattr(llm_client.time, "monotonic", lambda: clock[0])
+
+    llm_client._note_throttled(tag)                      # stray 429
+    clock[0] += llm_client._THROTTLE_STREAK_STALE + 60   # served fine (or idle) since
+
+    verdicts = []
+    for _ in range(llm_client._THROTTLE_STREAK_DEAD + 2):   # a burst, all within a second
+        verdicts.append(llm_client._note_throttled(tag))
+        clock[0] += 0.05
+
+    assert verdicts == [False] * len(verdicts)
+
+
+def test_a_slow_drip_of_429s_is_not_a_withdrawal(monkeypatch):
+    """A withdrawn model refuses every call, so its strikes arrive as fast as it is
+    called. A fallback entry reached only on failover can drip one 429 an hour for a day
+    without being withdrawn — that must not add up to a 24h park."""
+    tag = "groq/openai/gpt-oss-120b"
+    llm_client._throttle_streak.pop(tag, None)
+    clock = [1000.0]
+    monkeypatch.setattr(llm_client.time, "monotonic", lambda: clock[0])
+
+    verdicts = []
+    for _ in range(12):
+        verdicts.append(llm_client._note_throttled(tag))
+        clock[0] += 50 * 60          # under the staleness cut, over the max span
+
+    assert verdicts == [False] * len(verdicts)

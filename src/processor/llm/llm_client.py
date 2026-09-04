@@ -75,6 +75,20 @@ _ALERT_COOLDOWN = 1800.0
 # How long a 429-without-Retry-After model is skipped, so a digest's later calls route
 # past it instead of re-hitting (and re-warning about) the same throttle.
 _RATE_LIMIT_COOLDOWN = 60.0
+# Consecutive no-Retry-After 429s (nothing succeeding in between) after which a model is
+# treated as withdrawn rather than busy: parked for the day and reported once. The streak
+# must also SPAN this long, because the filter fires its chunks concurrently — six 429s
+# from one burst are contention, six spread over a quarter of an hour are not.
+_THROTTLE_STREAK_DEAD = 6
+_THROTTLE_STREAK_MIN_SPAN = 900.0
+# ...and stay unbroken: a gap this long means the model was serving in between (or was
+# simply not called), so the next 429 starts a fresh streak rather than topping up a
+# stale one until an unrelated burst pushes it over the line.
+_THROTTLE_STREAK_STALE = 3600.0
+# A withdrawn model refuses every call, so its strikes arrive as fast as we call it. A
+# fallback entry reached only on failover can instead drip a 429 every hour or so without
+# ever being withdrawn, so a streak that takes longer than this to build is not evidence.
+_THROTTLE_STREAK_MAX_SPAN = 7200.0
 # A 402 means the account is out of credit, not out of a rolling quota: nothing
 # resets in minutes, so the provider is parked for a day (one alert instead of one
 # per call) and re-probed by the daily verify job.
@@ -189,6 +203,9 @@ _quota_dead_until: dict[str, float] = {}
 _model_stats: dict[str, dict[str, int]] = {}
 _failover_count: int = 0
 _last_alert_time: float | None = None
+# Consecutive 429s carrying no Retry-After, per model, with no successful call between:
+# {tag: (count, first seen, last seen)}.
+_throttle_streak: dict[str, tuple[int, float, float]] = {}
 
 
 def _tag(provider: str, model: str) -> str:
@@ -198,6 +215,8 @@ def _tag(provider: str, model: str) -> str:
 def _bump(tag: str, key: str) -> None:
     stats = _model_stats.setdefault(tag, {"ok": 0, "rate_limited": 0, "quota_dead": 0, "error": 0})
     stats[key] += 1
+    if key == "ok":
+        _throttle_streak.pop(tag, None)
 
 
 def format_llm_stats() -> str:
@@ -219,6 +238,27 @@ def reset_llm_stats() -> None:
 
 def _is_dead(tag: str) -> bool:
     return _quota_dead_until.get(tag, 0.0) > time.monotonic()
+
+
+def _note_throttled(tag: str) -> bool:
+    """Count a 429-without-Retry-After and report whether this model now looks retired
+    rather than momentarily busy.
+
+    A rolling limit clears in a minute or two. A model whose free tier has been WITHDRAWN
+    answers 429 to every call forever — 2026-09-04, mistral-small answered 429 to a single
+    call on an idle key, and the 60s cooldown meant the pipeline re-probed it every 20
+    minutes all day, each pass paying the failover and logging the same line.
+
+    The streak must span _THROTTLE_STREAK_MIN_SPAN as well as reach its count: the content
+    filter gathers its chunks concurrently, so one RPM burst can return six 429s within a
+    second, and parking a healthy model for a day over that would be worse than the noise."""
+    now = time.monotonic()
+    count, first, last = _throttle_streak.get(tag, (0, now, now))
+    if now - last > _THROTTLE_STREAK_STALE or now - first > _THROTTLE_STREAK_MAX_SPAN:
+        count, first = 0, now
+    _throttle_streak[tag] = (count + 1, first, now)
+    span = now - first
+    return count + 1 >= _THROTTLE_STREAK_DEAD and _THROTTLE_STREAK_MIN_SPAN <= span
 
 
 def _signal_quota_dead(tag: str, seconds: float) -> None:
@@ -494,12 +534,25 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
                     # No Retry-After (e.g. Cerebras' 5 RPM cap): fail over now rather than
                     # sleep a guessed wait, and skip this model for a cooldown. A real
                     # Retry-After is still honoured below.
-                    _quota_dead_until[tag] = time.monotonic() + _RATE_LIMIT_COOLDOWN
-                    # INFO, not WARNING: the admin-alert handler forwards WARNING, and
-                    # this fires several times a day while the call still succeeds on the
-                    # next chain entry. A chain that truly runs out alerts separately.
-                    log.info("LLM rate limit on %s (no retry-after), failing over and skipping it for %gs",
-                             tag, _RATE_LIMIT_COOLDOWN)
+                    if _note_throttled(tag):
+                        _bump(tag, "quota_dead")
+                        _quota_dead_until[tag] = time.monotonic() + _BILLING_DOWN_SECONDS
+                        streak_len = _throttle_streak[tag][0]
+                        # Clear it here, not on the next 200: the park's own re-probe is a
+                        # single call, and one 429 on it would otherwise re-park the model
+                        # for another day, forever.
+                        _throttle_streak.pop(tag, None)
+                        log.warning("LLM %s has answered 429 to %d calls in a row with nothing in "
+                                    "between: treating it as withdrawn, parked for %.0fh — re-bench "
+                                    "before routing to it again",
+                                    tag, streak_len, _BILLING_DOWN_SECONDS / 3600)
+                    else:
+                        _quota_dead_until[tag] = time.monotonic() + _RATE_LIMIT_COOLDOWN
+                        # INFO, not WARNING: the admin-alert handler forwards WARNING, and
+                        # this fires several times a day while the call still succeeds on the
+                        # next chain entry. A chain that truly runs out alerts separately.
+                        log.info("LLM rate limit on %s (no retry-after), failing over and skipping it for %gs",
+                                 tag, _RATE_LIMIT_COOLDOWN)
                     break  # next chain entry
                 _signal_backoff(tag, ra)
                 if attempt < max_retries - 1:

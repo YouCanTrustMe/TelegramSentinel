@@ -44,25 +44,30 @@ PROVIDERS: dict[str, dict] = {
 # chain as the always-present last resort. Entries whose provider has no API key
 # are skipped automatically, so the system degrades gracefully if a key is missing.
 TASK_ROUTING: dict[str, list[tuple[str, str]]] = {
-    # Benchmarked 2026-08-31 on 60 real prod items (id fidelity) and on prod filter
-    # ground truth (18 correctly-blocked + 18 that must pass). Mistral Small heads every
-    # chain: 60/60 ids, 0 false blocks, and the roomiest budget of the three (50 RPM /
-    # 50K TPM). Gemini Flash-Lite is second on the same numbers at a third of the latency,
-    # but on a 15 RPM free tier, so it fallbacks rather than leads. Groq tails: its 8K
-    # tokens/minute cannot fit a batch prompt, yet it still serves the small single-item
-    # calls, and it is a third separate quota.
-    # Rejected here: mistral-medium (tighter 25K TPM and it false-blocked real news),
-    # gemini-3.5-flash (same accuracy as Flash-Lite, 7x slower), gemini-2.5-flash-lite
-    # (dropped 12/60 ids), groq qwen/gpt-oss-20b (429 before finishing a batch).
-    "classify":  [("mistral", "mistral-small-latest"), ("gemini", "gemini-3.5-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    # Re-benchmarked 2026-09-04 on the same 60 prod items, after Mistral's free tier
+    # stopped serving its premier models: mistral-small/medium/magistral answer 429
+    # ("Rate limit exceeded") to EVERY call, even a single one on an idle key, while
+    # ministral-* and mistral-embed on the same key answer 200. It is a per-model cap,
+    # not our burst and not the account.
+    # ministral-14b heads every chain: 60/60 then 58/60 ids over two runs, 0 bad calls,
+    # ~9.5s per 12-item batch — the only candidate that never dropped a call.
+    # gemini-3.1-flash-lite is second: same recall as the rest of the Gemini family when
+    # it answers, but 8-70x faster than 3.5-flash-lite, whose 20-67s latency is what
+    # turned the 2026-09-04 morning digest into a 374s build with re-classify timeouts.
+    # Groq tails as a third separate quota (its json_object mode still 400s on gpt-oss,
+    # which llm_json repairs from `failed_generation`).
+    # Rejected here: mistral-small/medium/large (429/403 — dead for this key),
+    # gemini-3.5-flash (2x the latency of 3.1-flash-lite for the same recall),
+    # groq gpt-oss-20b and qwen3.6-27b (5/5 bad calls, 400 + 429).
+    "classify":  [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
     # id-array batch summarise (no merge)
-    "batch":     [("mistral", "mistral-small-latest"), ("gemini", "gemini-3.5-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    "batch":     [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
     # id-array grouping + B1 dedup confirm + within-source merge
-    "group":     [("mistral", "mistral-small-latest"), ("gemini", "gemini-3.5-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    "group":     [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
     # content filter (rate 1-10)
-    "filter":    [("mistral", "mistral-small-latest"), ("gemini", "gemini-3.5-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    "filter":    [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
     # Ukrainian translate-guard retry
-    "translate": [("mistral", "mistral-small-latest"), ("gemini", "gemini-3.5-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    "translate": [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
 }
 
 _QUOTA_DEAD_THRESHOLD = 300.0

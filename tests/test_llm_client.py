@@ -130,7 +130,7 @@ def test_llm_json_returns_parsed_on_success(monkeypatch):
     llm_client._quota_dead_until.clear()
     monkeypatch.setitem(llm_client.TASK_ROUTING, "t_ok", [("groq", "m1")])
     async def fake_call(provider, model, messages, temperature=0.1):
-        return {"summary": "ok"}, 200, {}
+        return {"summary": "ok"}, 200, {}, ""
     monkeypatch.setattr(llm_client, "_call_once", fake_call)
     out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_ok"))
     assert out == {"summary": "ok"}
@@ -145,8 +145,8 @@ def test_llm_json_fails_over_to_next_on_quota_dead(monkeypatch):
     async def fake_call(provider, model, messages, temperature=0.1):
         calls.append(model)
         if model == "m1":
-            return None, 429, {"retry-after": "600"}  # quota dead → fail over
-        return {"ok": 1}, 200, {}
+            return None, 429, {"retry-after": "600"}, ""  # quota dead → fail over
+        return {"ok": 1}, 200, {}, ""
     monkeypatch.setattr(llm_client, "_call_once", fake_call)
     out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_fo"))
     assert out == {"ok": 1}
@@ -159,13 +159,124 @@ def test_llm_json_fails_over_on_unparseable_then_succeeds(monkeypatch):
     import asyncio
     llm_client._quota_dead_until.clear()
     monkeypatch.setitem(llm_client.TASK_ROUTING, "t_bad", [("groq", "m1"), ("groq", "m2")])
+    calls = []
     async def fake_call(provider, model, messages, temperature=0.1):
+        calls.append(model)
         if model == "m1":
-            return None, 200, {}  # 200 but JSON unparseable
-        return {"ok": 2}, 200, {}
+            return None, 200, {}, ""  # 200 but JSON unparseable
+        return {"ok": 2}, 200, {}, ""
     monkeypatch.setattr(llm_client, "_call_once", fake_call)
     out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_bad"))
     assert out == {"ok": 2}
+    # The head is retried once before the failover is paid for.
+    assert calls == ["m1", "m1", "m2"]
+
+
+def test_llm_json_retries_unparseable_on_the_same_model(monkeypatch):
+    """~1 call in 10 comes back malformed on the current head and the same model gets
+    it right on the next try, so a single bad answer must not cost a failover."""
+    import asyncio
+    llm_client._quota_dead_until.clear()
+    llm_client._failover_count = 0
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_retry", [("groq", "m1"), ("groq", "m2")])
+    calls = []
+    async def fake_call(provider, model, messages, temperature=0.1):
+        calls.append(model)
+        if len(calls) == 1:
+            return None, 200, {}, ""
+        return {"ok": 3}, 200, {}, ""
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_retry"))
+    assert out == {"ok": 3}
+    assert calls == ["m1", "m1"]
+    assert llm_client._failover_count == 0
+
+
+def test_unparseable_body_is_returned_for_the_log(monkeypatch):
+    """The failover warning used to throw the evidence away; the raw answer comes back
+    with the call so it can be logged (and so concurrent chunks cannot swap bodies)."""
+    import asyncio
+    class _Resp:
+        status = 200
+        headers = {}
+        async def text(self):
+            return '{"choices": [{"message": {"content": "Sure! here is the JSON"}}]}'
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def post(self, *a, **kw):
+            return _Resp()
+
+    async def fake_session():
+        return _Session()
+
+    async def no_gate(provider):
+        return None
+
+    monkeypatch.setattr(llm_client, "_get_session", fake_session)
+    monkeypatch.setattr(llm_client, "_rate_gate", no_gate)
+    monkeypatch.setattr(llm_client, "_key", lambda provider: "k")
+    parsed, status, _, raw = asyncio.run(
+        llm_client._call_once("groq", "m1", [{"role": "user", "content": "x"}]))
+
+    assert parsed is None and status == 200
+    assert raw == "Sure! here is the JSON"
+
+
+def test_null_content_is_unparseable_not_a_crash(monkeypatch):
+    """A 200 whose content is null used to slice a None and land in the generic
+    exception path — which skips the retry and alerts the admin."""
+    import asyncio
+
+    class _Resp:
+        status = 200
+        headers = {}
+        async def text(self):
+            return '{"choices": [{"message": {"content": null}}]}'
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def post(self, *a, **kw):
+            return _Resp()
+
+    async def fake_session():
+        return _Session()
+
+    async def no_gate(provider):
+        return None
+
+    monkeypatch.setattr(llm_client, "_get_session", fake_session)
+    monkeypatch.setattr(llm_client, "_rate_gate", no_gate)
+    monkeypatch.setattr(llm_client, "_key", lambda provider: "k")
+    parsed, status, _, raw = asyncio.run(
+        llm_client._call_once("groq", "m1", [{"role": "user", "content": "x"}]))
+
+    assert parsed is None and status == 200 and raw == "None"
+
+
+def test_unparseable_retry_does_not_re_send_at_temperature_zero(monkeypatch):
+    """batch/group/filter/translate call at temperature 0, where an identical re-ask
+    breaks identically; the retry is nudged off zero so it is worth making."""
+    import asyncio
+    llm_client._quota_dead_until.clear()
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "batch", [("groq", "m1")])
+    temps = []
+    async def fake_call(provider, model, messages, temperature=0.1):
+        temps.append(temperature)
+        if len(temps) == 1:
+            return None, 200, {}, "not json"
+        return {"ok": 5}, 200, {}, ""
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="batch"))
+
+    assert out == {"ok": 5}
+    assert temps[0] == 0.0 and temps[1] > 0.0
 
 
 def test_llm_json_fails_over_immediately_on_429_without_retry_after(monkeypatch):
@@ -179,8 +290,8 @@ def test_llm_json_fails_over_immediately_on_429_without_retry_after(monkeypatch)
     async def fake_call(provider, model, messages, temperature=0.1):
         calls.append(model)
         if model == "m1":
-            return None, 429, {}  # throttled, no retry-after header
-        return {"ok": 3}, 200, {}
+            return None, 429, {}, ""  # throttled, no retry-after header
+        return {"ok": 3}, 200, {}, ""
     monkeypatch.setattr(llm_client, "_call_once", fake_call)
     out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_ra"))
     assert out == {"ok": 3}
@@ -199,7 +310,7 @@ def test_429_without_retry_after_is_not_admin_alerting(monkeypatch, caplog):
     llm_client._quota_dead_until.clear()
     monkeypatch.setitem(llm_client.TASK_ROUTING, "t_quiet", [("groq", "m1"), ("groq", "m2")])
     async def fake_call(provider, model, messages, temperature=0.1):
-        return (None, 429, {}) if model == "m1" else ({"ok": 4}, 200, {})
+        return (None, 429, {}, "") if model == "m1" else ({"ok": 4}, 200, {}, "")
     monkeypatch.setattr(llm_client, "_call_once", fake_call)
     with caplog.at_level(logging.INFO, logger="src.processor.llm.llm_client"):
         out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_quiet"))
@@ -215,7 +326,7 @@ def test_llm_json_returns_repaired_on_groq_400(monkeypatch):
     llm_client._quota_dead_until.clear()
     monkeypatch.setitem(llm_client.TASK_ROUTING, "t_rep", [("groq", "m1")])
     async def fake_call(provider, model, messages, temperature=0.1):
-        return {"summary": "repaired"}, 400, {}  # _call_once already repaired failed_generation
+        return {"summary": "repaired"}, 400, {}, ""  # _call_once already repaired failed_generation
     monkeypatch.setattr(llm_client, "_call_once", fake_call)
     out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_rep"))
     assert out == {"summary": "repaired"}
@@ -227,7 +338,7 @@ def test_llm_json_returns_empty_when_all_dead(monkeypatch):
     llm_client._quota_dead_until.clear()
     monkeypatch.setitem(llm_client.TASK_ROUTING, "t_dead", [("groq", "d1"), ("groq", "d2")])
     async def fake_call(provider, model, messages, temperature=0.1):
-        return None, 429, {"retry-after": "600"}
+        return None, 429, {"retry-after": "600"}, ""
     monkeypatch.setattr(llm_client, "_call_once", fake_call)
     out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_dead"))
     assert out == {}
@@ -254,7 +365,7 @@ def test_id_tasks_use_zero_temperature(monkeypatch):
     seen = {}
     async def fake_call(provider, model, messages, temperature=0.1):
         seen[messages[0]["content"]] = temperature
-        return {"ok": 1}, 200, {}
+        return {"ok": 1}, 200, {}, ""
     monkeypatch.setattr(llm_client, "_call_once", fake_call)
     monkeypatch.setitem(llm_client.TASK_ROUTING, "group", [("groq", "m1")])
     monkeypatch.setitem(llm_client.TASK_ROUTING, "classify", [("groq", "m1")])
@@ -279,8 +390,8 @@ def test_llm_json_marks_provider_down_on_auth_fail(monkeypatch):
     async def fake_call(provider, model, messages, temperature=0.1):
         calls.append((provider, model))
         if provider == "mistral":
-            return None, 401, {}
-        return {"ok": 1}, 200, {}
+            return None, 401, {}, ""
+        return {"ok": 1}, 200, {}, ""
     monkeypatch.setattr(llm_client, "_alert_provider", noop_alert)
     monkeypatch.setattr(llm_client, "_call_once", fake_call)
     out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_auth"))
@@ -302,8 +413,8 @@ async def test_402_parks_the_whole_provider_after_one_attempt(monkeypatch):
     async def fake_call_once(provider, model, messages, temperature=0.1):
         calls.append((provider, model))
         if provider == "cerebras":
-            return None, 402, {}
-        return {"ok": True}, 200, {}
+            return None, 402, {}, ""
+        return {"ok": True}, 200, {}, ""
 
     async def fake_alert(provider, msg):
         alerts.append((provider, msg))
@@ -331,7 +442,7 @@ async def test_402_provider_is_skipped_on_later_calls(monkeypatch):
 
     async def fake_call_once(provider, model, messages, temperature=0.1):
         calls.append(provider)
-        return (None, 402, {}) if provider == "cerebras" else ({"ok": True}, 200, {})
+        return (None, 402, {}, "") if provider == "cerebras" else ({"ok": True}, 200, {}, "")
 
     async def fake_alert(provider, msg):
         pass
@@ -359,7 +470,7 @@ async def test_404_parks_a_retired_model_and_alerts(monkeypatch):
 
     async def fake_call_once(provider, model, messages, temperature=0.1):
         calls.append(model)
-        return (None, 404, {}) if model == "retired-model" else ({"ok": True}, 200, {})
+        return (None, 404, {}, "") if model == "retired-model" else ({"ok": True}, 200, {}, "")
 
     async def fake_alert(target, msg):
         alerts.append((target, msg))

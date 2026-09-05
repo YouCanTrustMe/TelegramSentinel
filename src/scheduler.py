@@ -103,8 +103,12 @@ def _new_silent_sources(rows: list, already_alerted: set[int], now: datetime | N
 def _silent_source_line(row) -> str:
     last = row_get(row, "last_item_at")
     hours = row_get(row, "hours_silent")
-    age = f"{int(hours) // 24}d" if hours is not None else "never"
-    return f"{row_get(row, 'name')} ({row_get(row, 'type')}, last item {last or 'never'}, silent {age})"
+    name, kind = row_get(row, "name"), row_get(row, "type")
+    if last is None or hours is None:
+        # "last item never, silent never" read like a bug; a source that has never
+        # produced has no age to report, only the fact.
+        return f"{name} ({kind}, no items ever)"
+    return f"{name} ({kind}, last item {last}, silent {int(hours) // 24}d)"
 
 
 async def _silent_sources_job() -> None:

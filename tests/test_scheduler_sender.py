@@ -107,7 +107,16 @@ def test_silent_source_line_reports_a_source_that_never_published():
         {"id": 22, "name": "Zagreb up to you", "type": "telegram",
          "last_item_at": None, "hours_silent": None})
 
-    assert "never" in line and "Zagreb up to you" in line
+    # "last item never, silent never" read like a bug; state the fact instead.
+    assert line == "Zagreb up to you (telegram, no items ever)"
+
+
+def test_silent_source_line_reports_the_age_when_there_is_one():
+    line = scheduler._silent_source_line(
+        {"id": 23, "name": "Import AI", "type": "rss",
+         "last_item_at": "2026-08-20 06:00:00", "hours_silent": 400})
+
+    assert line == "Import AI (rss, last item 2026-08-20 06:00:00, silent 16d)"
 
 
 def test_a_source_added_today_is_not_reported_as_silent():

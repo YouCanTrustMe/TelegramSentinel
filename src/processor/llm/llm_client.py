@@ -206,6 +206,13 @@ _last_alert_time: float | None = None
 # Consecutive 429s carrying no Retry-After, per model, with no successful call between:
 # {tag: (count, first seen, last seen)}.
 _throttle_streak: dict[str, tuple[int, float, float]] = {}
+# How much of a 200-but-unparseable answer to carry into the log, and how many
+# times to re-ask the same model before paying a failover.
+_UNPARSEABLE_SNIPPET_CHARS = 200
+_UNPARSEABLE_RETRIES = 1
+# The deterministic tasks call at temperature 0, where a re-ask is byte-identical
+# and so breaks the same way; nudge it just for the retry.
+_UNPARSEABLE_RETRY_TEMPERATURE = 0.3
 
 
 def _tag(provider: str, model: str) -> str:
@@ -440,10 +447,11 @@ async def verify_llm_providers() -> None:
             log.info("LLM verify: %s key OK (HTTP %d)", provider, status)
 
 
-async def _call_once(provider: str, model: str, messages: list[dict], temperature: float = 0.1) -> tuple[dict | None, int, object]:
-    """Single HTTP call. Returns (parsed_or_None, status, headers). parsed is {}
-    on a recoverable empty/error so the caller can distinguish from a hard failure
-    via status."""
+async def _call_once(provider: str, model: str, messages: list[dict], temperature: float = 0.1) -> tuple[dict | None, int, object, str]:
+    """Single HTTP call. Returns (parsed_or_None, status, headers, raw_snippet).
+    parsed is {} on a recoverable empty/error so the caller can distinguish from a
+    hard failure via status; raw_snippet is the start of what came back when it
+    could not be parsed, so the caller can log the evidence."""
     await _rate_gate(provider)
     session = await _get_session()
     payload = {
@@ -462,15 +470,20 @@ async def _call_once(provider: str, model: str, messages: list[dict], temperatur
             data = json.loads(text)
             content = data["choices"][0]["message"]["content"]
         except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-            return None, status, hdrs
-        return _coerce_json(content), status, hdrs
+            return None, status, hdrs, text[:_UNPARSEABLE_SNIPPET_CHARS]
+        if not isinstance(content, str):
+            # 200 with content null or a non-string: nothing to parse, but the shape
+            # itself is the evidence.
+            return None, status, hdrs, repr(content)[:_UNPARSEABLE_SNIPPET_CHARS]
+        parsed = _coerce_json(content)
+        return parsed, status, hdrs, "" if parsed is not None else content[:_UNPARSEABLE_SNIPPET_CHARS]
     if status == 400:
         try:
             body = json.loads(text)
         except json.JSONDecodeError:
             body = {}
-        return _repair_from_groq_400(body), status, hdrs
-    return None, status, hdrs
+        return _repair_from_groq_400(body), status, hdrs, ""
+    return None, status, hdrs, ""
 
 
 async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "classify") -> dict:
@@ -495,13 +508,16 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
             _failover_count += 1
         first = False
 
+        unparseable_retries = 0
         for attempt in range(max_retries):
             now = time.monotonic()
             wait_until = _backoff_until.get(tag, 0.0)
             if wait_until > now:
                 await asyncio.sleep(wait_until - now)
             try:
-                parsed, status, hdrs = await _call_once(provider, model, messages, temperature)
+                call_temperature = (_UNPARSEABLE_RETRY_TEMPERATURE if unparseable_retries
+                                    else temperature)
+                parsed, status, hdrs, raw = await _call_once(provider, model, messages, call_temperature)
             except Exception as exc:
                 _bump(tag, "error")
                 log.warning("LLM call error on %s: %s", tag, str(exc)[:120])
@@ -513,7 +529,15 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
                 return parsed
             if status == 200 and parsed is None:
                 _bump(tag, "error")
-                log.warning("LLM %s returned unparseable JSON, failing over", tag)
+                if unparseable_retries < _UNPARSEABLE_RETRIES and attempt < max_retries - 1:
+                    unparseable_retries += 1
+                    # Roughly 1 call in 10 comes back malformed on the current head; the
+                    # same model gets it right on the next try, so retry before paying a
+                    # failover (and before waking the admin).
+                    log.info("LLM %s returned unparseable JSON, retrying same model | raw=%r", tag, raw)
+                    continue
+                log.warning("LLM %s returned unparseable JSON %d times, failing over | raw=%r",
+                            tag, unparseable_retries + 1, raw)
                 break  # next chain entry
             if status == 400:
                 if parsed is not None:  # repaired from Groq failed_generation

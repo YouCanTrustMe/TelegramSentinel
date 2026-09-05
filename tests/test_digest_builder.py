@@ -17,18 +17,35 @@ from src.dispatcher.digest_builder import (
 
 
 def test_slow_digest_warning_none_when_fast():
-    assert _slow_digest_warning(3.2, threshold_s=90.0) is None
+    assert _slow_digest_warning(3.2, 4, threshold_s=90.0) is None
 
 
 def test_slow_digest_warning_none_at_exact_threshold():
     # Boundary is inclusive: exactly at the threshold is still healthy.
-    assert _slow_digest_warning(90.0, threshold_s=90.0) is None
+    assert _slow_digest_warning(90.0, 40, threshold_s=90.0) is None
 
 
 def test_slow_digest_warning_fires_when_slow():
-    msg = _slow_digest_warning(140.0, threshold_s=90.0)
+    msg = _slow_digest_warning(140.0, 40, threshold_s=90.0)
     assert msg is not None
     assert "140s" in msg and "90s" in msg
+
+
+def test_slow_digest_threshold_scales_with_the_item_count():
+    """A big healthy digest must not alert: 116 items in 101.6s is 0.88s/item, while
+    the regression that alerted for real was 2.6s/item."""
+    assert _slow_digest_warning(101.6, 116) is None
+    assert _slow_digest_warning(374.0, 144) is not None
+
+
+def test_slow_digest_threshold_has_a_floor_for_tiny_digests():
+    # 2 items x 1.5s would be a 3s threshold; a small digest still gets the floor.
+    assert _slow_digest_warning(20.0, 2) is None
+    assert _slow_digest_warning(70.0, 2) is not None
+
+
+def test_slow_digest_warning_survives_an_empty_digest():
+    assert _slow_digest_warning(1.0, 0) is None
 
 
 def test_split_keeps_small_segments_in_one_message():

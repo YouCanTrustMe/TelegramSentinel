@@ -27,17 +27,29 @@ _TELEGRAM_LIMIT = 4000
 _MAX_BLOCK_LEN = 3800
 _MAX_ITEMS_PER_SOURCE = 50
 _DEFER_MAX_DAYS = 3
-# A healthy digest builds in a few seconds (embeddings + a handful of LLM calls);
-# anything past this is the slow-digest regression that once ran to ~9 min, so it
-# gets a WARNING that reaches the admin instead of only living in the timestamps.
-_SLOW_DIGEST_SECONDS = 90.0
+# Build time scales with the item count (embeddings + LLM calls per item), so the
+# threshold does too: an absolute one fires on SIZE rather than on sickness (116
+# healthy items took 101.6s = 0.88s/item, while the regression that once ran to
+# ~9 min was 2.6s/item). The floor keeps a handful of items from tripping it.
+_SLOW_DIGEST_PER_ITEM = 1.5
+_SLOW_DIGEST_FLOOR = 60.0
 
 
-def _slow_digest_warning(elapsed_s: float, threshold_s: float = _SLOW_DIGEST_SECONDS) -> str | None:
-    """Return an admin-facing warning string when a digest took too long, else None."""
+def _slow_digest_threshold(item_count: int) -> float:
+    return max(_SLOW_DIGEST_FLOOR, _SLOW_DIGEST_PER_ITEM * item_count)
+
+
+def _slow_digest_warning(elapsed_s: float, item_count: int,
+                         threshold_s: float | None = None) -> str | None:
+    """Return an admin-facing warning string when a digest took too long for its
+    size, else None."""
+    if threshold_s is None:
+        threshold_s = _slow_digest_threshold(item_count)
     if elapsed_s <= threshold_s:
         return None
-    return f"Slow digest: build took {elapsed_s:.0f}s (> {threshold_s:.0f}s threshold)"
+    per_item = elapsed_s / item_count if item_count else elapsed_s
+    return (f"Slow digest: build took {elapsed_s:.0f}s for {item_count} items "
+            f"({per_item:.2f}s/item, > {threshold_s:.0f}s threshold)")
 
 
 # Shortest clickable anchor we render: 1-3 char key phrases (Fed, РФ, BTC) are
@@ -665,6 +677,10 @@ async def _send_digest_locked(
                 pass
 
     items = await get_unsent_items(categories=categories)
+    # The build works on every fetched item — re-classify, dedup, filter — long
+    # before deferring or muting trims the list, so this, not what survives to the
+    # message, is what the slow-digest threshold has to be measured against.
+    processed_total = len(items)
     if not items:
         log.info("Digest triggered: no unsent items | filter=%s", categories)
         return False
@@ -768,7 +784,7 @@ async def _send_digest_locked(
         "Digest done: %d items (%d filtered) | %d/%d message(s) sent | %d items confirmed | filter=%s | status=%s | build=%.1fs",
         len(items), len(blocked_items), sent_count, total_messages, confirmed_count, categories, status, elapsed,
     )
-    slow_warning = _slow_digest_warning(elapsed)
+    slow_warning = _slow_digest_warning(elapsed, processed_total)
     if slow_warning:
         log.warning("%s | filter=%s", slow_warning, categories)
     log.info(format_llm_stats())

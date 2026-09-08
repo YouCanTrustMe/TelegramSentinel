@@ -136,8 +136,15 @@ def _escape_stray_quotes(text: str) -> str:
     return "".join(out)
 
 
-def _coerce_json(text: str) -> dict | None:
-    """Parse text as a JSON object, retrying once after escaping stray quotes."""
+# The root key each list-returning task reads its rows from. A model that answers
+# with the bare array instead of the documented envelope is answering correctly,
+# just one level down, so the array is wrapped rather than thrown away.
+_LIST_ROOT_KEY: dict[str, str] = {"batch": "items", "group": "groups", "filter": "blocked"}
+
+
+def _coerce_json(text: str, list_key: str | None = None) -> dict | None:
+    """Parse text as a JSON object, retrying once after escaping stray quotes.
+    A top-level array is wrapped under `list_key` when the task expects rows there."""
     if not text:
         return None
     for candidate in (text, _escape_stray_quotes(text)):
@@ -147,10 +154,12 @@ def _coerce_json(text: str) -> dict | None:
             continue
         if isinstance(parsed, dict):
             return parsed
+        if isinstance(parsed, list) and list_key:
+            return {list_key: parsed}
     return None
 
 
-def _repair_from_groq_400(body: dict) -> dict | None:
+def _repair_from_groq_400(body: dict, list_key: str | None = None) -> dict | None:
     """Recover a usable object from Groq's json_validate_failed error: Groq returns
     the model's malformed output in `failed_generation`, usually valid apart from
     unescaped inner quotes. Other providers just return the JSON, so this is a
@@ -161,7 +170,7 @@ def _repair_from_groq_400(body: dict) -> dict | None:
     failed = err.get("failed_generation")
     if not isinstance(failed, str) or not failed.strip():
         return None
-    return _coerce_json(failed)
+    return _coerce_json(failed, list_key)
 
 
 def _parse_reset(value: str | None) -> float | None:
@@ -447,7 +456,8 @@ async def verify_llm_providers() -> None:
             log.info("LLM verify: %s key OK (HTTP %d)", provider, status)
 
 
-async def _call_once(provider: str, model: str, messages: list[dict], temperature: float = 0.1) -> tuple[dict | None, int, object, str]:
+async def _call_once(provider: str, model: str, messages: list[dict], temperature: float = 0.1,
+                     list_key: str | None = None) -> tuple[dict | None, int, object, str]:
     """Single HTTP call. Returns (parsed_or_None, status, headers, raw_snippet).
     parsed is {} on a recoverable empty/error so the caller can distinguish from a
     hard failure via status; raw_snippet is the start of what came back when it
@@ -475,14 +485,14 @@ async def _call_once(provider: str, model: str, messages: list[dict], temperatur
             # 200 with content null or a non-string: nothing to parse, but the shape
             # itself is the evidence.
             return None, status, hdrs, repr(content)[:_UNPARSEABLE_SNIPPET_CHARS]
-        parsed = _coerce_json(content)
+        parsed = _coerce_json(content, list_key)
         return parsed, status, hdrs, "" if parsed is not None else content[:_UNPARSEABLE_SNIPPET_CHARS]
     if status == 400:
         try:
             body = json.loads(text)
         except json.JSONDecodeError:
             body = {}
-        return _repair_from_groq_400(body), status, hdrs, ""
+        return _repair_from_groq_400(body, list_key), status, hdrs, ""
     return None, status, hdrs, ""
 
 
@@ -499,6 +509,7 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
         return {}
 
     temperature = 0.0 if task in _DETERMINISTIC_TASKS else 0.1
+    list_key = _LIST_ROOT_KEY.get(task)
     first = True
     for provider, model in chain:
         tag = _tag(provider, model)
@@ -517,7 +528,8 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
             try:
                 call_temperature = (_UNPARSEABLE_RETRY_TEMPERATURE if unparseable_retries
                                     else temperature)
-                parsed, status, hdrs, raw = await _call_once(provider, model, messages, call_temperature)
+                parsed, status, hdrs, raw = await _call_once(provider, model, messages,
+                                                             call_temperature, list_key)
             except Exception as exc:
                 _bump(tag, "error")
                 log.warning("LLM call error on %s: %s", tag, str(exc)[:120])

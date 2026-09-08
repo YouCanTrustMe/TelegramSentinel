@@ -227,14 +227,17 @@ async def test_a_retired_item_cannot_become_a_dedup_primary(tmp_path, monkeypatc
     from src.db.models import (add_source, discard_unsent_items, get_recent_embedded_items,
                                save_item, set_item_embeddings)
     from src.processor.dedup.embedder import to_blob
+    from datetime import datetime, timedelta, timezone
     import numpy as np
 
     monkeypatch.setattr(base.settings, "database_path", str(tmp_path / "t.db"))
     await init_db()
+    # Relative to now: the pool is a 48h window, so a fixed date makes the test expire.
+    recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     sid = await add_source("rss", "CoinDesk", "https://coindesk.com/feed", "crypto")
     iid = await save_item(source_id=sid, message_id="m1", raw_text="t", original_url=None,
                           published_at=None, summary="A real story", category="crypto",
-                          processed_at="2026-09-04T10:00:00+00:00")
+                          processed_at=recent)
     await set_item_embeddings([(iid, to_blob(np.ones(1024, dtype=np.float32)))])
     assert len(await get_recent_embedded_items(48)) == 1
 

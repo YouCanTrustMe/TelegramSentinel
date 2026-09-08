@@ -80,7 +80,8 @@ async def _parse_with_ua_fallback(url: str, name: str):
 _FAIL_THRESHOLD = 3
 
 
-async def _mark_failure(source_id: int, name: str, url: str, reason: str) -> None:
+async def _mark_failure(source_id: int, name: str, url: str, reason: str,
+                        remote_fault: bool = True) -> None:
     """Count a consecutive failure; disable the source once it crosses the threshold.
 
     fail_count is NOT reset here: it keeps climbing so the daily revive job can tell
@@ -88,10 +89,14 @@ async def _mark_failure(source_id: int, name: str, url: str, reason: str) -> Non
     genuinely dead feed (keeps re-failing) and eventually stop reviving it. The admin
     alert fires only on the first crossing so a dead feed does not spam daily."""
     fails = await increment_source_fail_count(source_id)
-    # A lone first failure is almost always a transient remote hiccup (502/500,
-    # momentary unreachability) that the next poll clears, so keep it at DEBUG;
-    # only escalate to WARNING once it repeats and looks like a real outage.
-    level = logging.WARNING if fails >= 2 else logging.DEBUG
+    # Who has to act decides when to escalate. A 4xx is OUR problem — a moved,
+    # renamed or newly gated feed that will not heal, so it warns as soon as it
+    # repeats. A 5xx or an unreachable host is the feed's own outage, and there is
+    # nothing to do but wait: hnrss.org served three of those in eight days, each
+    # one clearing itself, each one waking the admin at 2/3. Those stay quiet until
+    # the threshold, where the source is disabled and gets its own alert anyway.
+    level = logging.WARNING if (fails >= _FAIL_THRESHOLD or (fails >= 2 and not remote_fault)) \
+        else logging.DEBUG
     log.log(level, "RSS source '%s' failed (%d/%d): %s", name, fails, _FAIL_THRESHOLD, reason)
     if fails >= _FAIL_THRESHOLD:
         await update_source_status(source_id, "error")
@@ -121,7 +126,8 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
     unreachable = not feed.entries and getattr(feed, "bozo", False) and http_status != 200
     if http_failed or unreachable:
         reason = f"HTTP {http_status}" if http_failed else "unreachable / no parseable entries"
-        await _mark_failure(source_id, name, url, reason)
+        client_error = http_failed and 400 <= http_status < 500
+        await _mark_failure(source_id, name, url, reason, remote_fault=not client_error)
         return 0
 
     await reset_source_fail_count(source_id)

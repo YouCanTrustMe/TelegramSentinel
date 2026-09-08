@@ -339,3 +339,57 @@ def test_a_bare_equals_rule_matches_nothing_and_never_reaches_the_model(monkeypa
     assert out == {}
     assert seen and "0. =" not in seen[0]
     assert "1. advertising posts" in seen[0]
+
+
+def test_as_text_rejects_a_nested_object():
+    """2026-09-05 prod: the model answered with an object in the `summary` slot; the
+    dict reached sqlite ('type dict is not supported') and killed the whole classify
+    chunk. A non-string is no answer, so the item falls back to the retry path."""
+    from src.processor.llm.classifier import _as_text
+    assert _as_text("текст") == "текст"
+    assert _as_text({"text": "текст"}) == ""
+    assert _as_text(["текст"]) == ""
+    assert _as_text(None) == ""
+    assert _as_text(True) == ""      # a bool in a text slot is not "True"
+    assert _as_text(42) == "42"      # a bare number is a usable key_phrase
+
+
+def test_classify_batch_survives_an_object_summary(monkeypatch):
+    """The crash path end to end: the row parses, the id is real, only the summary is
+    the wrong shape. It must come back empty rather than as a dict."""
+    import asyncio
+
+    async def fake_llm(messages, max_retries=3, task="batch"):
+        return {"items": [
+            {"id": 1, "summary": {"uk": "об'єкт"}, "key_phrase": "к"},
+            {"id": 2, "summary": "нормальний підсумок", "key_phrase": "підсумок"},
+            "not an object at all",
+        ]}
+
+    async def identity(summary, key_phrase):
+        return summary, key_phrase
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    monkeypatch.setattr(classifier, "_ensure_ukrainian", identity)
+    out = asyncio.run(classifier.classify_batch([{"id": 1, "text": "a"}, {"id": 2, "text": "b"}]))
+
+    assert out[1].summary == ""                          # not a dict -> retried later
+    assert out[2].summary == "нормальний підсумок"
+    assert all(isinstance(r.summary, str) for r in out.values())
+
+
+def test_group_by_topic_survives_non_object_groups(monkeypatch):
+    import asyncio
+
+    async def fake_llm(messages, max_retries=3, task="group"):
+        return {"groups": ["nonsense", {"ids": [0], "summary": {"a": 1}, "key_phrase": "k"}]}
+
+    async def identity(summary, key_phrase):
+        return summary, key_phrase
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    monkeypatch.setattr(classifier, "_ensure_ukrainian", identity)
+    groups = asyncio.run(classifier.group_by_topic([{"id": 0, "text": "a"}]))
+
+    assert [g["ids"] for g in groups] == [[0]]
+    assert groups[0]["summary"] == ""

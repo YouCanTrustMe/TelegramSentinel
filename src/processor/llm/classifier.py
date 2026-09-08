@@ -38,6 +38,28 @@ def _mark_big(summary: str, text: str, cap: int) -> str:
     return summary
 
 
+def _as_text(value: object) -> str:
+    """Coerce a model-supplied text field to a string. The model decides the shape of
+    what it puts in `summary`/`key_phrase`, and on 2026-09-05 it put a nested object
+    there: the dict travelled all the way to sqlite, which refused to bind it and took
+    the whole classify chunk down with it. A non-string is treated as no answer, so the
+    item goes back through the retry/fallback path instead."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return ""
+
+
+def _rows(data: dict, key: str) -> list[dict]:
+    """The list of objects under `key`, dropping anything that is not an object —
+    `row.get(...)` on a bare string is the same class of crash as the dict above."""
+    value = data.get(key)
+    if not isinstance(value, list):
+        return []
+    return [row for row in value if isinstance(row, dict)]
+
+
 @dataclass
 class ClassificationResult:
     summary: str
@@ -65,8 +87,8 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
         task="classify",
     )
     result = ClassificationResult(
-        summary=data.get("summary", ""),
-        key_phrase=data.get("key_phrase", ""),
+        summary=_as_text(data.get("summary")),
+        key_phrase=_as_text(data.get("key_phrase")),
     )
     if not _wants_no_translate(prompt_extra):
         result.summary, result.key_phrase = await _ensure_ukrainian(result.summary, result.key_phrase)
@@ -94,12 +116,12 @@ async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
         task="batch",
     )
     out: dict[int, ClassificationResult] = {}
-    for row in data.get("items", []):
+    for row in _rows(data, "items"):
         try:
             rid = int(row["id"])
         except (KeyError, TypeError, ValueError):
             continue
-        summary, key_phrase = await _ensure_ukrainian(row.get("summary", "") or "", row.get("key_phrase", "") or "")
+        summary, key_phrase = await _ensure_ukrainian(_as_text(row.get("summary")), _as_text(row.get("key_phrase")))
         out[rid] = ClassificationResult(
             summary=_mark_big(summary, text_by_id.get(rid, ""), _BATCH_INPUT_CAP),
             key_phrase=key_phrase,
@@ -160,10 +182,10 @@ async def _ensure_ukrainian(summary: str, key_phrase: str) -> tuple[str, str]:
         max_retries=2,
         task="translate",
     )
-    new_summary = data.get("summary", "") or ""
+    new_summary = _as_text(data.get("summary"))
     if new_summary and _looks_ukrainian(new_summary):
         log.info("Re-translated to Ukrainian | summary=%s", new_summary[:80])
-        return new_summary, (data.get("key_phrase", "") or key_phrase)
+        return new_summary, (_as_text(data.get("key_phrase")) or key_phrase)
     return summary, key_phrase
 
 
@@ -193,13 +215,13 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
         )
         result = []
         covered: set[int] = set()
-        for row in data.get("items", []):
+        for row in _rows(data, "items"):
             try:
                 rid = int(row["id"])
             except (KeyError, TypeError, ValueError):
                 continue
             covered.add(rid)
-            summary, key_phrase = row.get("summary", "") or "", row.get("key_phrase", "") or ""
+            summary, key_phrase = _as_text(row.get("summary")), _as_text(row.get("key_phrase"))
             if translate:
                 summary, key_phrase = await _ensure_ukrainian(summary, key_phrase)
             result.append({
@@ -225,7 +247,7 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
         max_retries=3,
         task="group",
     )
-    groups = data.get("groups", [])
+    groups = _rows(data, "groups")
     if not groups:
         log.warning("Batch grouping returned empty, falling back to individual items")
         return [{"ids": [item["id"]], "summary": "", "key_phrase": ""} for item in items]
@@ -249,8 +271,8 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
             continue
         for i in ids:
             covered_ids.add(i)
-        summary = g.get("summary", "") or ""
-        key_phrase = g.get("key_phrase", "") or ""
+        summary = _as_text(g.get("summary"))
+        key_phrase = _as_text(g.get("key_phrase"))
         if translate:
             summary, key_phrase = await _ensure_ukrainian(summary, key_phrase)
         if any(len(text_by_id.get(i, "")) > _BATCH_INPUT_CAP for i in ids):
@@ -493,9 +515,9 @@ async def check_blocked_filters(
             log.warning("Filter: chunk failed, its items pass through unfiltered: %s", answer)
             continue
         data, shown, judged_ids = answer
-        if not data or not isinstance(data.get("blocked"), list):
+        if not data:
             continue
-        for entry in data["blocked"]:
+        for entry in _rows(data, "blocked"):
             item_id = entry.get("id")
             rule_idx = entry.get("rule")
             confidence = entry.get("confidence", 10)

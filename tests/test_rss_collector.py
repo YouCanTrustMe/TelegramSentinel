@@ -2,6 +2,8 @@
 (e.g. FT) put the real news in the title and only a vague standfirst in the
 description. _compose_raw_text combines distinct title+body, else uses whichever
 is present without duplicating one inside the other."""
+import logging
+
 import pytest
 
 from src.collectors import rss_collector
@@ -105,3 +107,34 @@ async def test_ua_fallback_does_not_retry_a_real_outage(monkeypatch):
     feed = await rss_collector._parse_with_ua_fallback("http://x/feed", "X")
     assert feed.status == 502
     assert calls == [rss_collector._FEED_AGENT]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails,remote,expected", [
+    (1, True, logging.DEBUG),      # first miss of anything: quiet
+    (2, True, logging.DEBUG),      # hnrss 502 twice: the feed's outage, nothing to do
+    (3, True, logging.WARNING),    # threshold: the source is disabled, so speak up
+    (1, False, logging.DEBUG),
+    (2, False, logging.WARNING),   # a repeated 4xx will not heal — a human must act
+])
+async def test_failure_log_level_depends_on_whose_fault_it_is(monkeypatch, caplog, fails, remote, expected):
+    """hnrss.org served three 5xx/unreachable spells in 8 days, each clearing itself,
+    and each woke the admin at 2/3. Only a client error escalates before the threshold."""
+    async def fake_increment(source_id):
+        return fails
+
+    async def fake_status(*a, **kw):
+        return None
+
+    async def fake_send(*a, **kw):
+        return None
+
+    monkeypatch.setattr(rss_collector, "increment_source_fail_count", fake_increment)
+    monkeypatch.setattr(rss_collector, "update_source_status", fake_status)
+    monkeypatch.setattr(rss_collector, "send_to", fake_send)
+
+    caplog.set_level(logging.DEBUG, logger=rss_collector.log.name)
+    await rss_collector._mark_failure(1, "Hacker News", "u", "HTTP 502", remote_fault=remote)
+
+    levels = [r.levelno for r in caplog.records if "failed" in r.message]
+    assert levels == [expected]

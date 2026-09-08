@@ -368,3 +368,40 @@ def test_anchor_never_starts_inside_an_apostrophised_word():
 def test_hyphenated_place_is_one_word_for_the_anchor():
     line = _line("У Івано-Франківську відкрили міст", "")
     assert line == 'У Івано-Франківську <a href="https://t.me/x/1">відкрили</a> міст'
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_item_does_not_warn_but_a_shipped_raw_one_does(monkeypatch):
+    """The alerting was inverted: an item that merely waits for the next background
+    classify (id=33860 gave up at 19:30, classified at 19:40) woke the admin, while an
+    item old enough to go out as truncated raw text was silent. Prod 2026-09-08."""
+    import logging
+    from datetime import datetime, timedelta, timezone
+    from src.dispatcher import digest_builder as db
+
+    async def noop_update(*a, **kw):
+        return None
+
+    monkeypatch.setattr(db, "update_item_classification", noop_update)
+
+    now = datetime.now(timezone.utc)
+    fresh = {"id": 1, "summary": "", "raw_text": "x" * 200, "key_phrase": "",
+             "processed_at": (now - timedelta(hours=2)).isoformat(), "published_at": None}
+    stale = {"id": 2, "summary": "", "raw_text": "y" * 200, "key_phrase": "",
+             "processed_at": (now - timedelta(days=db._DEFER_MAX_DAYS + 1)).isoformat(),
+             "published_at": None}
+
+    caplog = logging.getLogger(db.log.name)
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    caplog.addHandler(handler)
+    try:
+        kept, deferred = await db._defer_empty_items([fresh, stale])
+    finally:
+        caplog.removeHandler(handler)
+
+    assert deferred == 1                       # the fresh one waits, no alert
+    assert [i["id"] for i in kept] == [2]      # the stale one ships as raw text
+    warnings = [r for r in records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and "never classified" in warnings[0].getMessage()

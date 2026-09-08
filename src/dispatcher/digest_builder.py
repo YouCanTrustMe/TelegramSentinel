@@ -478,14 +478,18 @@ async def _reclassify_empty_summaries(items: list, update: Callable[[str], Await
                 try:
                     result = await asyncio.wait_for(classify(raw, max_retries=3), timeout=max(5.0, remaining_time))
                 except asyncio.TimeoutError:
-                    log.warning("Re-classify timed out on item id=%d, will show as link", item["id"])
+                    log.info("Re-classify timed out on item id=%d, deferring it", item["id"])
                     result = ClassificationResult(summary="")
                 if result.summary:
                     await update_item_classification(item["id"], result.summary, result.key_phrase)
                     items[i] = {**dict(item), "summary": result.summary, "key_phrase": result.key_phrase}
                     log.info("Re-classified item id=%d | summary=%s", item["id"], result.summary)
                 else:
-                    log.warning("Re-classify gave up on item id=%d, will show as link", item["id"])
+                    # Not an alert: _defer_empty_items holds the item back and the
+                    # 20-minute background classify picks it up (measured: id=33860
+                    # gave up at 19:30, was classified at 19:40). Only an item too old
+                    # to defer is a real degradation, and that warns below.
+                    log.info("Re-classify gave up on item id=%d, deferring it", item["id"])
             done += 1
     return items
 
@@ -513,6 +517,10 @@ async def _defer_empty_items(items: list) -> tuple[list, int]:
         raw = (item["raw_text"] or "").strip()
         fallback = "⚠️ " + raw[:80].split("\n")[0]
         await update_item_classification(item["id"], fallback, "")
+        # This one IS worth waking the admin: the item has failed classification for
+        # more than _DEFER_MAX_DAYS and now goes out as truncated raw text.
+        log.warning("Item id=%d never classified in %d days, shipping raw text",
+                    item["id"], _DEFER_MAX_DAYS)
         kept.append({**dict(item), "summary": fallback})
     return kept, deferred
 

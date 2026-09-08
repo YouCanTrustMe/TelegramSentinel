@@ -90,6 +90,12 @@ async def classify(text: str, prompt_extra: str | None = None, max_retries: int 
         summary=_as_text(data.get("summary")),
         key_phrase=_as_text(data.get("key_phrase")),
     )
+    if data and not result.summary:
+        # The answer arrived and parsed, but carried no usable summary. Record the
+        # shape: knowing WHAT came back is what ended the month-long "unparseable
+        # JSON" hunt, and the caller only ever sees an empty result.
+        log.info("classify: answer had no usable summary | keys=%s value=%r",
+                 sorted(data)[:8], repr(data.get("summary"))[:120])
     if not _wants_no_translate(prompt_extra):
         result.summary, result.key_phrase = await _ensure_ukrainian(result.summary, result.key_phrase)
     result.summary = _mark_big(result.summary, text, _SINGLE_INPUT_CAP)

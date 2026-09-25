@@ -57,6 +57,18 @@ def _fit_log_lines(lines: list[str]) -> list[str]:
     return lines
 
 
+# A digest is outward-facing and cannot be recalled, so both the command and the
+# home button ask first — and the confirming button names the action, not just "Yes".
+_DIGEST_CONFIRM_TEXT = "▶️ <b>Send digest now?</b>\n\n<i>Everything currently waiting goes out immediately.</i>"
+
+
+def _digest_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("▶️ Send it", callback_data="home_digest_go"),
+        InlineKeyboardButton("« Home", callback_data="home"),
+    ]])
+
+
 def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_message(pf.chat(settings.telegram_supergroup_id) & pf.pinned_message)
@@ -73,7 +85,8 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_message(pf.command("digest") & admin_msg)
     async def cmd_digest(_, message: Message) -> None:
-        await _run_digest(message)
+        log.info("Manual digest requested by command, awaiting confirmation")
+        await message.reply(_DIGEST_CONFIRM_TEXT, reply_markup=_digest_confirm_keyboard())
 
     async def _run_digest(message: Message) -> None:
         log.info("Manual digest triggered by user")
@@ -185,23 +198,21 @@ def register_misc_handlers(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_callback_query(pf.regex(r"^home$") & admin_cb)
     async def cb_home(_, query: CallbackQuery) -> None:
+        await query.answer()
         _pending.pop(query.from_user.id, None)
         text, kb = await render_home()
         await query.message.edit_text(text, reply_markup=kb)
 
     @bot.on_callback_query(pf.regex(r"^home_digest$") & admin_cb)
     async def cb_home_digest(_, query: CallbackQuery) -> None:
-        # A digest is outward-facing and cannot be recalled, so the button asks
-        # first — and the confirming button names the action, not just "Yes".
-        await query.message.edit_text(
-            "▶️ <b>Send digest now?</b>\n\n<i>Everything currently waiting goes out immediately.</i>",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("▶️ Send it", callback_data="home_digest_go"),
-                InlineKeyboardButton("« Home", callback_data="home"),
-            ]]),
-        )
+        await query.answer()
+        log.info("Manual digest requested from home, awaiting confirmation")
+        await query.message.edit_text(_DIGEST_CONFIRM_TEXT, reply_markup=_digest_confirm_keyboard())
 
     @bot.on_callback_query(pf.regex(r"^home_digest_go$") & admin_cb)
     async def cb_home_digest_go(_, query: CallbackQuery) -> None:
         await query.answer()
+        # Spend the confirmation: a live "Send it" left in the chat history would
+        # fire another digest on a stray tap hours later, with nothing asked.
+        await query.message.edit_text("▶️ <b>Digest requested.</b>")
         await _run_digest(query.message)

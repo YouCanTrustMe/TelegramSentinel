@@ -66,11 +66,15 @@ def _times_label(digest_time: str) -> str:
     return " ".join(f"{h:02d}:{m:02d}" for h, m in times)
 
 
-def _category_label(cat, source_count: int, quiet_count: int = 0) -> str:
+def _category_label(cat, source_count: int, quiet_count: int = 0, paused_count: int = 0) -> str:
     """A category row answers the two questions this screen is opened with: how
     many sources, and when does it go out."""
-    quiet = f" ⏸{quiet_count}" if quiet_count else ""
-    return _clip(f"{cat['emoji']} {cat['name']} · {source_count}{quiet} · {_times_label(cat['digest_time'])}")
+    quiet = f" 💤{quiet_count}" if quiet_count else ""
+    paused = f" ⏸{paused_count}" if paused_count else ""
+    tail = f" · {source_count}{quiet}{paused} · {_times_label(cat['digest_time'])}"
+    # The name gives way first: clipping the whole row cut the schedule off
+    # "🇭🇷 hrvatska" once both counts were on it.
+    return _clip(f"{cat['emoji']} {cat['name']}", max(12, _LABEL_MAX - len(tail))) + tail
 
 
 _STATUS_ICON = {"pending": "⏳", "error": "⚠️", "paused": "⏸"}
@@ -111,6 +115,9 @@ async def _categories_keyboard(cats, page: int = 0, reorder: bool = False) -> In
     quiet_count: dict[str, int] = {}
     for row in await get_silent_sources(_QUIET_THRESHOLD_HOURS):
         quiet_count[row["category"]] = quiet_count.get(row["category"], 0) + 1
+    paused_count: dict[str, int] = {}
+    for row in paused:
+        paused_count[row["category"]] = paused_count.get(row["category"], 0) + 1
 
     total = len(cats)
     start = page * _PAGE_SIZE_CATS
@@ -120,7 +127,8 @@ async def _categories_keyboard(cats, page: int = 0, reorder: bool = False) -> In
     buttons = []
     for i, r in enumerate(page_cats):
         global_idx = start + i
-        label = _category_label(r, src_count.get(r["name"], 0), quiet_count.get(r["name"], 0))
+        label = _category_label(r, src_count.get(r["name"], 0), quiet_count.get(r["name"], 0),
+                                paused_count.get(r["name"], 0))
         if not reorder:
             buttons.append([InlineKeyboardButton(label, callback_data=f"cat_view:{r['name']}")])
             continue
@@ -303,7 +311,7 @@ def _timetable_text(cats) -> str:
         lines.append("")
     if slots:
         # The last slot of the day also carries the quiet-sources block (see _rebuild_jobs).
-        lines.append(f"<i>⏸ quiet sources ride with the {list(slots)[-1]} digest</i>")
+        lines.append(f"<i>💤 quiet sources ride with the {list(slots)[-1]} digest</i>")
     return "\n".join(lines)
 
 
@@ -381,13 +389,14 @@ async def _blocked_keyboard(words, page: int = 0) -> InlineKeyboardMarkup:
 
 async def render_categories(cats) -> str:
     """The list title with live counts, so every entry point renders the same screen."""
+    paused = list(await get_paused_sources())
     sources = (list(await get_active_sources()) + list(await get_pending_sources())
-               + list(await get_error_sources()) + list(await get_paused_sources()))
+               + list(await get_error_sources()) + paused)
     quiet = len(await get_silent_sources(_QUIET_THRESHOLD_HOURS))
-    return _categories_text(cats, len(sources), quiet)
+    return _categories_text(cats, len(sources), quiet, len(paused))
 
 
-def _categories_text(cats, source_count: int, quiet_count: int = 0) -> str:
+def _categories_text(cats, source_count: int, quiet_count: int = 0, paused_count: int = 0) -> str:
     """Title line for the category list. The counts are here rather than only on
     the rows so the screen still says something when the list is empty."""
     if not cats:
@@ -395,10 +404,11 @@ def _categories_text(cats, source_count: int, quiet_count: int = 0) -> str:
             "<b>📚 Categories</b>\n\nNothing set up yet.\n\n"
             "<i>➕ adds a category — a name and an emoji; sources go inside it.</i>"
         )
-    quiet = f" · ⏸ {quiet_count} quiet" if quiet_count else ""
+    quiet = f" · 💤 {quiet_count} quiet" if quiet_count else ""
+    paused = f" · ⏸ {paused_count} paused" if paused_count else ""
     return (
         f"<b>📚 Categories</b> · {len(cats)} · {source_count} source"
-        f"{'' if source_count == 1 else 's'}{quiet}\n\n"
+        f"{'' if source_count == 1 else 's'}{quiet}{paused}\n\n"
         "<i>Tap a category to open its sources.</i>"
     )
 

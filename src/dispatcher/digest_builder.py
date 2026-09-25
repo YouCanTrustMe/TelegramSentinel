@@ -331,7 +331,7 @@ async def _build_silent_block() -> str:
     sources = await get_silent_sources(120)
     if not sources:
         return ""
-    lines = ["<b>⏸ Quiet sources</b> (5+ days without new items)"]
+    lines = ["<b>💤 Quiet sources</b> (5+ days without new items)"]
     for row in sources:
         hours = row["hours_silent"]
         age = f"{hours // 24}d" if hours is not None else "never"

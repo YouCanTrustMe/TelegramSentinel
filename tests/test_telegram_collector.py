@@ -175,3 +175,74 @@ async def test_keepalive_tick_floodwait_not_counted(monkeypatch):
 
     failures, _ = await tc._keepalive_tick(1, 0.0)
     assert failures == 1
+
+
+class _FailingHistory:
+    def __init__(self, fail):
+        self.fail = fail
+
+    def get_chat_history(self, _chat_id, limit):
+        async def gen():
+            if self.fail is True:
+                raise tc.InternalServerError("RPC_CALL_FAIL")
+            if self.fail:
+                raise self.fail
+            return
+            yield
+        return gen()
+
+
+async def _poll(monkeypatch, fail):
+    monkeypatch.setattr(tc, "userbot", _FailingHistory(fail))
+    return await tc._poll_channel(CHAT, {"id": 77, "name": "Chan", "last_message_id": 5})
+
+
+async def test_telegram_5xx_stays_quiet_until_it_repeats(monkeypatch, caplog):
+    # A single Telegram-side 500 heals on the next poll; only the Nth consecutive
+    # one on the same source reaches WARNING, which the admin channel forwards.
+    monkeypatch.setattr(tc, "_server_error_streak", {})
+    caplog.set_level("INFO", logger=tc.log.name)
+    for _ in range(tc._SERVER_ERROR_WARN_STREAK - 1):
+        await _poll(monkeypatch, fail=True)
+    assert not [r for r in caplog.records if r.levelname in ("WARNING", "ERROR")]
+    await _poll(monkeypatch, fail=True)
+    assert [r.levelname for r in caplog.records if r.levelname != "INFO"] == ["WARNING"]
+
+
+async def test_telegram_5xx_streak_resets_on_a_good_poll(monkeypatch):
+    monkeypatch.setattr(tc, "_server_error_streak", {})
+    await _poll(monkeypatch, fail=True)
+    await _poll(monkeypatch, fail=True)
+    assert tc._server_error_streak[77][0] == 2
+    await _poll(monkeypatch, fail=False)
+    assert tc._server_error_streak == {}
+
+
+async def test_any_other_poll_outcome_breaks_the_streak(monkeypatch):
+    # A FloodWait or any other error between two 500s means they were not in a row.
+    monkeypatch.setattr(tc, "_server_error_streak", {})
+    await _poll(monkeypatch, fail=True)
+    await _poll(monkeypatch, fail=RuntimeError("other"))
+    assert tc._server_error_streak == {}
+
+
+async def test_a_503_counts_as_telegram_side_too(monkeypatch):
+    monkeypatch.setattr(tc, "_server_error_streak", {})
+    await _poll(monkeypatch, fail=tc.ServiceUnavailable("unavailable"))
+    assert tc._server_error_streak[77][0] == 1
+
+
+def test_a_channel_that_never_heals_warns_again_every_few_hours():
+    first = tc._SERVER_ERROR_WARN_STREAK
+    warned = [n for n in range(1, first + 2 * tc._SERVER_ERROR_REWARN_EVERY + 1)
+              if tc._server_error_level(n) == tc.logging.WARNING]
+    assert warned == [first, first + tc._SERVER_ERROR_REWARN_EVERY, first + 2 * tc._SERVER_ERROR_REWARN_EVERY]
+
+
+async def test_an_old_streak_does_not_carry_into_a_later_failure(monkeypatch):
+    # A source paused mid-streak is never polled, so nothing clears it; a 500 a
+    # week after resuming must start from one, not warn as the sixth in a row.
+    monkeypatch.setattr(tc, "_server_error_streak",
+                        {77: (tc._SERVER_ERROR_WARN_STREAK - 1, tc.time.monotonic() - 7 * 86400)})
+    await _poll(monkeypatch, fail=True)
+    assert tc._server_error_streak[77][0] == 1

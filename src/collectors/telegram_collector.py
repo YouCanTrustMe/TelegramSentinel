@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timezone
 
 from pyrogram import Client, raw as tg_raw
-from pyrogram.errors import ChannelBanned, ChannelInvalid, ChannelPrivate, ChatForbidden, FloodWait, UserBannedInChannel, UserKicked, UsernameInvalid, UsernameNotOccupied
+from pyrogram.errors import ChannelBanned, ChannelInvalid, ChannelPrivate, ChatForbidden, FloodWait, InternalServerError, ServiceUnavailable, UserBannedInChannel, UserKicked, UsernameInvalid, UsernameNotOccupied
 from pyrogram.types import Message
 
 from src.config import settings
@@ -23,6 +23,24 @@ _INVITE_FAIL_THRESHOLD = 20  # mark source as 'error' after this many consecutiv
 # pull a channel's whole history; a burst beyond it is reported, not silently lost.
 _BOOTSTRAP_LIMIT = 20
 _CATCHUP_LIMIT = 200
+# A Telegram 5xx is Telegram's own outage: pyrogram has already retried it ten
+# times, and the next poll almost always goes through — three in eight days, each
+# a different channel, all near midnight UTC, each one waking the admin. Only a
+# streak this long (6 polls = 30 min) on the same source is worth a warning, and
+# one that never heals repeats every 6h: the admin throttle is per message
+# template, so a single warning could be swallowed by another channel's.
+_SERVER_ERROR_WARN_STREAK = 6
+_SERVER_ERROR_REWARN_EVERY = 72
+# source id -> (streak, monotonic time of its last 500). A source that stops being
+# polled (paused, erroring, deleted) never gets the success that clears it, so a
+# failure only extends a streak whose previous one was a poll or two ago.
+_server_error_streak: dict[int, tuple[int, float]] = {}
+_SERVER_ERROR_STREAK_GAP = 2 * POLL_INTERVAL + 60
+
+
+def _server_error_level(streak: int) -> int:
+    past = streak - _SERVER_ERROR_WARN_STREAK
+    return logging.WARNING if past >= 0 and past % _SERVER_ERROR_REWARN_EVERY == 0 else logging.INFO
 
 userbot = Client(
     "sessions/sentinel_userbot",
@@ -254,6 +272,7 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
     limit = _BOOTSTRAP_LIMIT if last_msg_id is None else _CATCHUP_LIMIT
 
     saved = 0
+    server_error = False
     try:
         messages = []
         async for message in userbot.get_chat_history(chat_id, limit=limit):
@@ -314,8 +333,20 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
             f"<i>{exc}</i>",
             key=f"source_inaccessible:{source['id']}",
         )
+    except (InternalServerError, ServiceUnavailable) as exc:
+        server_error = True
+        now = time.monotonic()
+        previous, last_at = _server_error_streak.get(source["id"], (0, now))
+        streak = previous + 1 if now - last_at <= _SERVER_ERROR_STREAK_GAP else 1
+        _server_error_streak[source["id"]] = (streak, now)
+        log.log(_server_error_level(streak), "Telegram server error polling '%s' (%s), %d poll(s) in a row: %s",
+                source["name"], chat_ref, streak, exc)
     except Exception as exc:
         log.error("Failed to poll %s: %s", chat_ref, exc)
+    finally:
+        # Any other outcome breaks the streak, so "in a row" stays true.
+        if not server_error:
+            _server_error_streak.pop(source["id"], None)
     return saved
 
 

@@ -27,7 +27,9 @@ _log_dir.mkdir(parents=True, exist_ok=True)
 _file_handler = TimedRotatingFileHandler(
     _log_dir / "sentinel.log",
     when="midnight",
-    backupCount=7,
+    # A month, so a log audit can compare against the last provider or deploy
+    # incident; a week left only 8 days to read. ~250KB a day.
+    backupCount=30,
     encoding="utf-8",
 )
 _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))

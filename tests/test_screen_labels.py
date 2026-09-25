@@ -44,7 +44,22 @@ def test_category_label_carries_count_and_schedule():
 
 
 def test_category_label_marks_quiet_sources():
-    assert "⏸2" in _category_label(_cat(digest_time="09:00"), 9, quiet_count=2)
+    assert "💤2" in _category_label(_cat(digest_time="09:00"), 9, quiet_count=2)
+
+
+def test_category_label_keeps_paused_apart_from_quiet():
+    # ⏸ means paused by hand everywhere else; on this row it used to count the
+    # quiet sources, which read as "this category has 2 paused".
+    label = _category_label(_cat(digest_time="09:00"), 9, quiet_count=2, paused_count=1)
+    assert "💤2" in label and "⏸1" in label
+    assert "⏸" not in _category_label(_cat(digest_time="09:00"), 9, quiet_count=2)
+
+
+def test_category_label_clips_the_name_not_the_schedule():
+    label = _category_label({"emoji": "🇭🇷", "name": "hrvatska and the whole adriatic coast",
+                             "digest_time": "09:45,14:45,21:30"}, 10, quiet_count=2, paused_count=1)
+    assert label.endswith(" · 10 💤2 ⏸1 · 09:45 14:45 21:30")
+    assert "…" in label
 
 
 def test_source_label_icons_by_type_and_status():
@@ -64,9 +79,10 @@ def test_filter_label_says_all_when_unscoped():
 
 
 def test_categories_title_counts_sources_and_quiet():
-    text = _categories_text([_cat(), _cat("crypto")], 41, quiet_count=2)
+    text = _categories_text([_cat(), _cat("crypto")], 41, quiet_count=2, paused_count=3)
     assert "· 2 · 41 sources" in text
-    assert "⏸ 2 quiet" in text
+    assert "💤 2 quiet" in text
+    assert "⏸ 3 paused" in text
 
 
 def test_empty_screens_say_what_to_do_next():

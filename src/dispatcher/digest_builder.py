@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
-from src.processor.llm.classifier import ClassificationResult, classify, check_blocked_filters, _wants_no_merge, _wants_no_filter
+from src.processor.llm.classifier import ClassificationResult, classify, check_blocked_filters, pick_war_reports, _wants_no_merge, _wants_no_filter
 from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings
 from src.processor.llm.llm_client import format_llm_stats, reset_llm_stats, is_task_dead
 from src.processor.dedup.merge import MERGE_MIN_ITEMS, merge_source_items
@@ -225,6 +225,10 @@ def _format_item(item: dict, dup_links: dict[int, list[tuple[str, str]]] | None 
         # part of the headline, and the slant separates them at a glance from the link
         # the summary itself carries.
         line = f"{line} <i>({', '.join(links)})</i>"
+    via = row_get(item, "_via")
+    if via:
+        # A block mixing sources (the overnight war block) names each line's channel.
+        line = f"{line} <i>· {escape(via)}</i>"
     earlier = _earlier_line(item)
     return f"{line}\n{earlier}" if earlier else line
 
@@ -320,13 +324,19 @@ def _build_digest_text(
 
     for cat_name, data in cat_meta.items():
         sources = data["sources"]
-        if not any(sources.values()):
+        war = data.get("war_block")
+        if not any(sources.values()) and not war:
             continue
 
         segments.append((
             f"\n<b>{_CATEGORY_RULE}</b>\n<b>{data['emoji']}  {escape(_spaced_caps(cat_name))}</b>",
             [],
         ))
+
+        if war:
+            header = f"{_WAR_BLOCK_TITLE} · {len(war['items'])}"
+            for block_text, block_ids in _source_blocks(header, war["items"], dup_links):
+                segments.append((block_text, block_ids))
 
         for source_name, source_items in sources.items():
             if not source_items:
@@ -375,8 +385,65 @@ def _category_tags(cat_meta: dict) -> str:
     return " · ".join(
         f"{data['emoji']} {escape(name)}"
         for name, data in cat_meta.items()
-        if any(data["sources"].values())
+        if any(data["sources"].values()) or data.get("war_block")
     )
+
+
+_WAR_BLOCK_TITLE = "🌙 War overnight"
+
+
+def _is_morning(now: datetime) -> bool:
+    """A digest built in the local morning window. Deliberately not "the first digest
+    of the day" from digest_log: a manual /digest at 08:00, or a send that failed and
+    retried, would then take the fold away from the 09:45 one that carries the night.
+    The cost is that a second morning digest folds a few hours under the same title."""
+    return settings.morning_from_hour <= now.hour < settings.morning_until_hour
+
+
+def _order_for_morning(cat_meta: dict) -> dict:
+    """Move the heavy categories to the end of a morning digest, keeping every
+    other category in its configured order. The evening digests keep feed first."""
+    last = [name for name in settings.morning_last_categories if name in cat_meta]
+    first = {name: data for name, data in cat_meta.items() if name not in last}
+    return {**first, **{name: cat_meta[name] for name in last}}
+
+
+async def _fold_war_reports(cat_meta: dict, now: datetime) -> None:
+    """Pull the war reports out of the morning feed into one block, in place: the
+    LLM picks them and the one that sums up the night leads it. Anything short of a
+    usable answer leaves the category untouched — this is presentation, never a filter."""
+    data = cat_meta.get(settings.war_block_category)
+    if not data:
+        return
+    oldest = now.timestamp() - settings.war_block_max_age_hours * 3600
+    candidates = sorted(
+        (
+            (source_name, item)
+            for source_name, source_items in data["sources"].items()
+            for item in source_items
+            if (item["summary"] or "").strip() and not is_media_placeholder(item["summary"])
+            and (_parse_published(item["published_at"]) or datetime.min.replace(tzinfo=timezone.utc)).timestamp() >= oldest
+        ),
+        # Oldest first, as the prompt tells the model.
+        key=lambda pair: pair[1]["published_at"] or "",
+    )
+    if len(candidates) < settings.war_block_min_items:
+        return
+    # The time lets the model keep a previous evening's attack out of the night's figures.
+    picked, overview = await pick_war_reports([
+        {"id": i, "text": f"{_local_hhmm(item['published_at'])} {item['summary']}".strip()}
+        for i, (_, item) in enumerate(candidates)
+    ])
+    if len(picked) < settings.war_block_min_items:
+        return
+    taken = {id(candidates[i][1]) for i in picked}
+    for source_name in list(data["sources"]):
+        data["sources"][source_name] = [it for it in data["sources"][source_name] if id(it) not in taken]
+    # The country-wide tally leads, so a collapsed block still says what the night was;
+    # each line keeps its channel's name, which the per-source blocks carried as a header.
+    order = ([overview] if overview is not None else []) + [i for i in sorted(picked) if i != overview]
+    data["war_block"] = {"items": [{**dict(candidates[i][1]), "_via": candidates[i][0]} for i in order]}
+    log.info("War block: folded %d of %d %s item(s)", len(picked), len(candidates), settings.war_block_category)
 
 
 def _digest_header(now: datetime, tags: str) -> str:
@@ -786,6 +853,14 @@ async def _send_digest_locked(
                 )
                 data["sources"][source_name] = source_items[:_MAX_ITEMS_PER_SOURCE]
 
+    now = datetime.now(_get_tz())
+    if _is_morning(now):
+        try:
+            await _fold_war_reports(cat_meta, now)
+        except Exception:
+            log.exception("War block failed, rendering the feed unfolded")
+        cat_meta = _order_for_morning(cat_meta)
+
     segments = _build_digest_text(
         cat_meta,
         blocked_items=blocked_items,
@@ -797,7 +872,6 @@ async def _send_digest_locked(
             segments.append((silent_block, []))
             log.info("Appended quiet-sources block to digest")
 
-    now = datetime.now(_get_tz())
     tags = _category_tags(cat_meta)
     messages = _split_into_messages(segments, reserve=_chrome_reserve(now, tags, len(items)))
     messages = _decorate_messages(messages, now, tags, len(items))

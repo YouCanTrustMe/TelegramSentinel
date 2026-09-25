@@ -66,6 +66,8 @@ TASK_ROUTING: dict[str, list[tuple[str, str]]] = {
     "group":     [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
     # content filter (rate 1-10)
     "filter":    [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    # picks the war reports out of the morning feed and the one tally that leads them
+    "war":       [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
     # Ukrainian translate-guard retry
     "translate": [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
 }
@@ -97,7 +99,7 @@ _BILLING_DOWN_SECONDS = 86400.0
 # id-array / structured tasks must be deterministic: any sampling raises the chance
 # of a dropped or hallucinated id and broken JSON (the source of "N item(s) missing"
 # warnings). Free-text summary tasks (classify, translate) keep a little sampling.
-_DETERMINISTIC_TASKS = frozenset({"batch", "group", "filter", "translate"})
+_DETERMINISTIC_TASKS = frozenset({"batch", "group", "filter", "translate", "war"})
 
 
 # ---- JSON repair (provider-agnostic) ----
@@ -139,7 +141,7 @@ def _escape_stray_quotes(text: str) -> str:
 # The root key each list-returning task reads its rows from. A model that answers
 # with the bare array instead of the documented envelope is answering correctly,
 # just one level down, so the array is wrapped rather than thrown away.
-_LIST_ROOT_KEY: dict[str, str] = {"batch": "items", "group": "groups", "filter": "blocked"}
+_LIST_ROOT_KEY: dict[str, str] = {"batch": "items", "group": "groups", "filter": "blocked", "war": "war"}
 
 
 def _coerce_json(text: str, list_key: str | None = None) -> dict | None:

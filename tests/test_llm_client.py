@@ -48,7 +48,7 @@ def test_wrapped_array_survives_the_stray_quote_repair():
 
 def test_list_root_key_covers_every_list_returning_task():
     assert llm_client._LIST_ROOT_KEY == {"batch": "items", "group": "groups",
-                                         "filter": "blocked"}
+                                         "filter": "blocked", "war": "war"}
 
 
 def test_repairs_real_unescaped_inner_quotes():

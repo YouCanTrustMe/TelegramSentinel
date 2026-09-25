@@ -83,6 +83,18 @@ class Settings(BaseSettings):
     merge_near_dup_threshold: float = 0.975
 
     digest_timezone: str = "Europe/Berlin"
+    # The first digest of the day is read over breakfast and carries the whole night,
+    # whose feed posts are ~80% war (14 days measured 2026-09-25). A digest built in
+    # this local window puts these categories last, and folds the war reports of
+    # `war_block_category` into one block led by the night's tally.
+    morning_from_hour: int = 5
+    morning_until_hour: int = 12
+    morning_last_categories: list[str] = ["feed"]
+    war_block_category: str = "feed"
+    # Fewer than this and a block would only add a header to what it hides.
+    war_block_min_items: int = 3
+    # Older items (deferred ones, a failed delivery's leftovers) are not "overnight".
+    war_block_max_age_hours: int = 18
 
     database_path: str = "data/sentinel.db"
 

@@ -11,6 +11,7 @@ from src.processor.llm.prompts import (
     _MULTI_SYSTEM_PROMPT,
     _TRANSLATE_ONLY_PROMPT,
     _FILTER_SYSTEM_PROMPT,
+    _WAR_SYSTEM_PROMPT,
 )
 from src.common.util import needs_summary
 
@@ -556,3 +557,66 @@ async def check_blocked_filters(
             elif isinstance(item_id, int) and isinstance(rule_idx, int) and 0 <= rule_idx < len(rules):
                 log.info("Filter: kept item id=%d | rule=%r | confidence=%d (below threshold %d)", item_id, rules[rule_idx], confidence, _FILTER_BLOCK_THRESHOLD)
     return result
+
+
+def _as_id(value: object, known: set[int]) -> int | None:
+    """An id the model returned, if it is one of ours. Only an int or a string of
+    digits counts: a bool is an int subclass (`true` would pick item 1) and int()
+    would truncate 1.9 to 1 or raise OverflowError on Infinity."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str) and value.strip().isascii() and value.strip().isdigit():
+        value = int(value)
+    if not isinstance(value, int):
+        return None
+    return value if value in known else None
+
+
+# Recall falls off with batch size (the content filter caught 3 of 6 air-raid posts
+# at 25 items, 6 of 6 at 10); the 7 benched mornings held 8-20 feed items.
+_WAR_CHUNK = 20
+
+
+async def pick_war_reports(items: list[dict]) -> tuple[set[int], int | None]:
+    """items: [{"id": int, "text": str}]. Returns the ids that are war reports and
+    the one among them that sums up the night (a country-wide tally), or None.
+
+    The model only CHOOSES: an overview it wrote itself mixed figures from different
+    attacks and added casualty counts together on 4 of 7 real mornings, so the block
+    leads with an item's own summary instead. Fail-open: (set(), None) on any failure,
+    and the caller then renders the category exactly as before."""
+    if not items or is_task_dead("war"):
+        return set(), None
+    picked: set[int] = set()
+    overview: int | None = None
+    for start in range(0, len(items), _WAR_CHUNK):
+        chunk = items[start:start + _WAR_CHUNK]
+        numbered = "\n".join(f"{item['id']}: {item['text'][:_BATCH_INPUT_CAP]}" for item in chunk)
+        try:
+            data = await llm_json(
+                messages=[
+                    {"role": "system", "content": _WAR_SYSTEM_PROMPT},
+                    {"role": "user", "content": numbered},
+                ],
+                max_retries=2,
+                task="war",
+            )
+        except Exception as exc:
+            log.warning("War-report pick failed, rendering the feed unfolded: %s", exc)
+            return set(), None
+        if "war" not in data:
+            # llm_json answers {} when every provider failed; a block holding only the
+            # other chunks' reports would pass for the whole night.
+            log.warning("War-report pick got no answer, rendering the feed unfolded")
+            return set(), None
+        known = {item["id"] for item in chunk}
+        raw_ids = data.get("war")
+        chunk_picked = {i for i in (_as_id(v, known) for v in (raw_ids if isinstance(raw_ids, list) else []))
+                        if i is not None}
+        picked |= chunk_picked
+        # Items arrive oldest first, so a later chunk's tally is the newer one.
+        chunk_overview = _as_id(data.get("overview"), chunk_picked)
+        if chunk_overview is not None:
+            overview = chunk_overview
+    log.info("War reports: %d of %d item(s) picked | overview id=%s", len(picked), len(items), overview)
+    return picked, overview

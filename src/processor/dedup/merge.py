@@ -51,23 +51,32 @@ async def merge_source_items(
 
 
 def _cluster_summary_fields(cluster: list) -> tuple[str, str]:
-    """Most-detailed existing summary of a cluster (fallback when no LLM call)."""
-    if not cluster:
+    """Newest existing summary of a cluster (fallback when no LLM call). The merged
+    line links the newest post, so its text must be that post's: the longest one,
+    picked here before, could carry a death toll the linked post had already revised."""
+    with_summary = [it for it in cluster if (it["summary"] or "").strip()]
+    if not with_summary:
         return ("", "")
-    best = max(cluster, key=lambda it: len((it["summary"] or "")))
-    return (best["summary"] or "", row_get(best, "key_phrase", "") or "")
+    newest = max(with_summary, key=lambda it: it["published_at"] or "")
+    return (newest["summary"] or "", row_get(newest, "key_phrase", "") or "")
 
 
 def _build_merged(cluster: list, summary: str, key_phrase: str) -> dict:
-    if summary and len(cluster) > 1:
-        summary = f"{summary} · merged {len(cluster)}"
+    """One line for a same-event cluster. A cluster is usually one story reported
+    as it develops (a death toll that grows overnight), so the line links the NEWEST
+    post and keeps the earlier ones reachable as `_earlier` (published_at, url) pairs
+    — it used to link the oldest and drop the rest behind a bare "· merged N"."""
+    ordered = sorted(cluster, key=lambda it: it["published_at"] or "")
+    with_url = [it for it in ordered if it["original_url"]]
+    latest = with_url[-1] if with_url else None
     return {
         "summary": summary,
         "key_phrase": key_phrase,
-        "original_url": next((it["original_url"] for it in cluster if it["original_url"]), None),
-        "published_at": max((it["published_at"] for it in cluster if it["published_at"]), default=None),
+        "original_url": latest["original_url"] if latest else None,
+        "published_at": latest["published_at"] if latest else ordered[-1]["published_at"],
         "raw_text": None,
         "_item_ids": [it["id"] for it in cluster],
+        "_earlier": [(it["published_at"], it["original_url"]) for it in with_url[:-1]],
     }
 
 
@@ -158,26 +167,12 @@ async def _merge_via_group_by_topic(items: list, prompt_extra: str | None = None
         merged = []
         for g in groups:
             group_items = [items[i] for i in g["ids"]]
-            url = next((x["original_url"] for x in group_items if x["original_url"]), None)
-            pub = max(
-                (x["published_at"] for x in group_items if x["published_at"]),
-                default=None,
-            )
-            summary = g["summary"] or group_items[0]["summary"] or ""
+            summary, key_phrase = g["summary"], g.get("key_phrase") or ""
             if not summary:
-                raw_fallback = (group_items[0]["raw_text"] or "")[:80].split("\n")[0]
-                summary = raw_fallback
-            n = len(g["ids"])
-            if n > 1:
-                summary = f"{summary} · merged {n}"
-            merged.append({
-                "summary": summary,
-                "key_phrase": g.get("key_phrase") or "",
-                "original_url": url,
-                "published_at": pub,
-                "raw_text": None,
-                "_item_ids": [gi["id"] for gi in group_items],
-            })
+                summary, key_phrase = _cluster_summary_fields(group_items)
+            if not summary:
+                summary = (group_items[0]["raw_text"] or "")[:80].split("\n")[0]
+            merged.append(_build_merged(group_items, summary, key_phrase))
         return merged
     except Exception as exc:
         log.warning("Topic merging failed, using original items: %s", exc)

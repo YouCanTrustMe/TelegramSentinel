@@ -176,23 +176,57 @@ def _ids_of(item) -> list[int]:
     return []
 
 
+def _parse_published(published_at) -> datetime | None:
+    if not published_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(published_at)
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _local_hhmm(published_at) -> str:
+    dt = _parse_published(published_at)
+    return f"{dt.astimezone(_get_tz()):%H:%M}" if dt else ""
+
+
+# A line cannot be split across blocks, so a story reposted all night links only
+# its most recent earlier posts and counts the rest.
+_EARLIER_MAX_LINKS = 4
+
+
+def _earlier_line(item) -> str:
+    """Second line of a merged story: the earlier posts it replaced, each reachable
+    by its time. Empty for an ordinary item."""
+    earlier = [(pub, url) for pub, url in (row_get(item, "_earlier") or []) if url]
+    if not earlier:
+        return ""
+    shown = earlier[-_EARLIER_MAX_LINKS:]
+    links = [f'<a href="{escape(url, quote=True)}">{_local_hhmm(pub) or "→"}</a>' for pub, url in shown]
+    more = f"+{len(earlier) - len(shown)} · " if len(earlier) > len(shown) else ""
+    return f"<i>↻ earlier: {more}{', '.join(links)}</i>"
+
+
 def _format_item(item: dict, dup_links: dict[int, list[tuple[str, str]]] | None = None) -> str:
     """Render an item line, appending clickable source links for any cross-source
-    duplicates muted under it."""
+    duplicates muted under it, and the earlier updates of a merged story below it."""
     line = _format_item_base(item)
-    if not line or not dup_links:
+    if not line:
         return line
     links = []
-    for iid in _ids_of(item):
-        for name, url in dup_links.get(iid, []):
-            if url:
-                links.append(f'<a href="{escape(url, quote=True)}">{escape(name)}</a>')
+    if dup_links:
+        for iid in _ids_of(item):
+            for name, url in dup_links.get(iid, []):
+                if url:
+                    links.append(f'<a href="{escape(url, quote=True)}">{escape(name)}</a>')
     if links:
         # Italic including the brackets: the trailing source names are provenance, not
         # part of the headline, and the slant separates them at a glance from the link
         # the summary itself carries.
-        return f"{line} <i>({', '.join(links)})</i>"
-    return line
+        line = f"{line} <i>({', '.join(links)})</i>"
+    earlier = _earlier_line(item)
+    return f"{line}\n{earlier}" if earlier else line
 
 
 def _format_item_base(item: dict) -> str:
@@ -208,20 +242,10 @@ def _format_item_base(item: dict) -> str:
     summary_text = _MEDIA_LABEL.get(summary_text, summary_text)
 
     summary = escape(summary_text)
-    stamp = ""
-    pub = item["published_at"]
-    if pub:
-        try:
-            dt = datetime.fromisoformat(pub)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            dt_local = dt.astimezone(_get_tz())
-            # Italic HH:MM, the same typeface the digest chrome uses for its
-            # service bits, so the column reads as a timeline instead of a
-            # second kind of content.
-            stamp = f"<i>{dt_local:%H:%M}</i>"
-        except Exception:
-            pass
+    # Italic HH:MM, the same typeface the digest chrome uses for its service bits,
+    # so the column reads as a timeline instead of a second kind of content.
+    hhmm = _local_hhmm(item["published_at"])
+    stamp = f"<i>{hhmm}</i>" if hhmm else ""
 
     suffix = ""
 

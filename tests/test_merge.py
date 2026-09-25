@@ -5,6 +5,7 @@ on 2026-06-29 when the LLM returned a group with empty ids."""
 import numpy as np
 
 import src.processor.dedup.merge as mg
+from src.dispatcher import digest_builder
 from src.processor.dedup.merge import (
     _cluster_summary_fields,
     _llm_subgroup,
@@ -70,3 +71,78 @@ async def test_merge_via_embeddings_survives_empty_llm_group(monkeypatch):
     # No crash; every input item is still represented exactly once.
     covered = sorted(i for entry in out for i in entry["_item_ids"])
     assert covered == [1, 2, 3]
+
+def _timed(i, pub, url):
+    return {"id": i, "summary": "s", "raw_text": "s", "key_phrase": "",
+            "published_at": pub, "original_url": url}
+
+
+def test_merged_story_links_the_newest_post_and_keeps_the_earlier_ones():
+    cluster = [_timed(2, "2026-09-23T23:45:00+00:00", "https://t.me/l/2"),
+               _timed(1, "2026-09-23T23:07:00+00:00", "https://t.me/l/1"),
+               _timed(3, "2026-09-24T04:45:00+00:00", "https://t.me/l/3")]
+    merged = mg._build_merged(cluster, "Київ: загинули двоє", "загинули двоє")
+    assert merged["original_url"] == "https://t.me/l/3"
+    assert merged["summary"] == "Київ: загинули двоє"
+    assert merged["_earlier"] == [("2026-09-23T23:07:00+00:00", "https://t.me/l/1"),
+                                  ("2026-09-23T23:45:00+00:00", "https://t.me/l/2")]
+    assert sorted(merged["_item_ids"]) == [1, 2, 3]
+
+
+def test_merged_story_renders_its_earlier_updates_as_time_links(monkeypatch):
+    monkeypatch.setattr(digest_builder.settings, "digest_timezone", "UTC")
+    merged = mg._build_merged(
+        [_timed(1, "2026-09-23T23:07:00+00:00", "https://t.me/l/1"),
+         _timed(3, "2026-09-24T04:45:00+00:00", "https://t.me/l/3")],
+        "Київ: загинули двоє", "загинули двоє")
+    line = digest_builder._format_item(merged)
+    first, second = line.split("\n")
+    assert 'href="https://t.me/l/3"' in first
+    assert second == '<i>↻ earlier: <a href="https://t.me/l/1">23:07</a></i>'
+
+
+def test_an_ordinary_item_has_no_earlier_line():
+    assert "\n" not in digest_builder._format_item(_timed(1, None, "https://t.me/l/1"))
+
+
+def test_fallback_summary_is_the_newest_posts_not_the_longest():
+    # The merged line links the newest post, so its text must not be an older,
+    # longer post's superseded figure.
+    cluster = [dict(_timed(1, "2026-09-23T23:07:00+00:00", "https://t.me/l/1"), summary="Загинув один, двоє поранені, пошкоджено будинок"),
+               dict(_timed(2, "2026-09-24T04:45:00+00:00", "https://t.me/l/2"), summary="Загинули двоє")]
+    assert mg._cluster_summary_fields(cluster)[0] == "Загинули двоє"
+
+
+def test_merged_line_is_stamped_with_the_post_it_links():
+    cluster = [_timed(1, "2026-09-23T23:07:00+00:00", "https://t.me/l/1"),
+               _timed(2, "2026-09-24T06:00:00+00:00", None)]
+    merged = mg._build_merged(cluster, "s", "")
+    assert merged["original_url"] == "https://t.me/l/1"
+    assert merged["published_at"] == "2026-09-23T23:07:00+00:00"
+
+
+def test_a_story_reposted_all_night_links_only_its_latest_earlier_posts(monkeypatch):
+    monkeypatch.setattr(digest_builder.settings, "digest_timezone", "UTC")
+    cluster = [_timed(i, f"2026-09-24T0{i}:00:00+00:00", f"https://t.me/l/{i}") for i in range(8)]
+    line = digest_builder._earlier_line(mg._build_merged(cluster, "s", ""))
+    assert line.startswith("<i>↻ earlier: +3 · ")
+    assert line.count("<a ") == digest_builder._EARLIER_MAX_LINKS
+    assert ">06:00</a>" in line and ">02:00</a>" not in line
+
+
+async def test_group_without_a_summary_takes_the_newest_posts_text(monkeypatch):
+    items = [dict(_timed(1, "2026-09-23T23:07:00+00:00", "https://t.me/l/1"), summary="Загинув один"),
+             dict(_timed(2, "2026-09-24T04:45:00+00:00", "https://t.me/l/2"), summary="Загинули двоє"),
+             dict(_timed(3, "2026-09-24T05:00:00+00:00", "https://t.me/l/3"), summary="Інше"),
+             dict(_timed(4, "2026-09-24T05:10:00+00:00", "https://t.me/l/4"), summary="Ще інше")]
+
+    async def fake_group_by_topic(inputs, prompt_extra=None):
+        return [{"ids": [0, 1], "summary": "", "key_phrase": ""},
+                {"ids": [2], "summary": "Інше", "key_phrase": ""},
+                {"ids": [3], "summary": "Ще інше", "key_phrase": ""}]
+
+    monkeypatch.setattr(mg, "group_by_topic", fake_group_by_topic)
+    monkeypatch.setattr(mg, "is_task_dead", lambda task: False)
+    out = await mg._merge_via_group_by_topic(items)
+    assert out[0]["summary"] == "Загинули двоє"
+    assert out[0]["original_url"] == "https://t.me/l/2"

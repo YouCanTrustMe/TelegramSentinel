@@ -248,6 +248,9 @@ async def get_silent_sources(threshold_hours: int = 120) -> list[aiosqlite.Row]:
                FROM sources s
                LEFT JOIN items i ON i.source_id = s.id
                WHERE s.status = 'active'
+                 -- 🔕 on the source screen: it posts rarely on purpose. Off every quiet list
+                 -- and the 14-day push; rename/ban/private alerts are separate.
+                 AND s.silent_alert_muted = 0
                GROUP BY s.id
                HAVING last_item_at IS NULL
                   OR last_item_at < datetime('now', ?)
@@ -255,6 +258,12 @@ async def get_silent_sources(threshold_hours: int = 120) -> list[aiosqlite.Row]:
             (f"-{threshold_hours} hours",),
         ) as cur:
             return await cur.fetchall()
+
+
+async def set_source_silent_alert_muted(source_id: int, muted: bool) -> None:
+    async with get_db() as db:
+        await db.execute("UPDATE sources SET silent_alert_muted = ? WHERE id = ?", (1 if muted else 0, source_id))
+        await db.commit()
 
 
 async def reorder_source(source_id: int, cat_name: str, direction: str) -> None:

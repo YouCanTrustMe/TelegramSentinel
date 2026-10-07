@@ -116,7 +116,7 @@ def test_silent_source_line_reports_the_age_when_there_is_one():
         {"id": 23, "name": "Import AI", "type": "rss",
          "last_item_at": "2026-08-20 06:00:00", "hours_silent": 400})
 
-    assert line == "Import AI (rss, last item 2026-08-20 06:00:00, silent 16d)"
+    assert line == "Import AI (rss, last item 2026-08-20, silent 16d)"
 
 
 def test_a_source_added_today_is_not_reported_as_silent():
@@ -135,3 +135,14 @@ def test_a_source_added_today_is_not_reported_as_silent():
 
     assert [r["id"] for r in fresh] == [2]
     assert state == {2}          # the young one is not memoised either, so it can alert later
+
+
+def test_silent_alert_carries_one_mute_button_per_source():
+    rows = [{"id": 7, "name": "How To Onchain?", "type": "telegram", "last_item_at": "2026-09-20T18:50:19+00:00",
+             "hours_silent": 350},
+            {"id": 8, "name": "<b>Odd</b>", "type": "telegram", "last_item_at": None, "hours_silent": None}]
+    text, markup = scheduler._silent_alert(rows)
+
+    assert "How To Onchain? (telegram, last item 2026-09-20, silent 14d)" in text
+    assert "&lt;b&gt;Odd&lt;/b&gt;" in text
+    assert [b[0]["callback_data"] for b in markup["inline_keyboard"]] == ["silent_mute:7", "silent_mute:8"]

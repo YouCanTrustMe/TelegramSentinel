@@ -5,7 +5,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.bot.state import _DEFAULT_DIGEST_TIME
 from src.common.schedule import fires_at, parse_times, slots_by_time
-from src.common.util import ago, source_link
+from src.common.util import ago, row_get, source_link
 from src.db.models import (
     get_active_sources,
     get_blocked_hit_counts,
@@ -215,7 +215,8 @@ def _cat_edit_keyboard(cat_name: str) -> InlineKeyboardMarkup:
 
 
 def _source_view_keyboard(source_id: int, cat_name: str, url: str | None = None,
-                          paused: bool = False, pending: bool = False) -> InlineKeyboardMarkup:
+                          paused: bool = False, pending: bool = False,
+                          silent_muted: bool = False) -> InlineKeyboardMarkup:
     """The first row is the one that gets used: open the source, or edit how it is
     summarised. The rest are rare verbs and share a row. Pause sits next to Remove
     because it is the reversible version of the same intent."""
@@ -233,10 +234,12 @@ def _source_view_keyboard(source_id: int, cat_name: str, url: str | None = None,
         return InlineKeyboardMarkup([top, verbs, remove,
                                      [InlineKeyboardButton("« Back", callback_data=f"cat_view:{cat_name}")]])
     pause = ("▶️ Resume", "src_resume") if paused else ("⏸ Pause", "src_pause")
+    silent = "🔔 Remind when silent" if silent_muted else "🔕 Don't remind when silent"
     return InlineKeyboardMarkup([
         top,
         verbs,
         [InlineKeyboardButton(pause[0], callback_data=f"{pause[1]}:{source_id}")] + remove,
+        [InlineKeyboardButton(silent, callback_data=f"src_silent:{source_id}")],
         [InlineKeyboardButton("« Back", callback_data=f"cat_view:{cat_name}")],
     ])
 
@@ -264,6 +267,8 @@ def _source_view_text(source, health: dict) -> str:
             line += f" · {health['week_muted']} muted as dupes"
         lines.append(line)
 
+    if row_get(source, "silent_alert_muted"):
+        lines.append("<i>🔕 No reminder when it goes silent.</i>")
     if source["prompt_extra"]:
         lines.append(f"Prompt: <i>{escape(source['prompt_extra'])}</i>")
     if not source_link(source["type"], source["url"]):

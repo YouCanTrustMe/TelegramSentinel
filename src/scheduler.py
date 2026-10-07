@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from html import escape
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -69,6 +70,7 @@ async def _digest_health_job() -> None:
 # list is read past: MarketWatch sat in it for a year (HTTP 200, fail_count 0, last
 # item 2025-07-03) before anyone noticed. This second, much longer tier pushes once.
 _SILENT_SOURCE_ALERT_HOURS = 336
+_SILENT_ALERT_CHUNK = 20
 
 
 def _too_young_to_judge(row, now: datetime, threshold_hours: int) -> bool:
@@ -108,22 +110,49 @@ def _silent_source_line(row) -> str:
         # "last item never, silent never" read like a bug; a source that has never
         # produced has no age to report, only the fact.
         return f"{name} ({kind}, no items ever)"
-    return f"{name} ({kind}, last item {last}, silent {int(hours) // 24}d)"
+    return f"{name} ({kind}, last item {str(last)[:10]}, silent {int(hours) // 24}d)"
+
+
+def _silent_alert(fresh: list) -> tuple[str, dict]:
+    """The push and its buttons: one 🔕 per source, so a channel kept on purpose for its
+    rare posts can be told apart from a dead one once, instead of every quiet spell."""
+    lines = [f"💤 <b>Silent for {_SILENT_SOURCE_ALERT_HOURS // 24}+ days</b>"]
+    lines += [f"• {escape(_silent_source_line(r))}" for r in fresh]
+    lines.append("<i>🔕 = it posts rarely, don't remind me. A rename, ban or lost access still alerts.</i>")
+    markup = {"inline_keyboard": [
+        [{"text": f"🔕 {row_get(r, 'name')}"[:60], "callback_data": f"silent_mute:{int(row_get(r, 'id'))}"}]
+        for r in fresh
+    ]}
+    return "\n".join(lines), markup
 
 
 async def _silent_sources_job() -> None:
-    """Alert once per source that keeps answering but stopped publishing. Logged at
-    WARNING, which the admin-alert handler forwards — no second admin_alert call, or
-    the admin gets it twice."""
+    """Alert once per source that keeps answering but stopped publishing. Sent as a bot
+    message (it carries buttons), so it is logged at INFO — a WARNING would be forwarded
+    to the admin as a second copy."""
     from src.db.models import get_app_setting, get_silent_sources, set_app_setting
+    from src.dispatcher.sender import send_to
 
     rows = await get_silent_sources(_SILENT_SOURCE_ALERT_HOURS)
     stored = await get_app_setting("silent_sources_alerted") or ""
     already = {int(part) for part in stored.split(",") if part.strip().isdigit()}
     fresh, current = _new_silent_sources(rows, already)
     if fresh:
-        log.warning("Silent source(s) past %dh: %s",
-                    _SILENT_SOURCE_ALERT_HOURS, "; ".join(_silent_source_line(r) for r in fresh))
+        log.info("Silent source(s) past %dh: %s",
+                 _SILENT_SOURCE_ALERT_HOURS, "; ".join(_silent_source_line(r) for r in fresh))
+        # Chunked: one message holds 4096 chars and a keyboard 100 buttons, and a folder
+        # outage can silence dozens of sources at once.
+        for start in range(0, len(fresh), _SILENT_ALERT_CHUNK):
+            chunk = fresh[start:start + _SILENT_ALERT_CHUNK]
+            text, markup = _silent_alert(chunk)
+            try:
+                delivered = await send_to(settings.telegram_admin_id, text, reply_markup=markup)
+            except Exception:
+                log.exception("Silent-source push failed for %d source(s)", len(chunk))
+                delivered = False
+            if not delivered:
+                # Not delivered: leave these out of the memo so tomorrow's run pushes them again.
+                current -= {int(row_get(r, "id")) for r in chunk}
     else:
         log.info("Silent-source check: %d source(s) past %dh, none new",
                  len(rows), _SILENT_SOURCE_ALERT_HOURS)

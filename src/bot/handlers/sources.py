@@ -16,7 +16,7 @@ from src.bot.keyboards import (
     _PAGE_SIZE_SOURCES,
 )
 from src.bot.state import _DEFAULT_DIGEST_TIME, _pending
-from src.common.util import source_link
+from src.common.util import row_get, source_link
 from src.collectors.folder_manager import add_to_folder, remove_from_folder
 from src.collectors.telegram_collector import resolve_chat_id, userbot
 from src.db.models import (
@@ -36,10 +36,19 @@ from src.db.models import (
     set_source_last_message_id,
     set_source_pending_msg_id,
     set_source_prompt_extra,
+    set_source_silent_alert_muted,
     update_source_status,
 )
 
 log = logging.getLogger(__name__)
+
+
+def _without_button(markup: InlineKeyboardMarkup | None, callback_data: str) -> InlineKeyboardMarkup | None:
+    """The alert's keyboard minus the row just tapped; None once nothing is left, which
+    removes the keyboard instead of leaving an empty one."""
+    rows = [row for row in (markup.inline_keyboard if markup else [])
+            if not any(b.callback_data == callback_data for b in row)]
+    return InlineKeyboardMarkup(rows) if rows else None
 
 
 async def _finalize_add_source(uid: int, cat: str, data: dict, message, reply: bool = True) -> None:
@@ -133,7 +142,8 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
             return
         await query.message.edit_text(
             _source_view_text(s, await get_source_health(src_id)),
-            reply_markup=_source_view_keyboard(src_id, s["category"], source_link(s["type"], s["url"]), s["status"] == "paused", s["status"] == "pending"),
+            reply_markup=_source_view_keyboard(src_id, s["category"], source_link(s["type"], s["url"]), s["status"] == "paused", s["status"] == "pending",
+                                               bool(row_get(s, "silent_alert_muted"))),
         )
 
     @bot.on_callback_query(pf.regex(r"^src_reassign:") & admin_cb)
@@ -161,7 +171,8 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
             text = _source_view_text(s, await get_source_health(src_id))
             await query.message.edit_text(
                 f"✅ Reassigned.\n\n{text}",
-                reply_markup=_source_view_keyboard(src_id, cat_name, source_link(s["type"], s["url"]), s["status"] == "paused", s["status"] == "pending"),
+                reply_markup=_source_view_keyboard(src_id, cat_name, source_link(s["type"], s["url"]), s["status"] == "paused", s["status"] == "pending",
+                                               bool(row_get(s, "silent_alert_muted"))),
             )
         else:
             await query.message.edit_text("✅ Reassigned.")
@@ -175,7 +186,8 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
         await query.message.edit_text(
             f"{prefix}{text}" if prefix else text,
             reply_markup=_source_view_keyboard(src_id, s["category"], source_link(s["type"], s["url"]),
-                                               s["status"] == "paused", s["status"] == "pending"),
+                                               s["status"] == "paused", s["status"] == "pending",
+                                               bool(row_get(s, "silent_alert_muted"))),
         )
 
     @bot.on_callback_query(pf.regex(r"^src_pause:") & admin_cb)
@@ -194,6 +206,33 @@ def register_source_handlers(bot, admin_msg, admin_cb) -> None:
         if dropped:
             note += f" <i>{dropped} queued item(s) dropped.</i>"
         await _show_source(query, src_id, note + "\n\n")
+
+    @bot.on_callback_query(pf.regex(r"^src_silent:") & admin_cb)
+    async def cb_src_silent(_, query: CallbackQuery) -> None:
+        src_id = int(query.data.split(":", 1)[1])
+        s = await get_source(src_id)
+        if not s:
+            await query.answer("Source not found.", show_alert=True)
+            return
+        muted = not row_get(s, "silent_alert_muted")
+        await set_source_silent_alert_muted(src_id, muted)
+        log.info("Silent-source reminder %s for %s (id=%d)", "muted" if muted else "restored", s["name"], src_id)
+        await query.answer("Won't remind." if muted else "Will remind.")
+        await _show_source(query, src_id)
+
+    @bot.on_callback_query(pf.regex(r"^silent_mute:") & admin_cb)
+    async def cb_silent_mute(_, query: CallbackQuery) -> None:
+        """The 🔕 under the 14-day push: mute that source and drop its button, leaving
+        the others for their own decision."""
+        src_id = int(query.data.split(":", 1)[1])
+        s = await get_source(src_id)
+        if not s:
+            await query.answer("Source not found.", show_alert=True)
+            return
+        await set_source_silent_alert_muted(src_id, True)
+        log.info("Silent-source reminder muted for %s (id=%d) from the alert", s["name"], src_id)
+        await query.answer(f"🔕 {s['name']}: won't remind. Undo on its source screen.", show_alert=False)
+        await query.message.edit_reply_markup(_without_button(query.message.reply_markup, query.data))
 
     @bot.on_callback_query(pf.regex(r"^src_resume:") & admin_cb)
     async def cb_src_resume(_, query: CallbackQuery) -> None:

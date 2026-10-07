@@ -27,6 +27,20 @@ def _strip_html(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# WordPress appends "The post <title> first appeared on <site>." to every feed body
+# (Croatia Week and 01portal: 100 of 100 entries). It repeats the headline, so it also
+# fooled the containment check below into dropping the real title.
+# Matched on the entry's own title, so a body that merely says "the post office first
+# appeared on stamps" keeps its last sentence.
+_WORDPRESS_FOOTER = r"\s*The post {title} (?:first appeared on|appeared first on|prvi put objavljen na) [^\n]{{1,80}}$"
+
+
+def _strip_wordpress_footer(title: str, body: str) -> str:
+    if not title:
+        return body
+    return re.sub(_WORDPRESS_FOOTER.format(title=re.escape(title)), "", body)
+
+
 def _compose_raw_text(title: str, body: str) -> str:
     """Combine a feed entry's headline (title) and description/standfirst (body).
     The headline is the most informative part; some feeds (e.g. FT) put the real
@@ -34,7 +48,7 @@ def _compose_raw_text(title: str, body: str) -> str:
     the description alone lost the story. Combine when they are distinct; otherwise
     use whichever is non-empty (avoid duplicating one inside the other)."""
     title = (title or "").strip()
-    body = (body or "").strip()
+    body = _strip_wordpress_footer(title, (body or "").strip())
     if not title:
         return body
     if not body:

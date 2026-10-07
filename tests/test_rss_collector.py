@@ -223,6 +223,32 @@ async def test_an_entry_older_than_two_days_is_recorded_but_never_shown(tmp_path
     assert await _poll(monkeypatch, sid, feed) == 0
 
 
+def test_the_wordpress_footer_is_cut_and_the_headline_kept():
+    # Real Croatia Week / 01portal bodies, 2026-10.
+    assert _compose_raw_text(
+        "Croatia beat Czechia",
+        "PRAGUE, 26 September 2026 – Croatia opened their campaign with a 2-1 win... "
+        "The post Croatia beat Czechia first appeared on Croatia Week .",
+    ) == "Croatia beat Czechia. PRAGUE, 26 September 2026 – Croatia opened their campaign with a 2-1 win..."
+    assert _compose_raw_text(
+        "Tramvaji ne voze",
+        "ZET je objavio izmjene. The post Tramvaji ne voze prvi put objavljen na 01Portal .",
+    ) == "Tramvaji ne voze. ZET je objavio izmjene."
+    # A body that merely mentions "the post" is left alone, and so is everything after it.
+    assert _compose_raw_text("Title", "The post office closed early.") == "Title. The post office closed early."
+    assert _compose_raw_text(
+        "Minister resigns",
+        "He resigned from the post on Monday. The Post reported it first. "
+        "The post Minister resigns appeared first on Croatia Week.",
+    ) == "Minister resigns. He resigned from the post on Monday. The Post reported it first."
+    # Only a footer naming THIS entry's title is cut.
+    assert _compose_raw_text("Stamps history", "Facts. The post office first appeared on stamps in 1840.") == \
+        "Stamps history. Facts. The post office first appeared on stamps in 1840."
+    assert _compose_raw_text(
+        "The post office strike", "Workers walked out. The post The post office strike appeared first on Croatia Week.",
+    ) == "The post office strike. Workers walked out."
+
+
 @pytest.mark.asyncio
 async def test_an_atom_entry_with_only_updated_is_aged_too(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone

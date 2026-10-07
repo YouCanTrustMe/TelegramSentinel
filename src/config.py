@@ -90,8 +90,9 @@ class Settings(BaseSettings):
     digest_timezone: str = "Europe/Berlin"
     # The first digest of the day is read over breakfast and carries the whole night,
     # whose feed posts are ~80% war (14 days measured 2026-09-25). A digest built in
-    # this local window puts these categories last, and folds the war reports of
-    # `war_block_category` into one block led by the night's tally.
+    # this local window puts these categories last. Every digest (since 2026-10-07, not
+    # only the morning one) folds the war reports of `war_block_category` into one block
+    # led by the period's tally.
     morning_from_hour: int = 5
     morning_until_hour: int = 12
     morning_last_categories: list[str] = ["feed"]

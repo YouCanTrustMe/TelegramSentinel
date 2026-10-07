@@ -242,3 +242,37 @@ async def test_pick_war_reports_fails_open(monkeypatch):
     monkeypatch.setattr(cl, "llm_json", boom)
     monkeypatch.setattr(cl, "is_task_dead", lambda task: False)
     assert await cl.pick_war_reports([{"id": 0, "text": "t"}]) == (set(), None)
+
+
+async def test_an_afternoon_digest_folds_war_reports_under_the_day_title(monkeypatch):
+    """Strikes on cities are routine: every digest folds them now, not only the morning one."""
+    monkeypatch.setattr(db.settings, "war_block_min_items", 3)
+    monkeypatch.setattr(db.settings, "morning_from_hour", 5)
+    monkeypatch.setattr(db.settings, "morning_until_hour", 12)
+    monkeypatch.setattr(db.settings, "digest_timezone", "UTC")
+
+    async def fake_pick(items):
+        return {0, 1, 2}, None
+
+    monkeypatch.setattr(db, "pick_war_reports", fake_pick)
+    meta = _night_feed()
+    await db._fold_war_reports(meta, datetime(2026, 9, 24, 14, 45, tzinfo=timezone.utc))
+
+    assert meta["feed"]["war_block"]["title"] == "⚔️ War"
+    assert "<b>⚔️ War · 3</b>" in db._build_digest_text(meta)[1][0]
+
+
+async def test_a_morning_digest_keeps_the_overnight_title(monkeypatch):
+    monkeypatch.setattr(db.settings, "war_block_min_items", 3)
+    monkeypatch.setattr(db.settings, "morning_from_hour", 5)
+    monkeypatch.setattr(db.settings, "morning_until_hour", 12)
+    monkeypatch.setattr(db.settings, "digest_timezone", "UTC")
+
+    async def fake_pick(items):
+        return {0, 1, 2}, None
+
+    monkeypatch.setattr(db, "pick_war_reports", fake_pick)
+    meta = _night_feed()
+    await db._fold_war_reports(meta, NOW)
+
+    assert meta["feed"]["war_block"]["title"] == "🌙 War overnight"

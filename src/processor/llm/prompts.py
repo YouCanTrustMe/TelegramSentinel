@@ -41,19 +41,6 @@ _KEY_PHRASE_RULE = """key_phrase: a CONTIGUOUS span of 1-3 words COPIED CHARACTE
 CHOOSE THE SPAN THAT CARRIES THE NEWS — what actually happened — not the entity the summary opens with. In order of preference: the action together with what it acted on («звільнив Камишіна», «знищила 199 цілей», «відмовився від пропозиції»); the number, sum or name that makes the item newsworthy («37 млрд грн», «Wrapture»); a person or organisation ONLY when the identity itself is the news. Do NOT default to the first words of the summary — if your span starts at the very beginning of the summary, check whether a later span says more.
 Never use as key_phrase: автор, допис, інформація, подія, новина."""
 
-_SYSTEM_PROMPT = f"""Summarize news for a Ukrainian digest. Output JSON only.
-
-{_TRANSLATE_RULE}
-{_BREVITY_RULE}
-{_ACCURACY_RULE}
-summary: up to 10 words for simple news; up to 16 words when the event has multiple key details (numbers, names, consequences). Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, з'явилась інформація, відбулась подія, автор, допис, пост, розповідає, пише.
-
-{_KEY_PHRASE_RULE}
-
-{_QUOTE_RULE}
-
-Respond ONLY with JSON: {{"summary": "...", "key_phrase": "..."}}"""
-
 _BATCH_SYSTEM_PROMPT = f"""Group news items from one source by event, then summarize each group in Ukrainian. Output JSON only.
 
 Each item is prefixed with its numeric id (e.g. `16321: ...`). Use those EXACT ids in your output — never renumber, never start from 0. Every id MUST appear in exactly one group's `ids` — none omitted or duplicated.

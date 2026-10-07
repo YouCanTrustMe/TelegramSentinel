@@ -464,3 +464,87 @@ def test_two_rules_that_open_alike_keep_separate_blocks():
 
 def test_filter_title_of_a_rule_that_opens_with_a_separator_is_not_empty():
     assert _filter_title(": реклама каналів і магазинів") == "реклама каналів і магазинів"
+
+
+async def test_the_digest_builds_under_the_classify_lock(monkeypatch):
+    """2026-10-07: the pre-digest pass was still summarising a 100-entry flood when the
+    digest re-classified the same items, so each was summarised twice and the quota died."""
+    import src.dispatcher.digest_builder as db_mod
+    order, queue = [], [{"id": 1}]
+
+    async def fake_acquire(timeout):
+        order.append("acquire")
+        return True
+
+    async def fake_unsent(categories=None):
+        order.append("read")
+        return queue
+
+    async def fake_build(categories, include_quiet, status_fn, reclassify=True):
+        order.append("build" if reclassify else "build-no-reclassify")
+        return True
+
+    async def fake_status(text):
+        order.append("status")
+
+    monkeypatch.setattr(db_mod, "acquire_classify_lock", fake_acquire)
+    monkeypatch.setattr(db_mod, "release_classify_lock", lambda: order.append("release"))
+    monkeypatch.setattr(db_mod, "get_unsent_items", fake_unsent)
+    monkeypatch.setattr(db_mod, "_build_and_send_digest", fake_build)
+    monkeypatch.setattr(db_mod, "background_classify_running", lambda: False)
+    assert await db_mod._send_digest_locked() is True
+    assert order == ["read", "acquire", "build", "release"]
+
+    # A manual /digest says why it is waiting instead of sitting silent.
+    order.clear()
+    monkeypatch.setattr(db_mod, "background_classify_running", lambda: True)
+    assert await db_mod._send_digest_locked(status_fn=fake_status) is True
+    assert order == ["read", "status", "acquire", "build", "release"]
+
+    # Still running after the wait: build, but never summarise the same items beside it.
+    order.clear()
+
+    async def timed_out(timeout):
+        order.append("acquire")
+        return False
+
+    monkeypatch.setattr(db_mod, "acquire_classify_lock", timed_out)
+    assert await db_mod._send_digest_locked() is True
+    assert order == ["read", "acquire", "build-no-reclassify"]
+
+    # An empty queue answers at once instead of waiting for the lock.
+    order.clear()
+    queue.clear()
+    assert await db_mod._send_digest_locked(status_fn=fake_status) is False
+    assert order == ["read"]
+
+
+async def test_reclassify_summarises_a_flood_in_batches_not_one_call_per_item(monkeypatch):
+    """2026-10-07: 75 empty items went out as 75 calls in a row; the quota died at 34."""
+    import src.dispatcher.digest_builder as db_mod
+    from src.processor.llm.classifier import ClassificationResult
+
+    items = [{"id": n, "source_id": 1, "raw_text": f"Post number {n}, long enough that no short-text rule would ever show it as written", "summary": "", "key_phrase": ""}
+             for n in range(30)]
+    # Same rules as the background pass: a short post is shown as written.
+    items.append({"id": 99, "source_id": 1, "raw_text": "Київ від ранку під ударом безпілотників.", "summary": "", "key_phrase": ""})
+    calls, stored = [], {}
+
+    async def fake_batch(payload):
+        calls.append([row["id"] for row in payload])
+        return {row["id"]: ClassificationResult(summary=f"s{row['id']}") for row in payload if row["id"] != 7}
+
+    async def fake_store(item_id, summary, key_phrase):
+        stored[item_id] = summary
+
+    async def no_status(_text):
+        pass
+
+    monkeypatch.setattr(db_mod, "classify_batch", fake_batch)
+    monkeypatch.setattr(db_mod, "update_item_classification", fake_store)
+    monkeypatch.setattr(db_mod, "is_task_dead", lambda *_: False)
+
+    out = await db_mod._reclassify_empty_summaries(items, no_status)
+    assert [len(c) for c in calls] == [25, 5]
+    assert stored[99] == "Київ від ранку під ударом безпілотників." and stored[3] == "s3"
+    assert 7 not in stored and out[7]["summary"] == ""   # left for _defer_empty_items

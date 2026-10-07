@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
-from src.processor.llm.classifier import ClassificationResult, classify, check_blocked_filters, pick_war_reports, _wants_no_merge, _wants_no_filter
+from src.processor.llm.classifier import acquire_classify_lock, background_classify_running, check_blocked_filters, classify_batch, pick_war_reports, release_classify_lock, split_for_summary, _wants_no_merge, _wants_no_filter
 from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings
 from src.processor.llm.llm_client import format_llm_stats, reset_llm_stats, is_task_dead
 from src.processor.dedup.merge import MERGE_MIN_ITEMS, merge_source_items
@@ -596,54 +596,57 @@ async def _discard_building(building_msg_id: int | None) -> None:
 
 
 _RECLASSIFY_TIMEOUT = 120.0
+_RECLASSIFY_CHUNK = 25
+# The pre-digest classify pass took 112s on the 2026-10-07 flood of 100 entries.
+_BACKGROUND_CLASSIFY_WAIT = 180.0
 
 
 async def _reclassify_empty_summaries(items: list, update: Callable[[str], Awaitable[None]]) -> list:
     """Re-run classification on items with an empty summary but non-empty raw
     text, bounded by a wall-clock timeout and per-model quota. Returns the
-    (possibly rebuilt) list; items still empty fall through to _defer_empty_items."""
+    (possibly rebuilt) list; items still empty fall through to _defer_empty_items.
+
+    Batched like the background pass: one call per item turned the 2026-10-07 flood of
+    75 items into 75 calls in a row, and the quota died at item 34."""
     empty = [item for item in items if needs_summary(item)]
     if not empty:
         return items
     log.info("Re-classifying %d item(s) with empty summary before digest (timeout=%ds)", len(empty), int(_RECLASSIFY_TIMEOUT))
     items = list(items)
     reclassify_start = time.monotonic()
-    done = 0
-    for i, item in enumerate(items):
-        if needs_summary(item):
-            if is_task_dead("classify"):
-                remaining = sum(1 for x in items[i:] if not (x["summary"] or "").strip())
-                log.warning("Re-classify aborted: all classify-task models quota dead, %d items will show as link", remaining)
-                break
-            elapsed = time.monotonic() - reclassify_start
-            if elapsed > _RECLASSIFY_TIMEOUT:
-                remaining = sum(1 for x in items[i:] if not (x["summary"] or "").strip())
-                log.warning("Re-classify timeout after %.0fs, %d items will show as link", elapsed, remaining)
-                break
-            await update(f"⏳ Re-classifying {done + 1}/{len(empty)}...")
-            raw = (item["raw_text"] or "").strip()
-            if len(raw) < 15:
-                await update_item_classification(item["id"], raw, "")
-                items[i] = {**dict(item), "summary": raw, "key_phrase": ""}
-                log.info("Short raw_text used as summary for item id=%d", item["id"])
+    index_of = {item["id"]: i for i, item in enumerate(items)}
+    short, todo = await split_for_summary(empty)
+    for item, text in short:
+        await update_item_classification(item["id"], text, "")
+        items[index_of[item["id"]]] = {**dict(item), "summary": text, "key_phrase": ""}
+        log.info("Re-classify: item id=%d shown as written | summary=%s", item["id"], text)
+    # Not warnings: whatever stays empty is deferred to the next digest by
+    # _defer_empty_items, and a dead chain has already alerted the admin once.
+    for start in range(0, len(todo), _RECLASSIFY_CHUNK):
+        chunk = todo[start:start + _RECLASSIFY_CHUNK]
+        if is_task_dead("batch"):
+            log.info("Re-classify stopped: batch-task models quota dead, %d item(s) left for a later digest", len(todo) - start)
+            break
+        elapsed = time.monotonic() - reclassify_start
+        if elapsed > _RECLASSIFY_TIMEOUT:
+            log.info("Re-classify timeout after %.0fs, %d item(s) left for a later digest", elapsed, len(todo) - start)
+            break
+        await update(f"⏳ Re-classifying {start + 1}-{start + len(chunk)} of {len(todo)}...")
+        payload = [{"id": item["id"], "text": text} for item, text in chunk]
+        remaining_time = _RECLASSIFY_TIMEOUT - (time.monotonic() - reclassify_start)
+        try:
+            results = await asyncio.wait_for(classify_batch(payload), timeout=max(5.0, remaining_time))
+        except asyncio.TimeoutError:
+            log.info("Re-classify timed out on a chunk of %d item(s), deferring them", len(chunk))
+            results = {}
+        for item, _text in chunk:
+            result = results.get(item["id"])
+            if result and result.summary:
+                await update_item_classification(item["id"], result.summary, result.key_phrase)
+                items[index_of[item["id"]]] = {**dict(item), "summary": result.summary, "key_phrase": result.key_phrase}
+                log.info("Re-classified item id=%d | summary=%s", item["id"], result.summary)
             else:
-                remaining_time = _RECLASSIFY_TIMEOUT - (time.monotonic() - reclassify_start)
-                try:
-                    result = await asyncio.wait_for(classify(raw, max_retries=3), timeout=max(5.0, remaining_time))
-                except asyncio.TimeoutError:
-                    log.info("Re-classify timed out on item id=%d, deferring it", item["id"])
-                    result = ClassificationResult(summary="")
-                if result.summary:
-                    await update_item_classification(item["id"], result.summary, result.key_phrase)
-                    items[i] = {**dict(item), "summary": result.summary, "key_phrase": result.key_phrase}
-                    log.info("Re-classified item id=%d | summary=%s", item["id"], result.summary)
-                else:
-                    # Not an alert: _defer_empty_items holds the item back and the
-                    # 20-minute background classify picks it up (measured: id=33860
-                    # gave up at 19:30, was classified at 19:40). Only an item too old
-                    # to defer is a real degradation, and that warns below.
-                    log.info("Re-classify gave up on item id=%d, deferring it", item["id"])
-            done += 1
+                log.info("Re-classify gave up on item id=%d, deferring it", item["id"])
     return items
 
 
@@ -823,6 +826,39 @@ async def _send_digest_locked(
     include_quiet: bool = False,
     status_fn: Callable[[str], Awaitable[None]] | None = None,
 ) -> bool:
+    """Build and send while holding the classify lock: a background pass that started
+    beside the digest's re-classify would summarise the same items twice."""
+    if not await get_unsent_items(categories=categories):
+        # Checked before the wait: an empty queue must not hold /digest for minutes.
+        log.info("Digest triggered: no unsent items | filter=%s", categories)
+        return False
+    if status_fn and background_classify_running():
+        # A manual /digest would otherwise sit silent for up to three minutes.
+        try:
+            await status_fn("⏳ Waiting for the summaries in progress...")
+        except Exception:
+            pass
+    waited = time.monotonic()
+    held = await acquire_classify_lock(_BACKGROUND_CLASSIFY_WAIT)
+    if not held:
+        log.info("Background classify still running after %.0fs, building without it", _BACKGROUND_CLASSIFY_WAIT)
+    elif time.monotonic() - waited > 1:
+        log.info("Waited %.0fs for the background classify pass to finish", time.monotonic() - waited)
+    try:
+        return await _build_and_send_digest(categories, include_quiet, status_fn, reclassify=held)
+    finally:
+        if held:
+            release_classify_lock()
+
+
+async def _build_and_send_digest(
+    categories: list[str] | None,
+    include_quiet: bool,
+    status_fn: Callable[[str], Awaitable[None]] | None,
+    reclassify: bool = True,
+) -> bool:
+    # The build clock starts after the wait: that is the queue's fault, not the build's,
+    # and counting it would trip the slow-digest alert.
     digest_start = time.monotonic()
 
     async def _update(text: str) -> None:
@@ -855,7 +891,12 @@ async def _send_digest_locked(
         except Exception:
             pass
 
-    items = await _reclassify_empty_summaries(items, _update)
+    if reclassify:
+        items = await _reclassify_empty_summaries(items, _update)
+    else:
+        # The background pass is still on these very items; summarising them here too is
+        # what killed the quota. Whatever stays empty waits for the next digest.
+        log.info("Re-classify skipped: the background pass is still running")
 
     items, deferred = await _defer_empty_items(items)
     if deferred:

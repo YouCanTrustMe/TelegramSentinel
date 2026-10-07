@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from html import escape
+from urllib.parse import urlparse
 
 import feedparser
 from pyrogram import filters as pf
@@ -44,6 +45,42 @@ from src.scheduler import rebuild_digest_jobs
 log = logging.getLogger(__name__)
 
 
+def _parse_source_input(text: str) -> tuple[str, str]:
+    """(url as stored, "telegram" | "rss") for what the admin pasted. A channel is
+    stored as @name whatever link form it came in — the preview page t.me/s/name and a
+    post link t.me/name/123 are what a browser shows, and both used to reach get_chat
+    as "@s/name" / "@name/123" and fail. A private channel's post link t.me/c/<id>/<msg>
+    becomes its chat id -100<id>. An invite link (t.me/+…) is kept whole."""
+    text = text.strip()
+    parsed = urlparse(text if "://" in text else f"https://{text}")
+    if parsed.netloc.lower() in ("t.me", "www.t.me", "telegram.me"):
+        path = parsed.path.strip("/")
+        if path.startswith("+") or path.startswith("joinchat/"):
+            return text, "telegram"
+        parts = path.split("/")
+        if not parts[0] or (parts[0] == "s" and len(parts) == 1):
+            return text, "telegram"  # no channel in the link; get_chat reports it
+        if parts[0] == "c" and len(parts) > 1 and parts[1].isdigit():
+            return f"-100{parts[1]}", "telegram"
+        if parts[0] == "s" and len(parts) > 1:
+            parts = parts[1:]
+        return f"@{parts[0]}", "telegram"
+    if _is_rss(text):
+        return text, "rss"
+    if text.lstrip("-").isdigit():  # a chat id, as private channels are stored
+        return text, "telegram"
+    return f"@{text.lstrip('@')}", "telegram"
+
+
+def _parse_new_time(text: str) -> str | None:
+    """The one HH:MM the timetable's "new time" prompt accepts, or None to re-ask."""
+    times = parse_times(text)
+    if len(times) != 1:
+        return None
+    h, m = times[0]
+    return f"{h:02d}:{m:02d}"
+
+
 def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
 
     @bot.on_message(pf.private & admin_msg)
@@ -70,16 +107,14 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                 await _finalize_add_category(uid, data, message)
 
         elif action == "add_digest_time":
-            times = parse_times(text)
-            if len(times) != 1:
+            time_str = _parse_new_time(text)
+            if time_str is None:
                 await message.reply(
                     "Send one time as HH:MM, e.g. 08:30:",
                     reply_markup=_add_time_kb(),
                 )
                 return
             del _pending[uid]
-            h, m = times[0]
-            time_str = f"{h:02d}:{m:02d}"
             cats = await get_categories()
             log.info("Timetable new time entered | time=%s", time_str)
             await message.reply(
@@ -105,21 +140,17 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
 
         elif action == "add_source":
             if step == 0:
-                url = text
-                if "t.me/" in url:
-                    path = url.split("t.me/")[1].split("?")[0].rstrip("/")
-                    url = url if path.startswith("+") else f"@{path}"
-                    source_type = "telegram"
-                else:
-                    source_type = "rss" if _is_rss(url) else "telegram"
+                url, source_type = _parse_source_input(text)
                 if await source_exists(url):
                     del _pending[uid]
                     await message.reply(f"Source <code>{url}</code> already exists.")
                     return
                 if source_type == "telegram":
-                    is_invite = "/+" in url or url.lstrip("@").startswith("+")
+                    is_invite = "/+" in url or "joinchat/" in url or url.lstrip("@").startswith("+")
                     try:
-                        chat = await userbot.get_chat(url.lstrip("@"))
+                        # A chat id must go in as an int: pyrogram reads a digit string as a phone number.
+                        peer = url.lstrip("@")
+                        chat = await userbot.get_chat(int(peer) if peer.lstrip("-").isdigit() else peer)
                         name = chat.title
                     except Exception as exc:
                         if is_invite:

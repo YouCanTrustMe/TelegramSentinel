@@ -126,3 +126,12 @@ NOT war reports, keep them out: politics, diplomacy, negotiations, weapons deliv
 
 Use the EXACT ids. Output JSON only: {"war": [<id>, ...], "overview": <id or null>}
 If nothing is a war report: {"war": [], "overview": null}"""
+
+
+_PAIR_JUDGE_PROMPT = """You decide whether a news post B should be hidden from a reader who has ALREADY SEEN post A.
+For each numbered pair answer one verdict:
+- "same": B reports the same specific event as A and adds NO important new fact. A reader of A loses nothing by not seeing B.
+- "update": B is about the same event or story, but adds an important new fact: an outcome, a decision or ruling, a changed death toll or figure, the cause, an official reaction, the next step.
+- "different": B is a different event — even if it shares the topic, country, person, company, asset or type of event (two different strikes, two different attacks, two different aid packages, two different price moves are DIFFERENT).
+Judge by facts (who, what, where, when, numbers), not by vocabulary. Posts may be in different languages.
+Respond ONLY with JSON: {"pairs": [{"n": 1, "verdict": "same"}]}"""

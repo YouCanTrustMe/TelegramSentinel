@@ -12,6 +12,7 @@ from src.processor.llm.prompts import (
     _TRANSLATE_ONLY_PROMPT,
     _FILTER_SYSTEM_PROMPT,
     _WAR_SYSTEM_PROMPT,
+    _PAIR_JUDGE_PROMPT,
 )
 from src.common.util import needs_summary
 
@@ -620,3 +621,51 @@ async def pick_war_reports(items: list[dict]) -> tuple[set[int], int | None]:
             overview = chunk_overview
     log.info("War reports: %d of %d item(s) picked | overview id=%s", len(picked), len(items), overview)
     return picked, overview
+
+
+# Pairs per call, as benched; the content filter lost recall past 10 items per call.
+_PAIR_CHUNK = 10
+_PAIR_INPUT_CAP = 500
+PAIR_VERDICTS = ("same", "update", "different")
+
+
+async def judge_pairs(pairs: list[tuple[str, str]]) -> list[str | None]:
+    """pairs: (text of the post the reader has seen, text of the candidate). Returns one
+    of PAIR_VERDICTS per pair, or None where the model gave no usable answer.
+
+    One verdict per PAIR, on raw post text: group_by_topic over one-line summaries
+    grouped almost every candidate with its primary (20-23 of 54 real stories hidden on
+    2026-10-07), because a summary drops exactly the new fact that makes B news.
+    Fail-open: a failed chunk leaves its pairs None, and the caller keeps them shown."""
+    out: list[str | None] = [None] * len(pairs)
+    if not pairs or is_task_dead("pair"):
+        return out
+    for start in range(0, len(pairs), _PAIR_CHUNK):
+        chunk = pairs[start:start + _PAIR_CHUNK]
+        body = "\n\n".join(
+            f"Pair {k + 1}\nA: {' '.join(a.split())[:_PAIR_INPUT_CAP]}\nB: {' '.join(b.split())[:_PAIR_INPUT_CAP]}"
+            for k, (a, b) in enumerate(chunk)
+        )
+        try:
+            data = await llm_json(
+                messages=[
+                    {"role": "system", "content": _PAIR_JUDGE_PROMPT},
+                    {"role": "user", "content": body},
+                ],
+                max_retries=2,
+                task="pair",
+            )
+        except Exception as exc:
+            # INFO: the pairs simply stay shown, and a dead provider has its own alert.
+            log.info("Pair judge failed for %d pair(s), keeping them shown: %s", len(chunk), exc)
+            continue
+        known = set(range(1, len(chunk) + 1))
+        for row in _rows(data, "pairs"):
+            n = _as_id(row.get("n"), known)
+            verdict = _as_text(row.get("verdict")).strip().lower()
+            if n is not None and verdict in PAIR_VERDICTS:
+                out[start + n - 1] = verdict
+    missing = sum(v is None for v in out)
+    if missing:
+        log.info("Pair judge: no verdict for %d of %d pair(s), keeping them shown", missing, len(pairs))
+    return out

@@ -117,12 +117,12 @@ Output JSON only: {"blocked": [{"id": <int>, "rule": <rule_index_0based>, "confi
 If nothing should be blocked: {"blocked": []}"""
 
 
-_WAR_SYSTEM_PROMPT = """You sort the overnight part of a Ukrainian news feed. Each line is `<id>: <HH:MM> <summary>`, oldest first.
+_WAR_SYSTEM_PROMPT = """You sort a stretch of a Ukrainian news feed (the night, or the hours since the previous digest). Each line is `<id>: <HH:MM> <summary>`, oldest first.
 
 1. Pick the items that are WAR REPORTS: attacks and strikes by either side (Russian strikes on Ukraine, Ukrainian drones hitting Russian refineries), drones or missiles in the air, shot down or hitting a place, air-raid alerts, casualties and damage caused by an attack, combat on the front line.
 NOT war reports, keep them out: politics, diplomacy, negotiations, weapons deliveries, smuggling and funding, army reforms, mobilisation and conscription disputes, sanctions, economy, courts, emotional one-liners with no event in them, accidents with no attack behind them, and practical notices (metro, power, communications, water, schools) even when the war caused them — the reader needs those to plan the day.
 
-2. Of the picked items, choose the ONE that best sums up the night for the whole country — usually the air force tally of how many drones and missiles were launched and shot down. Return its id as `overview`, or null when no picked item gives a country-wide tally.
+2. Of the picked items, choose the ONE that best sums up this stretch for the whole country — usually the air force tally of how many drones and missiles were launched and shot down. Return its id as `overview`, or null when no picked item gives a country-wide tally.
 
 Use the EXACT ids. Output JSON only: {"war": [<id>, ...], "overview": <id or null>}
 If nothing is a war report: {"war": [], "overview": null}"""

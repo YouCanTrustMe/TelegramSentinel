@@ -7,7 +7,9 @@ import pytest
 
 from src.dispatcher import digest_builder
 from src.dispatcher.digest_builder import (
+    _build_digest_text,
     _chrome_reserve,
+    _filter_title,
     _decorate_messages,
     _defer_empty_items,
     _quiet_source_url,
@@ -41,7 +43,12 @@ def test_slow_digest_threshold_scales_with_the_item_count():
 def test_slow_digest_threshold_has_a_floor_for_tiny_digests():
     # 2 items x 1.5s would be a 3s threshold; a small digest still gets the floor.
     assert _slow_digest_warning(20.0, 2) is None
-    assert _slow_digest_warning(70.0, 2) is not None
+    assert _slow_digest_warning(190.0, 2) is not None
+
+
+def test_a_rate_limited_but_delivered_digest_stays_quiet():
+    """2026-09-29: 124s for 72 items, five Mistral rate limits, every item delivered."""
+    assert _slow_digest_warning(124.0, 72) is None
 
 
 def test_slow_digest_warning_survives_an_empty_digest():
@@ -405,3 +412,55 @@ async def test_a_deferred_item_does_not_warn_but_a_shipped_raw_one_does(monkeypa
     assert [i["id"] for i in kept] == [2]      # the stale one ships as raw text
     warnings = [r for r in records if r.levelno >= logging.WARNING]
     assert len(warnings) == 1 and "never classified" in warnings[0].getMessage()
+
+
+def test_filter_title_keeps_only_the_rules_first_clause():
+    rule = ("рекламні та промо пости: заклики купити або зареєструватись, реферальні посилання. "
+            "НЕ блокувати: новини ПРО гроші")
+    assert _filter_title(rule) == "рекламні та промо пости…"
+
+
+def test_filter_title_never_ends_on_a_preposition():
+    rule = "прохання зібрати кошти або пожертвувати на військову техніку — лише якщо є заклик"
+    assert _filter_title(rule) == "прохання зібрати кошти або пожертвувати…"
+
+
+def test_filter_title_leaves_a_short_rule_whole():
+    assert _filter_title("спам") == "спам"
+
+
+def test_literal_rules_share_one_filtered_block():
+    def blocked(i, rule):
+        return {"id": i, "summary": f"тривога {i}", "raw_text": f"тривога {i}", "key_phrase": "",
+                "published_at": "2026-10-06T17:39:00+00:00", "original_url": f"https://t.me/c/1/{i}",
+                "blocked_by": rule}
+
+    segments = _build_digest_text({}, blocked_items=[
+        blocked(1, "= повітряна тривога!"), blocked(2, "= загроза застосування бпла"),
+        blocked(3, "= відбій тривоги"), blocked(4, "рекламні та промо пости: заклики купити"),
+    ])
+    text = "\n".join(t for t, _ in segments)
+
+    assert text.count("= exact phrases") == 1
+    assert "рекламні та промо пости…" in text
+    assert "загроза застосування бпла" not in text.split("= exact phrases")[0]
+
+
+def test_filter_title_keeps_a_short_word_that_carries_meaning():
+    # Cut at 45 chars this ends "...бригад ЗСУ та": drop the conjunction, keep "ЗСУ".
+    rule = "збори на техніку для бригад ЗСУ та підрозділів ТрО: реквізити"
+    assert _filter_title(rule) == "збори на техніку для бригад ЗСУ…"
+
+
+def test_two_rules_that_open_alike_keep_separate_blocks():
+    def blocked(i, rule):
+        return {"id": i, "summary": f"s{i}", "raw_text": f"s{i}", "key_phrase": "",
+                "published_at": "2026-10-06T17:39:00+00:00", "original_url": f"https://t.me/c/1/{i}",
+                "blocked_by": rule}
+
+    segments = _build_digest_text({}, blocked_items=[blocked(1, "реклама: магазини"), blocked(2, "реклама: казино")])
+    assert "\n".join(t for t, _ in segments).count("реклама…") == 2
+
+
+def test_filter_title_of_a_rule_that_opens_with_a_separator_is_not_empty():
+    assert _filter_title(": реклама каналів і магазинів") == "реклама каналів і магазинів"

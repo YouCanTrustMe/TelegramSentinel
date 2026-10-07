@@ -32,7 +32,9 @@ _DEFER_MAX_DAYS = 3
 # healthy items took 101.6s = 0.88s/item, while the regression that once ran to
 # ~9 min was 2.6s/item). The floor keeps a handful of items from tripping it.
 _SLOW_DIGEST_PER_ITEM = 1.5
-_SLOW_DIGEST_FLOOR = 60.0
+# 3 minutes: the only slow digest in 60 (2026-09-29, 124s for 72 items) was five Mistral
+# rate limits that cleared on their own and the digest went out whole — not worth a ping.
+_SLOW_DIGEST_FLOOR = 180.0
 
 
 def _slow_digest_threshold(item_count: int) -> float:
@@ -334,7 +336,7 @@ def _build_digest_text(
         ))
 
         if war:
-            header = f"{_WAR_BLOCK_TITLE} · {len(war['items'])}"
+            header = f"{war.get('title', _WAR_BLOCK_TITLE)} · {len(war['items'])}"
             for block_text, block_ids in _source_blocks(header, war["items"], dup_links):
                 segments.append((block_text, block_ids))
 
@@ -348,13 +350,43 @@ def _build_digest_text(
         segments.append(("\n<b>🚫 Filtered</b>", []))
         filtered_by_word: dict[str, list] = defaultdict(list)
         for item in blocked_items:
-            word = item.get("blocked_by") or "?"
-            filtered_by_word[word].append(item)
+            rule = item.get("blocked_by") or "?"
+            # Keyed by the full rule, so two rules that open alike keep their own blocks.
+            filtered_by_word[_LITERAL_FILTER_TITLE if rule.lstrip().startswith("=") else rule].append(item)
         for word, word_items in filtered_by_word.items():
-            for block_text, _ in _source_blocks(word, word_items):
+            for block_text, _ in _source_blocks(_filter_title(word), word_items):
                 segments.append((block_text, []))
 
     return segments
+
+
+_LITERAL_FILTER_TITLE = "= exact phrases"
+_FILTER_TITLE_MAX = 45
+# Words a cut title must not end on (the rules are written in Ukrainian, hence the list).
+# A list, not a length rule: acronyms like AI or the army's, and words like "war", are
+# short and carry the meaning.
+_TITLE_DANGLING = frozenset(
+    "на в у з із зі до для без про по від та і й або чи що як за при під над через між "
+    "to of in on for and or the a an with by at from".split()
+)
+
+
+def _filter_title(rule: str) -> str:
+    """Header of a Filtered block. A semantic rule is a paragraph written for the model —
+    its first clause names it, the rest (examples, the "do NOT block" clause) is noise in a
+    digest. Literal `= phrase` rules each catch a handful of alerts, so they share one
+    block; which phrase hid an item stays in items.blocked_reason."""
+    rule = " ".join(rule.split())
+    if rule.startswith("="):
+        return _LITERAL_FILTER_TITLE
+    rule = rule.lstrip(":—– ")  # a rule opening with its separator would split to an empty head
+    head = re.split(r":| — | – ", rule, maxsplit=1)[0].strip()
+    if len(head) > _FILTER_TITLE_MAX:
+        words = head[:_FILTER_TITLE_MAX].rsplit(" ", 1)[0].split()
+        while len(words) > 1 and (words[-1].strip(",;").lower() in _TITLE_DANGLING or words[-1].isdigit()):
+            words.pop()
+        head = " ".join(words).rstrip(",;")
+    return head if head == rule else f"{head}…"
 
 
 def _quiet_source_url(row) -> str | None:
@@ -390,13 +422,17 @@ def _category_tags(cat_meta: dict) -> str:
 
 
 _WAR_BLOCK_TITLE = "🌙 War overnight"
+# Strikes on cities are daily now; the rest of the day folds them too, under a plainer
+# title, so one expandable line replaces a screen of them without losing any.
+_WAR_BLOCK_TITLE_DAY = "⚔️ War"
 
 
 def _is_morning(now: datetime) -> bool:
-    """A digest built in the local morning window. Deliberately not "the first digest
-    of the day" from digest_log: a manual /digest at 08:00, or a send that failed and
-    retried, would then take the fold away from the 09:45 one that carries the night.
-    The cost is that a second morning digest folds a few hours under the same title."""
+    """A digest built in the local morning window: it puts the heavy categories last and
+    titles its war block "overnight". Deliberately not "the first digest of the day" from
+    digest_log: a manual /digest at 08:00, or a send that failed and retried, would then
+    take that from the 09:45 one that carries the night. The cost is that a second
+    morning digest gets the same title for a few hours."""
     return settings.morning_from_hour <= now.hour < settings.morning_until_hour
 
 
@@ -409,8 +445,8 @@ def _order_for_morning(cat_meta: dict) -> dict:
 
 
 async def _fold_war_reports(cat_meta: dict, now: datetime) -> None:
-    """Pull the war reports out of the morning feed into one block, in place: the
-    LLM picks them and the one that sums up the night leads it. Anything short of a
+    """Pull the war reports out of the feed into one block, in place: the LLM picks
+    them and the one that sums up the period (the night, in a morning digest) leads it. Anything short of a
     usable answer leaves the category untouched — this is presentation, never a filter."""
     data = cat_meta.get(settings.war_block_category)
     if not data:
@@ -442,7 +478,10 @@ async def _fold_war_reports(cat_meta: dict, now: datetime) -> None:
     # The country-wide tally leads, so a collapsed block still says what the night was;
     # each line keeps its channel's name, which the per-source blocks carried as a header.
     order = ([overview] if overview is not None else []) + [i for i in sorted(picked) if i != overview]
-    data["war_block"] = {"items": [{**dict(candidates[i][1]), "_via": candidates[i][0]} for i in order]}
+    data["war_block"] = {
+        "items": [{**dict(candidates[i][1]), "_via": candidates[i][0]} for i in order],
+        "title": _WAR_BLOCK_TITLE if _is_morning(now) else _WAR_BLOCK_TITLE_DAY,
+    }
     log.info("War block: folded %d of %d %s item(s)", len(picked), len(candidates), settings.war_block_category)
 
 
@@ -854,11 +893,11 @@ async def _send_digest_locked(
                 data["sources"][source_name] = source_items[:_MAX_ITEMS_PER_SOURCE]
 
     now = datetime.now(_get_tz())
+    try:
+        await _fold_war_reports(cat_meta, now)
+    except Exception:
+        log.exception("War block failed, rendering the feed unfolded")
     if _is_morning(now):
-        try:
-            await _fold_war_reports(cat_meta, now)
-        except Exception:
-            log.exception("War block failed, rendering the feed unfolded")
         cat_meta = _order_for_morning(cat_meta)
 
     segments = _build_digest_text(

@@ -145,7 +145,8 @@ async def send_reply(chat_id: int, text: str, reply_to_message_id: int | None = 
             log.error("Bot API sendMessage (reply) failed: %s %s", resp.status, body)
 
 
-async def send_to(chat_id: int, text: str, disable_notification: bool = False) -> None:
+async def send_to(chat_id: int, text: str, disable_notification: bool = False,
+                  reply_markup: dict | None = None) -> bool:
     payload: dict = {
         "chat_id": chat_id,
         "text": text,
@@ -153,10 +154,14 @@ async def send_to(chat_id: int, text: str, disable_notification: bool = False) -
         "disable_web_page_preview": True,
         "disable_notification": disable_notification,
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     async with _get_session().post(f"{_BOT_API}/sendMessage", json=payload) as resp:
         if resp.status != 200:
             body = await resp.text()
             log.error("Bot API sendMessage (send_to) failed: %s %s", resp.status, body)
+            return False
+    return True
 
 
 async def send_alert(text: str) -> None:

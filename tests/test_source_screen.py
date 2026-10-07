@@ -264,3 +264,16 @@ async def test_a_retired_item_is_not_resurrected_by_the_empty_summary_backfill(t
     await discard_unsent_items(sid)
 
     assert await get_sent_empty_items(10) == []
+
+
+def test_source_screen_offers_to_mute_the_silent_reminder_and_to_undo_it():
+    def labels(kb):
+        return [b.text for row in kb.inline_keyboard for b in row]
+
+    assert "🔕 Don't remind when silent" in labels(keyboards._source_view_keyboard(7, "crypto", None))
+    assert "🔔 Remind when silent" in labels(keyboards._source_view_keyboard(7, "crypto", None, silent_muted=True))
+
+
+def test_source_screen_says_when_the_silent_reminder_is_off():
+    source = _src(silent_alert_muted=1)
+    assert "🔕 No reminder when it goes silent." in keyboards._source_view_text(source, _health())

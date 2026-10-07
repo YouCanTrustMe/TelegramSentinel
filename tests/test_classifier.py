@@ -393,3 +393,47 @@ def test_group_by_topic_survives_non_object_groups(monkeypatch):
 
     assert [g["ids"] for g in groups] == [[0]]
     assert groups[0]["summary"] == ""
+
+
+async def test_judge_pairs_maps_verdicts_back_across_chunks(monkeypatch):
+    """Chunks of 10, numbered from 1 inside each; an answer for pair n of chunk two
+    must land on pair 10 + n."""
+    calls = []
+
+    async def fake_llm(messages, max_retries=3, task="pair"):
+        calls.append(messages[1]["content"])
+        n = messages[1]["content"].count("Pair ")
+        return {"pairs": [{"n": k, "verdict": "same" if k % 2 else "update"} for k in range(1, n + 1)]}
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    out = await classifier.judge_pairs([(f"a{i}", f"b{i}") for i in range(12)])
+
+    assert len(calls) == 2
+    assert out == ["same", "update"] * 6
+    assert "A: a10\nB: b10" in calls[1]
+
+
+async def test_judge_pairs_drops_answers_of_the_wrong_shape(monkeypatch):
+    """Unknown pair numbers, bools, non-string or unknown verdicts leave the pair None —
+    the caller then keeps the post shown."""
+    async def fake_llm(messages, max_retries=3, task="pair"):
+        return {"pairs": [
+            {"n": 1, "verdict": {"x": 1}},
+            {"n": True, "verdict": "same"},
+            {"n": 9, "verdict": "same"},
+            {"n": "3", "verdict": " Different "},
+            "junk",
+        ]}
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+
+    assert await classifier.judge_pairs([("a", "b")] * 3) == [None, None, "different"]
+
+
+async def test_judge_pairs_fails_open(monkeypatch):
+    async def boom(messages, max_retries=3, task="pair"):
+        raise RuntimeError("quota dead")
+
+    monkeypatch.setattr(classifier, "llm_json", boom)
+
+    assert await classifier.judge_pairs([("a", "b"), ("c", "d")]) == [None, None]

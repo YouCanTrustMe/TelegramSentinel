@@ -23,7 +23,7 @@ from src.db.models import (
     mark_duplicate,
     set_item_embeddings,
 )
-from src.processor.llm.classifier import group_by_topic
+from src.processor.llm.classifier import judge_pairs
 from src.common.util import row_get
 from src.processor.dedup.embedder import cosine, embed_texts, from_blob, to_blob
 
@@ -31,18 +31,6 @@ log = logging.getLogger(__name__)
 
 
 _PLACEHOLDER_SUMMARIES = {"no text", "no caption", "media"}
-
-# Max items (primary + candidates) the LLM judges together for ONE primary. Bigger
-# groups make the LLM over-group and risk muting a distinct story; large groups are chunked.
-_B1_MAX_GROUP = 10
-
-# Several SMALL primaries are packed into one group_by_topic call up to this many items
-# (distinct primaries = distinct events, so this does not raise the per-primary over-group
-# risk). Without this, a big digest fires one call PER primary (~20), and on a 5 RPM
-# provider that throttles the whole digest to minutes. Two chunks of the SAME primary are
-# never packed together, so _B1_MAX_GROUP still bounds how many candidates one primary sees.
-_B1_CONFIRM_BATCH = 18
-
 
 def _is_placeholder(text: str) -> bool:
     """Media-only / empty-caption summaries (e.g. 'no text') are identical across
@@ -78,6 +66,11 @@ def _richness(item) -> int:
     text = _field(item, "raw_text", "") or ""
     text = _BRACKET_PREFIX_RE.sub("", _URL_RE.sub("", text))
     return len(" ".join(text.split())) // _RICHNESS_STEP
+
+
+def _post_text(item) -> str:
+    """What the pair judge reads for a post: its own text, the summary when it has none."""
+    return _field(item, "raw_text", "") or _field(item, "summary", "") or ""
 
 
 def _sort_key(item) -> tuple[int, int, float, str]:
@@ -184,168 +177,151 @@ async def deduplicate(items: list, vectors: dict[int, np.ndarray]) -> tuple[list
 async def _confirm_mutes(
     muted: dict[int, int],
     item_by_id: dict,
-    sent_summary: dict[int, str],
+    sent_text: dict[int, str],
     vec: dict[int, np.ndarray],
     sent_vec: dict[int, np.ndarray],
-) -> dict[int, int]:
-    """B1 — LLM confirmation before muting. Embeddings only pre-select candidates;
-    in high-overlap domains (war/strike news) DIFFERENT cross-source events score
-    the same cosine as the SAME event, and muting hides a real story for good. So
-    each candidate is confirmed by the LLM (the same group_by_topic arbiter the
-    within-source merge uses) — only items it groups WITH the primary stay muted.
-    Near-identical pairs (>= merge_near_dup_threshold) are certain dups and skip
-    the LLM. Fail-open: an LLM error keeps the items (no mute)."""
-    by_primary: dict[int, list[int]] = defaultdict(list)
-    for mid, pid in muted.items():
-        by_primary[pid].append(mid)
+) -> tuple[dict[int, int], dict[int, int]]:
+    """B1 — confirm each candidate against the very post it would hide under.
 
+    Embeddings only pre-select: in war and strike news two DIFFERENT events score the
+    same cosine as one event retold. A pair at/above dedup_auto_hide_threshold is hidden
+    outright (dedup_auto_hide_in_digest_threshold when both posts are in this digest and
+    category, where the hidden one stays linked beside its primary); every other pair
+    gets its own verdict from judge_pairs on the raw text. "same" hides. "update" (same
+    story, new fact) hides only inside this digest and only when the candidate says no
+    more than its primary (_hides_update); against a story already SHOWN it is news, so
+    the item stays and is returned in `updates` (candidate -> shown id) for a ↻ link
+    back. Fail-open: no verdict keeps the item shown.
+
+    Returns (confirmed mutes, updates)."""
     confirmed: dict[int, int] = {}
-    # Build the LLM work as "units": each unit is one primary plus a bounded chunk of its
-    # candidates (the over-group guard). Near-identical reposts are confirmed here without
-    # the LLM.
-    units: list[tuple[int, list[dict]]] = []  # (primary_id, group_by_topic inputs incl. the primary)
-    for pid, dups in by_primary.items():
-        pvec = vec.get(pid)
-        if pvec is None:
-            pvec = sent_vec.get(pid)
-        need_llm: list[int] = []
-        for d in dups:
-            dv = vec.get(d)
-            if dv is not None and pvec is not None and cosine(dv, pvec) >= settings.merge_near_dup_threshold:
-                confirmed[d] = pid  # near-identical repost: certain dup, no LLM needed
-            else:
-                need_llm.append(d)
-        if not need_llm:
+    updates: dict[int, int] = {}
+    pending: list[tuple[int, int]] = []
+    score_of: dict[int, float] = {}
+    for mid, pid in muted.items():
+        mv = vec.get(mid)
+        pv = vec.get(pid)
+        if pv is None:
+            pv = sent_vec.get(pid)
+        score = cosine(mv, pv) if mv is not None and pv is not None else 0.0
+        # Across categories the in-digest line would equal the candidate floor
+        # (dedup_cross_category_threshold) and no such pair would ever reach the judge.
+        same_digest_and_cat = pid in item_by_id and (
+            (_field(item_by_id[mid], "category", "other") or "other")
+            == (_field(item_by_id[pid], "category", "other") or "other"))
+        # A hide without a verdict must not bury a richer post under a one-line primary
+        # either: such a pair always goes to the judge.
+        primary_richness = (_richness(item_by_id[pid]) if pid in item_by_id
+                            else _richness({"raw_text": sent_text.get(pid, "")}))
+        buries_richer = _richness(item_by_id[mid]) > primary_richness
+        line = (settings.dedup_auto_hide_in_digest_threshold if same_digest_and_cat
+                else settings.dedup_auto_hide_threshold)
+        score_of[mid] = score
+        if score >= line and not buries_richer:
+            confirmed[mid] = pid
+            log.info("B1: auto-hid item id=%d -> primary id=%d | cosine=%.3f", mid, pid, score)
+        else:
+            pending.append((mid, pid))
+
+    def _text(iid: int) -> str:
+        return _post_text(item_by_id[iid]) if iid in item_by_id else sent_text.get(iid, "")
+
+    verdicts = await judge_pairs([(_text(pid), _text(mid)) for mid, pid in pending])
+    rejected: list[tuple[int, int]] = []
+    for (mid, pid), verdict in zip(pending, verdicts):
+        if verdict == "same" or (verdict == "update" and _hides_update(mid, pid, item_by_id)):
+            confirmed[mid] = pid
+            log.info("B1: hid item id=%d -> primary id=%d | cosine=%.3f | verdict=%s", mid, pid, score_of[mid], verdict)
             continue
-        primary_summary = (
-            _field(item_by_id[pid], "summary", "") if pid in item_by_id else sent_summary.get(pid, "")
-        ) or ""
-        chunk_size = max(1, _B1_MAX_GROUP - 1)
-        for start in range(0, len(need_llm), chunk_size):
-            chunk = need_llm[start:start + chunk_size]
-            inputs = [{"id": pid, "text": primary_summary}]
-            inputs += [{"id": d, "text": _field(item_by_id[d], "summary", "") or ""} for d in chunk]
-            units.append((pid, inputs))
+        if verdict == "update" and pid not in item_by_id:
+            updates[mid] = pid
+            log.info("B1: kept item id=%d — an update to shown id=%d | cosine=%.3f", mid, pid, score_of[mid])
+        else:
+            log.info("B1: kept item id=%d — verdict=%s against primary id=%d | cosine=%.3f",
+                     mid, verdict, pid, score_of[mid])
+        rejected.append((mid, pid))
 
-    # Pack units into batches (first-fit). A batch never holds two units of the SAME primary
-    # (that would let one primary see more candidates than _B1_MAX_GROUP), and stays within
-    # _B1_CONFIRM_BATCH items — so many small primaries share one call instead of one each.
-    batches: list[tuple[list[dict], set[int], set[int]]] = []  # (inputs, pids, ids)
-    for pid, inputs in units:
-        placed = False
-        for b_inputs, b_pids, b_ids in batches:
-            if pid in b_pids:
-                continue
-            add = sum(1 for x in inputs if x["id"] not in b_ids)
-            if len(b_ids) + add <= _B1_CONFIRM_BATCH:
-                for x in inputs:
-                    if x["id"] not in b_ids:
-                        b_inputs.append(x)
-                        b_ids.add(x["id"])
-                b_pids.add(pid)
-                placed = True
-                break
-        if not placed:
-            batches.append((list(inputs), {pid}, {x["id"] for x in inputs}))
-
-    # One LLM call per batch; collect, per primary, the ids the LLM put in its event group,
-    # and keep EVERY group it returned (see _regroup_rejected).
-    same_group_of: dict[int, set[int]] = defaultdict(set)
-    event_groups: list[set[int]] = []
-    for b_inputs, b_pids, _b_ids in batches:
-        try:
-            groups = await group_by_topic(b_inputs)
-        except Exception as exc:
-            log.warning("B1: LLM confirm failed for %d primary group(s), keeping candidates unmuted: %s",
-                        len(b_pids), exc)
-            continue
-        for g in groups:
-            ids = set(g.get("ids", []))
-            event_groups.append(ids)
-            for pid in b_pids & ids:
-                same_group_of[pid].update(ids)
-
-    rejected: list[tuple[int, int]] = []  # (candidate id, the primary it was compared against)
-    for pid, dups in by_primary.items():
-        for d in dups:
-            if d in confirmed:  # near-dup auto-confirmed above
-                continue
-            if d in same_group_of.get(pid, ()):
-                confirmed[d] = pid
-            else:
-                rejected.append((d, pid))
-
-    confirmed.update(_regroup_rejected(rejected, event_groups, item_by_id, vec))
-    return confirmed
+    confirmed.update(await _regroup_rejected(rejected, item_by_id, vec))
+    return confirmed, updates
 
 
-def _regroup_rejected(
+def _hides_update(mid: int, pid: int, item_by_id: dict) -> bool:
+    """An update may hide only inside this digest, under a primary that says at least as
+    much: _sort_key puts a Telegram post first, so a one-line Telegram primary would
+    otherwise bury the RSS article that carries the new figure."""
+    return pid in item_by_id and _richness(item_by_id[mid]) <= _richness(item_by_id[pid])
+
+
+async def _regroup_rejected(
     rejected: list[tuple[int, int]],
-    event_groups: list[set[int]],
     item_by_id: dict,
     vec: dict[int, np.ndarray],
 ) -> dict[int, int]:
-    """Second reading of the SAME partition, no extra LLM call.
+    """Candidates rejected against ONE primary may still be one event between them.
 
-    Union-find chains a cluster transitively (A~B~C), but the confirm step only asks
-    "is this candidate the same event as the PRIMARY?". When the primary is the weak
-    link, every candidate is rejected and the whole cluster survives — even where the
-    candidates are plainly the same event as EACH OTHER (observed on prod: two sources
-    on one downed Ka-27, cosine 0.966, both delivered because both were compared only
-    against an unrelated primary). group_by_topic returns a full partition, so the
-    groups that hold no primary are exactly those pairings; use them.
+    Union-find chains a cluster transitively (A~B~C), but B1 asks only "same as the
+    PRIMARY?". When the primary is the weak link every candidate is rejected and the
+    cluster ships whole — prod 2026-09-02: two sources on one downed Ka-27 (cosine
+    0.966), both delivered, both compared only with an unrelated primary. So rejected
+    candidates of one primary that clear the floor with each other (same category,
+    different sources) are judged once more against the best of them."""
+    by_primary: dict[int, list[int]] = defaultdict(list)
+    for mid, pid in rejected:
+        if mid in item_by_id:
+            by_primary[pid].append(mid)
 
-    Embeddings stay the gate: two rejected candidates are only collapsed when their own
-    cosine also clears dedup_log_floor, so an LLM that over-groups cannot mute a pair
-    the vectors never linked. Category is a gate too: one confirm call carries primaries
-    from several categories, so a group can span them, and this second reading has no
-    pairing of its own to hold a cross-category pair to the stricter
-    dedup_cross_category_threshold the floor pass applies."""
-    if not rejected:
-        return {}
-    primary_of = dict(rejected)
-    uf = _UnionFind()
-    for ids in event_groups:
-        by_cat: dict[str, list[int]] = defaultdict(list)
-        for i in ids:
-            if i in primary_of:
-                by_cat[_field(item_by_id[i], "category", "other") or "other"].append(i)
-        for members in by_cat.values():
-            for other in members[1:]:
-                uf.union(members[0], other)
-
-    comps: dict[int, list[int]] = defaultdict(list)
-    for d, _pid in rejected:
-        comps[uf.find(d)].append(d)
-
-    out: dict[int, int] = {}
-    for members in comps.values():
+    pairs: list[tuple[int, int, float]] = []  # (candidate, survivor, cosine)
+    for members in by_primary.values():
         if len(members) < 2:
             continue
-        survivor = min(members, key=lambda i: _sort_key(item_by_id[i]))
-        survivor_src = _field(item_by_id[survivor], "source_id")
-        svec = vec.get(survivor)
-        for mid in members:
-            if mid == survivor or _field(item_by_id[mid], "source_id") == survivor_src:
+        uf = _UnionFind()
+        for a in range(len(members)):
+            ia = item_by_id[members[a]]
+            uf.find(members[a])
+            for b in range(a + 1, len(members)):
+                ib = item_by_id[members[b]]
+                va, vb = vec.get(members[a]), vec.get(members[b])
+                if (va is None or vb is None or _field(ia, "source_id") == _field(ib, "source_id")
+                        or (_field(ia, "category", "other") or "other") != (_field(ib, "category", "other") or "other")):
+                    continue
+                if cosine(va, vb) >= settings.dedup_log_floor:
+                    uf.union(members[a], members[b])
+        comps: dict[int, list[int]] = defaultdict(list)
+        for m in members:
+            comps[uf.find(m)].append(m)
+        for comp in comps.values():
+            if len(comp) < 2:
                 continue
-            mvec = vec.get(mid)
-            if svec is None or mvec is None:
-                continue
-            score = cosine(mvec, svec)
-            if score < settings.dedup_log_floor:
-                continue
-            out[mid] = survivor
-            log.info("B1: regrouped item id=%d -> primary id=%d | cosine=%.3f | same LLM event group, "
-                     "though both were rejected against their own primary", mid, survivor, score)
+            survivor = min(comp, key=lambda i: _sort_key(item_by_id[i]))
+            survivor_src = _field(item_by_id[survivor], "source_id")
+            # Each pair clears the floor on its own: a chain A~B~C must not put C before
+            # the judge against an A its vectors never linked it to.
+            for m in comp:
+                if m == survivor or _field(item_by_id[m], "source_id") == survivor_src:
+                    continue
+                c = cosine(vec[m], vec[survivor])
+                if c >= settings.dedup_log_floor:
+                    pairs.append((m, survivor, c))
+    if not pairs:
+        return {}
 
-    for d, pid in rejected:
-        if d not in out:
-            log.info("B1: kept item id=%d — LLM says different event from primary id=%d", d, pid)
+    verdicts = await judge_pairs([(_post_text(item_by_id[sid]), _post_text(item_by_id[mid]))
+                                  for mid, sid, _c in pairs])
+    out: dict[int, int] = {}
+    for (mid, sid, c), verdict in zip(pairs, verdicts):
+        if verdict == "same" or (verdict == "update" and _hides_update(mid, sid, item_by_id)):
+            out[mid] = sid
+            log.info("B1: regrouped item id=%d -> primary id=%d | cosine=%.3f | verdict=%s | both were rejected "
+                     "against their own primary", mid, sid, c, verdict)
     return out
 
 
-def _sent_matches(cur: list[tuple[int, np.ndarray]], sent_meta: dict, item_by_id: dict) -> list[tuple[int, int, float]]:
-    """(current id, sent id, cosine) for each current item's best match in the sent pool.
+def _sent_matches(
+    cur: list[tuple[int, np.ndarray]], sent_meta: dict, item_by_id: dict,
+) -> tuple[list[tuple[int, int, float]], list[tuple[int, int, float]]]:
+    """(current id, sent id, cosine) for each current item's best match in the sent pool,
+    plus each item's best same-source match below the near-identical line: a follow-up
+    candidate, never hidden, only linked back (judged only if the item survives B1).
 
     Each item is compared with the pool DIRECTLY, never through a chain of current items —
     union-find once muted a "$81K Bitcoin" post at cosine 0.755 under a CLARITY Act one it
@@ -355,14 +331,14 @@ def _sent_matches(cur: list[tuple[int, np.ndarray]], sent_meta: dict, item_by_id
     all, and 26 of 30 checked by hand were new events or new facts. One matrix product,
     since the pool spans every category (~1500 items against ~150)."""
     if not cur or not sent_meta:
-        return []
+        return [], []
     # One length per model (from_blob already drops the others); the majority guards the
     # product against a stray vector instead of trusting whichever item came first.
     dim = Counter(v.shape for _, v in cur).most_common(1)[0][0]
     sids = [sid for sid, (v, _c, _s) in sent_meta.items() if v.shape == dim]
     rows = [(iid, v) for iid, v in cur if v.shape == dim]
     if not sids or not rows:
-        return []
+        return [], []
 
     def _unit(m: np.ndarray) -> np.ndarray:
         n = np.linalg.norm(m, axis=1, keepdims=True)
@@ -370,20 +346,52 @@ def _sent_matches(cur: list[tuple[int, np.ndarray]], sent_meta: dict, item_by_id
 
     sims = _unit(np.stack([v for _, v in rows])) @ _unit(np.stack([sent_meta[s][0] for s in sids])).T
     lowest = min(settings.dedup_log_floor, settings.dedup_cross_category_threshold)
-    out = []
+    out, follow = [], []
     for r, (iid, _v) in enumerate(rows):
         item = item_by_id[iid]
         cat, src = _field(item, "category", "other") or "other", _field(item, "source_id")
         best: tuple[float, int] | None = None
+        best_follow: tuple[float, int] | None = None
         for k in np.nonzero(sims[r] >= lowest)[0]:
             sid, c = sids[k], float(sims[r, k])
             _v, s_cat, s_src = sent_meta[sid]
-            if c < _union_floor(cat, s_cat) or (s_src == src and c < settings.merge_near_dup_threshold):
+            if c < _union_floor(cat, s_cat):
+                continue
+            if s_src == src and c < settings.merge_near_dup_threshold:
+                if best_follow is None or c > best_follow[0]:
+                    best_follow = (c, sid)
                 continue
             if best is None or c > best[0]:
                 best = (c, sid)
         if best is not None:
             out.append((iid, best[1], best[0]))
+        if best_follow is not None:
+            follow.append((iid, best_follow[1], best_follow[0]))
+    return out, follow
+
+
+async def _confirm_follow_ups(follow: list[tuple[int, int, float]], item_by_id: dict,
+                              sent_text: dict[int, str]) -> dict[int, int]:
+    """A source's new post on a story it already showed is never hidden (see
+    _sent_matches), but half of these pairs are a different event in the same words, so
+    the ↻ link back is drawn only where the judge reads the same story."""
+    if not follow:
+        return {}
+
+    verdicts = await judge_pairs([(sent_text.get(sid, ""), _post_text(item_by_id[iid])) for iid, sid, _c in follow])
+    out: dict[int, int] = {}
+    for (iid, sid, c), verdict in zip(follow, verdicts):
+        if verdict in ("same", "update"):
+            out[iid] = sid
+            log.info("Follow-up: item id=%d moves on its source's shown id=%d | cosine=%.3f | verdict=%s",
+                     iid, sid, c, verdict)
+    return out
+
+
+def _with_earlier(item, earlier: tuple[str, str]) -> dict:
+    """The item as a dict carrying a ↻ link to the shown post it moves on."""
+    out = dict(item) if isinstance(item, dict) else {k: item[k] for k in item.keys()}
+    out["_earlier"] = [earlier] + list(out.get("_earlier") or [])
     return out
 
 
@@ -401,6 +409,8 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
     sent_meta: dict[int, tuple[np.ndarray, str, object]] = {}  # id -> (vector, category, source_id)
     sent_vec: dict[int, np.ndarray] = {}
     sent_summary: dict[int, str] = {}
+    sent_text: dict[int, str] = {}
+    sent_link: dict[int, tuple[str, str]] = {}  # id -> (published_at, original_url)
     for row in window:
         if row["id"] in current_ids or not row["sent"]:
             continue
@@ -415,6 +425,8 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
             sent_meta[row["id"]] = (v, row["category"] or "other", row_get(row, "source_id"))
             sent_vec[row["id"]] = v
             sent_summary[row["id"]] = row_get(row, "summary", "") or ""
+            sent_text[row["id"]] = row_get(row, "raw_text", "") or sent_summary[row["id"]]
+            sent_link[row["id"]] = (row_get(row, "published_at", "") or "", row_get(row, "original_url", "") or "")
 
     near_thr = settings.merge_near_dup_threshold
 
@@ -454,7 +466,8 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
     cur = [(iid, v) for iid, v in cur_all if iid not in near_muted]
     muted: dict[int, int] = {}  # duplicate id -> primary id (primary may be a sent-pool id)
 
-    for ida, sid, c in _sent_matches(cur, sent_meta, item_by_id):
+    sent_hits, follow = _sent_matches(cur, sent_meta, item_by_id)
+    for ida, sid, c in sent_hits:
         ia = item_by_id[ida]
         log.debug("DEDUP-CANDIDATE cosine=%.3f x-digest [%s] | %s || (sent) %s", c, _cat(ia),
                   (_field(ia, "summary", "") or "")[:60], sent_summary.get(sid, "")[:60])
@@ -505,7 +518,7 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
             else:
                 muted[mid] = primary
 
-    if not muted and not near_muted:
+    if not muted and not near_muted and not follow:
         log.info("Cross-source dedup: no duplicates among %d item(s)", len(items))
         return items, {}
 
@@ -535,17 +548,31 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
         return items, {}
 
     candidates = len(muted)
-    confirmed = await _confirm_mutes(muted, item_by_id, sent_summary, vec, sent_vec) if muted else {}
+    confirmed, updates = await _confirm_mutes(muted, item_by_id, sent_text, vec, sent_vec) if muted else ({}, {})
     # A fallback whose own primary is being hidden would re-point through it to a shown
     # story the item was never compared with — skip those.
     retry = {mid: pid for mid, pid in fallback.items() if mid not in confirmed and pid not in confirmed}
     if retry:
         candidates += len(retry)
-        confirmed.update(await _confirm_mutes(retry, item_by_id, sent_summary, vec, sent_vec))
+        confirmed.update((await _confirm_mutes(retry, item_by_id, sent_text, vec, sent_vec))[0])
     confirmed.update(near_muted)
+    updates.update(await _confirm_follow_ups(
+        [f for f in follow if f[0] not in confirmed and f[0] not in updates], item_by_id, sent_text))
+
+    def _linked(survivors: list) -> list:
+        """Each surviving update of a shown story, with a ↻ link back to that post."""
+        out = []
+        for it in survivors:
+            sid = updates.get(_field(it, "id"))
+            if sid is not None and sent_link.get(sid, ("", ""))[1]:
+                it = _with_earlier(it, sent_link[sid])
+            out.append(it)
+        return out
+
     if not confirmed:
-        log.info("Cross-source dedup: %d candidate(s) all rejected by LLM, nothing muted", candidates)
-        return items, {}
+        log.info("Cross-source dedup: %d candidate(s) all rejected by LLM, nothing muted | %d update(s) linked back",
+                 candidates, len(updates))
+        return _linked(items), {}
 
     muted = confirmed
     # A near-dup primary can itself be muted by the floor pass (Z->X, X->Y); point every
@@ -558,10 +585,16 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
         return pid
 
     muted = {mid: _survivor(pid) for mid, pid in muted.items()}
+    # An update hidden under a post of this digest hands its ↻ link to that post: the
+    # story it continues was still shown before.
+    for mid, pid in muted.items():
+        if mid in updates and pid not in updates and pid not in muted:
+            updates[pid] = updates[mid]
     for mid, pid in muted.items():
         await mark_duplicate(mid, pid)
-    survivors = [it for it in items if _field(it, "id") not in muted]
+    survivors = _linked([it for it in items if _field(it, "id") not in muted])
     link_map = await get_duplicate_links([_field(it, "id") for it in survivors])
-    log.info("Cross-source dedup: muted %d LLM-confirmed (of %d) + %d near-identical, %d survivor(s)",
-             len(muted) - len(near_muted), candidates, len(near_muted), len(survivors))
+    log.info("Cross-source dedup: muted %d by verdict or cosine (of %d) + %d near-identical, %d survivor(s) | "
+             "%d update(s) linked back", len(muted) - len(near_muted), candidates, len(near_muted), len(survivors),
+             sum(1 for it in survivors if _field(it, "id") in updates))
     return survivors, link_map

@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     # at/above it 73 of 82 delivered prod pairs (2026-09-18..10-07, hand-labelled) were
     # the same story — 162 of the 236 pairs >= 0.86 were feed<->finance alone.
     dedup_cross_category_threshold: float = 0.90
+    # A candidate pair at/above this is hidden without asking the LLM. On 54 hand-labelled
+    # B1 candidates (2026-10-07) this plus the pair judge for the rest hid 23 real
+    # duplicates and 2 real stories; group_by_topic as the judge hid 27 and 20-23.
+    dedup_auto_hide_threshold: float = 0.94
+    # The same, for a pair inside ONE digest. A wrong hide there is mild — the hidden
+    # post stays one tap away as the source link beside its primary — so the line sits
+    # lower: on the same 54 pairs 0.90 caught 2 more duplicates and hid no story, while
+    # 0.90 against already-shown stories would have hidden 10.
+    dedup_auto_hide_in_digest_threshold: float = 0.90
     # Texts per rolling minute. Mistral's free tier absorbed 20 back-to-back calls in
     # 13s (median 0.35s), so this ceiling is politeness, not a measured limit.
     embed_rpm: int = 300

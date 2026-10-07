@@ -104,7 +104,7 @@ async def get_recent_embedded_items(window_hours: int) -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(
             """SELECT items.id, items.category, items.source_id, items.published_at,
-                      items.sent, items.embedding, items.summary,
+                      items.sent, items.embedding, items.summary, items.raw_text, items.original_url,
                       sources.sort_order AS source_sort_order
                FROM items
                LEFT JOIN sources ON items.source_id = sources.id

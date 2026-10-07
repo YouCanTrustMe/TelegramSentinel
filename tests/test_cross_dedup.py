@@ -47,80 +47,94 @@ def test_cluster_within_source_keeps_unvectored_as_singletons():
     assert sorted(len(c) for c in clusters) == [1, 1]
 
 
-async def test_confirm_mutes_keeps_llm_rejected_and_auto_confirms_near_dup(monkeypatch):
-    calls = {"n": 0}
+def _judge(rule):
+    """A judge_pairs stub: rule(text_a, text_b) -> verdict; counts calls and pairs."""
+    calls = {"n": 0, "pairs": []}
 
-    async def fake_group_by_topic(inputs, prompt_extra=None):
+    async def judge(pairs):
         calls["n"] += 1
-        primary = inputs[0]["id"]
-        same = [i["id"] for i in inputs if i["id"] == primary or "SAME" in i["text"]]
-        groups = [{"ids": same, "summary": "x", "key_phrase": ""}]
-        for i in inputs:
-            if i["id"] not in same:
-                groups.append({"ids": [i["id"]], "summary": "y", "key_phrase": ""})
-        return groups
+        calls["pairs"] += list(pairs)
+        return [rule(a, b) for a, b in pairs]
 
-    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
+    return judge, calls
+
+
+async def test_confirm_mutes_judges_each_pair_and_auto_hides_close_ones(monkeypatch):
+    judge, calls = _judge(lambda a, b: "same" if "SAME" in b else "different")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
 
     item_by_id = {
-        1: {"id": 1, "summary": "primary"},
-        2: {"id": 2, "summary": "SAME event"},
-        3: {"id": 3, "summary": "DIFFERENT strike"},
-        4: {"id": 4, "summary": "near identical repost"},
+        1: {"id": 1, "raw_text": "primary"},
+        2: {"id": 2, "raw_text": "SAME event"},
+        3: {"id": 3, "raw_text": "DIFFERENT strike"},
+        4: {"id": 4, "raw_text": "close rewrite"},
     }
     ang = math.radians(28)
     vec = {
         1: _vec(1, 0),
-        2: _vec(math.cos(ang), math.sin(ang)),  # ~0.88, needs LLM
-        3: _vec(math.cos(ang), math.sin(ang)),  # ~0.88, needs LLM
-        4: _vec(0.999, 0.001),                  # ~1.0, auto-confirm, no LLM
+        2: _vec(math.cos(ang), math.sin(ang)),  # ~0.88, judged
+        3: _vec(math.cos(ang), math.sin(ang)),  # ~0.88, judged
+        4: _at(0.95),                           # >= dedup_auto_hide_threshold, no LLM
     }
-    muted = {2: 1, 3: 1, 4: 1}
 
-    confirmed = await cd._confirm_mutes(muted, item_by_id, {}, vec, {})
+    confirmed, updates = await cd._confirm_mutes({2: 1, 3: 1, 4: 1}, item_by_id, {}, vec, {})
 
-    assert 2 in confirmed          # LLM says same event -> muted
-    assert 3 not in confirmed      # LLM says different -> kept
-    assert 4 in confirmed          # near-dup auto-confirmed
-    assert calls["n"] == 1         # LLM called once; near-dup skipped it
+    assert confirmed == {2: 1, 4: 1}
+    assert updates == {}
+    assert [b for _a, b in calls["pairs"]] == ["SAME event", "DIFFERENT strike"]
+
+
+async def test_confirm_mutes_reads_the_raw_post_not_the_summary(monkeypatch):
+    """A one-line summary drops exactly the new fact that makes a post news."""
+    judge, calls = _judge(lambda a, b: "different")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    item_by_id = {2: {"id": 2, "summary": "short", "raw_text": "the whole post"}}
+    vec = {2: _at(0.88)}
+
+    await cd._confirm_mutes({2: 99}, item_by_id, {99: "the shown post"}, vec, {99: _vec(1, 0)})
+
+    assert calls["pairs"] == [("the shown post", "the whole post")]
+
+
+async def test_an_update_hides_inside_one_digest_but_not_against_a_shown_story(monkeypatch):
+    """In one digest the primary is the richer post, so the update adds nothing the
+    reader misses. Against a story shown earlier the new fact IS the news."""
+    judge, _ = _judge(lambda a, b: "update")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    item_by_id = {1: {"id": 1, "raw_text": "p"}, 2: {"id": 2, "raw_text": "d"}, 3: {"id": 3, "raw_text": "e"}}
+    vec = {1: _vec(1, 0), 2: _at(0.88), 3: _at(0.88)}
+
+    confirmed, updates = await cd._confirm_mutes({2: 1, 3: 99}, item_by_id, {99: "shown"}, vec, {99: _vec(1, 0)})
+
+    assert confirmed == {2: 1}
+    assert updates == {3: 99}
+
+
+async def test_confirm_mutes_fails_open_on_a_missing_verdict(monkeypatch):
+    judge, _ = _judge(lambda a, b: None)
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    item_by_id = {1: {"id": 1, "raw_text": "p"}, 2: {"id": 2, "raw_text": "d"}}
+    vec = {1: _vec(1, 0), 2: _at(0.88)}
+
+    assert await cd._confirm_mutes({2: 1}, item_by_id, {}, vec, {}) == ({}, {})
 
 
 async def test_confirm_band_pair_reaches_llm_and_mutes(monkeypatch):
     """A cross-source pair in the confirm band (dedup_log_floor <= cos < dedup_threshold)
     must be unioned and LLM-confirmed, not silently dropped — Ukrainian war-news
     rephrasings of one event routinely sit just above the union floor."""
-    marked: list[tuple[int, int]] = []
-
-    async def fake_recent(_hours):
-        return []
-
-    async def fake_mark(mid, pid):
-        marked.append((mid, pid))
-
-    async def fake_links(_ids):
-        return {}
-
-    async def fake_group_by_topic(inputs, prompt_extra=None):
-        return [{"ids": [i["id"] for i in inputs], "summary": "x", "key_phrase": ""}]
-
-    monkeypatch.setattr(cd, "get_recent_embedded_items", fake_recent)
-    monkeypatch.setattr(cd, "mark_duplicate", fake_mark)
-    monkeypatch.setattr(cd, "get_duplicate_links", fake_links)
-    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
-    monkeypatch.setattr(cd.settings, "dedup_shadow", False)
-
-    ang = math.radians(28)  # cosine ~0.883, inside the 0.86-0.92 confirm band
+    marked = _wire(monkeypatch)
     items = [
         {"id": 1, "summary": "Khmelnytskyi air raid downed 5 drones", "category": "feed",
          "source_id": 10, "source_name": "A", "source_sort_order": 0, "published_at": "1"},
         {"id": 2, "summary": "Khmelnytskyi alert system triggered", "category": "feed",
          "source_id": 11, "source_name": "B", "source_sort_order": 1, "published_at": "2"},
     ]
-    vec = {1: _vec(1, 0), 2: _vec(math.cos(ang), math.sin(ang))}
+    vec = {1: _vec(1, 0), 2: _at(0.883)}
 
     survivors, _ = await cd.deduplicate(items, vec)
 
-    assert marked == [(2, 1)]                       # band pair muted under primary
+    assert marked == [(2, 1)]
     assert [it["id"] for it in survivors] == [1]
 
 
@@ -129,68 +143,29 @@ async def test_near_identical_pair_muted_without_llm(monkeypatch):
     be muted directly, WITHOUT the LLM — even when the LLM would reject the link. Such a
     pair can transitively union onto a weakly-related already-sent primary, and the
     confirm-vs-primary step alone then misses it (observed: 0.99-cosine reposts left in)."""
-    marked: list[tuple[int, int]] = []
-    calls = {"n": 0}
-
-    async def fake_recent(_hours):
-        return []
-
-    async def fake_mark(mid, pid):
-        marked.append((mid, pid))
-
-    async def fake_links(_ids):
-        return {}
-
-    async def fake_group_by_topic(inputs, prompt_extra=None):
-        calls["n"] += 1  # would call every candidate a DIFFERENT event
-        return [{"ids": [i["id"]], "summary": "y", "key_phrase": ""} for i in inputs]
-
-    monkeypatch.setattr(cd, "get_recent_embedded_items", fake_recent)
-    monkeypatch.setattr(cd, "mark_duplicate", fake_mark)
-    monkeypatch.setattr(cd, "get_duplicate_links", fake_links)
-    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
-    monkeypatch.setattr(cd.settings, "dedup_shadow", False)
-
-    ang = math.radians(5)  # cosine ~0.996, above merge_near_dup_threshold (0.95)
+    marked = _wire(monkeypatch, same_event=False)
+    judge, calls = _judge(lambda a, b: "different")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
     items = [
         {"id": 1, "summary": "Long-range strike command created", "category": "feed",
          "source_id": 10, "source_name": "A", "source_sort_order": 0, "published_at": "1"},
         {"id": 2, "summary": "Long-range strike command set up", "category": "feed",
          "source_id": 11, "source_name": "B", "source_sort_order": 1, "published_at": "2"},
     ]
-    vec = {1: _vec(1, 0), 2: _vec(math.cos(ang), math.sin(ang))}
+    vec = {1: _vec(1, 0), 2: _at(0.996)}
 
     survivors, _ = await cd.deduplicate(items, vec)
 
-    assert marked == [(2, 1)]                       # lower-priority repost muted
+    assert marked == [(2, 1)]
     assert [it["id"] for it in survivors] == [1]
-    assert calls["n"] == 0                           # near-identical -> LLM never consulted
+    assert calls["pairs"] == []
 
 
 async def test_near_dup_chain_collapses_to_surviving_primary(monkeypatch):
     """A near-dup primary (X) can itself be muted under a higher-priority floor match (Y):
     Z->X and X->Y. The chain must collapse so Z points at the SURVIVOR Y, not the hidden X
     (otherwise Z's source link would render under a story that isn't shown)."""
-    marked: list[tuple[int, int]] = []
-
-    async def fake_recent(_hours):
-        return []
-
-    async def fake_mark(mid, pid):
-        marked.append((mid, pid))
-
-    async def fake_links(_ids):
-        return {}
-
-    async def fake_group_by_topic(inputs, prompt_extra=None):
-        return [{"ids": [i["id"] for i in inputs], "summary": "x", "key_phrase": ""}]  # all same event
-
-    monkeypatch.setattr(cd, "get_recent_embedded_items", fake_recent)
-    monkeypatch.setattr(cd, "mark_duplicate", fake_mark)
-    monkeypatch.setattr(cd, "get_duplicate_links", fake_links)
-    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
-    monkeypatch.setattr(cd.settings, "dedup_shadow", False)
-
+    marked = _wire(monkeypatch)
     a = math.radians(3)   # X(id=2) & Z(id=3): cosine ~0.9986 -> near-dup, primary X
     y = math.radians(27)  # X(id=2) & Y(id=1): cosine ~0.891 -> floor band, Y wins on priority
     items = [
@@ -205,83 +180,8 @@ async def test_near_dup_chain_collapses_to_surviving_primary(monkeypatch):
 
     survivors, _ = await cd.deduplicate(items, vec)
 
-    assert [it["id"] for it in survivors] == [1]          # only Y survives
-    assert sorted(marked) == [(2, 1), (3, 1)]             # both point at Y, not Z->X->hidden
-
-
-async def test_confirm_mutes_chunks_large_groups(monkeypatch):
-    """A big candidate group is split so no single group_by_topic call exceeds the
-    cap (primary + a few candidates), guarding against the LLM over-grouping."""
-    monkeypatch.setattr(cd, "_B1_MAX_GROUP", 3)  # chunk_size = 2 candidates per call
-    calls = {"n": 0, "sizes": []}
-
-    async def fake_group_by_topic(inputs, prompt_extra=None):
-        calls["n"] += 1
-        calls["sizes"].append(len(inputs))
-        return [{"ids": [i["id"] for i in inputs], "summary": "x", "key_phrase": ""}]
-
-    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
-    # Primary (id=1) has no vector, so no candidate is auto-confirmed — all need the LLM.
-    item_by_id = {i: {"id": i, "summary": f"s{i}"} for i in range(1, 6)}
-    vec = {i: _vec(1, 0) for i in range(2, 6)}
-
-    confirmed = await cd._confirm_mutes({2: 1, 3: 1, 4: 1, 5: 1}, item_by_id, {}, vec, {})
-
-    assert calls["n"] == 2               # 4 candidates / 2 per call
-    assert max(calls["sizes"]) <= 3      # primary + at most 2 candidates each
-    assert all(d in confirmed for d in (2, 3, 4, 5))
-
-
-async def test_confirm_mutes_batches_many_primaries_into_one_call(monkeypatch):
-    """Several small primaries are packed into a single group_by_topic call (Cerebras
-    is 5 RPM, so one call per primary throttles a big digest). Each candidate is still
-    confirmed only if the LLM groups it with ITS OWN primary."""
-    calls = {"n": 0, "sizes": []}
-
-    async def fake_group_by_topic(inputs, prompt_extra=None):
-        calls["n"] += 1
-        calls["sizes"].append(len(inputs))
-        # Group each primary (odd id) with the very next id ("its" candidate), leaving
-        # the second candidate of primary 1 (id=3) as a separate event -> kept.
-        pairs = {1: {1, 2}, 5: {5, 6}, 7: {7, 8}}
-        present = {i["id"] for i in inputs}
-        groups = []
-        seen: set[int] = set()
-        for p, members in pairs.items():
-            m = members & present
-            if m:
-                groups.append({"ids": list(m), "summary": "x", "key_phrase": ""})
-                seen |= m
-        for i in inputs:
-            if i["id"] not in seen:
-                groups.append({"ids": [i["id"]], "summary": "y", "key_phrase": ""})
-        return groups
-
-    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
-    # 3 primaries (1,5,7); primary 1 has two candidates (2 SAME, 3 different); 5 and 7 have one each.
-    item_by_id = {i: {"id": i, "summary": f"s{i}"} for i in (1, 2, 3, 5, 6, 7, 8)}
-    # No primary has a vector -> nothing auto-confirmed as near-dup, all go to the LLM.
-    vec = {i: _vec(1, 0) for i in (2, 3, 6, 8)}
-    muted = {2: 1, 3: 1, 6: 5, 8: 7}
-
-    confirmed = await cd._confirm_mutes(muted, item_by_id, {}, vec, {})
-
-    assert calls["n"] == 1                 # all three primaries fit one batch (<= _B1_CONFIRM_BATCH)
-    assert confirmed == {2: 1, 6: 5, 8: 7}  # each candidate muted under its OWN primary
-    assert 3 not in confirmed              # LLM kept it as a different event
-
-
-async def test_confirm_mutes_fails_open_on_llm_error(monkeypatch):
-    async def boom(inputs, prompt_extra=None):
-        raise RuntimeError("quota dead")
-
-    monkeypatch.setattr(cd, "group_by_topic", boom)
-    item_by_id = {1: {"id": 1, "summary": "p"}, 2: {"id": 2, "summary": "d"}}
-    vec = {1: _vec(1, 0), 2: _vec(math.cos(math.radians(28)), math.sin(math.radians(28)))}
-
-    confirmed = await cd._confirm_mutes({2: 1}, item_by_id, {}, vec, {})
-
-    assert confirmed == {}  # LLM error -> nothing muted (no real story hidden)
+    assert [it["id"] for it in survivors] == [1]
+    assert sorted(marked) == [(2, 1), (3, 1)]
 
 
 def _band_vec(deg):
@@ -292,68 +192,61 @@ def _band_vec(deg):
 async def test_confirm_mutes_regroups_candidates_rejected_against_a_weak_primary(monkeypatch):
     """Prod 2026-09-02: two sources reported one downed Ka-27 (cosine 0.966) and both
     were delivered — union-find had chained them onto an unrelated primary, and the
-    confirm step only asks "same event as the PRIMARY?". The LLM's own partition puts
-    the two together, so the pair must collapse without a second call."""
-    calls = {"n": 0}
-
-    async def fake_group_by_topic(inputs, prompt_extra=None):
-        calls["n"] += 1
-        ids = {i["id"] for i in inputs}
-        groups = [{"ids": [1], "summary": "weak anchor", "key_phrase": ""}]
-        groups.append({"ids": sorted(ids - {1}), "summary": "one event", "key_phrase": ""})
-        return groups
-
-    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
-
+    confirm step only asks "same event as the PRIMARY?". The two must still collapse."""
+    judge, calls = _judge(lambda a, b: "different" if a == "anchor" else "same")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
     item_by_id = {
-        1: {"id": 1, "summary": "anchor", "source_id": 10, "source_sort_order": 0},
-        2: {"id": 2, "summary": "Ka-27 destroyed", "source_id": 11, "source_sort_order": 1},
-        3: {"id": 3, "summary": "destruction of a Ka-27 confirmed", "source_id": 12, "source_sort_order": 2},
+        1: {"id": 1, "raw_text": "anchor", "source_id": 10, "source_sort_order": 0},
+        2: {"id": 2, "raw_text": "Ka-27 destroyed", "source_id": 11, "source_sort_order": 1},
+        3: {"id": 3, "raw_text": "destruction of a Ka-27 confirmed", "source_id": 12, "source_sort_order": 2},
     }
     vec = {1: _band_vec(0), 2: _band_vec(28), 3: _band_vec(29)}  # 2~3 ≈ 1.0, both ~0.88 to 1
 
-    confirmed = await cd._confirm_mutes({2: 1, 3: 1}, item_by_id, {}, vec, {})
+    confirmed, _ = await cd._confirm_mutes({2: 1, 3: 1}, item_by_id, {}, vec, {})
 
-    assert calls["n"] == 1
-    assert 2 not in confirmed              # lowest sort_order survives
-    assert confirmed[3] == 2               # the other is muted under it, not under the anchor
+    assert calls["n"] == 2
+    assert confirmed == {3: 2}             # muted under the other candidate, not the anchor
 
 
 async def test_regroup_requires_the_pair_to_clear_the_cosine_floor(monkeypatch):
-    """Embeddings stay the gate: an LLM that lumps two candidates together cannot mute
-    a pair whose own vectors never linked them."""
+    """Embeddings stay the gate: the judge is never even asked about a pair whose own
+    vectors never linked them."""
+    judge, calls = _judge(lambda a, b: "same")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
     item_by_id = {
-        2: {"id": 2, "summary": "a", "source_id": 11, "source_sort_order": 1},
-        3: {"id": 3, "summary": "b", "source_id": 12, "source_sort_order": 2},
+        2: {"id": 2, "raw_text": "a", "source_id": 11, "source_sort_order": 1},
+        3: {"id": 3, "raw_text": "b", "source_id": 12, "source_sort_order": 2},
     }
     vec = {2: _band_vec(0), 3: _band_vec(60)}  # cosine 0.5, far below the floor
 
-    out = cd._regroup_rejected([(2, 1), (3, 1)], [{2, 3}], item_by_id, vec)
+    assert await cd._regroup_rejected([(2, 1), (3, 1)], item_by_id, vec) == {}
+    assert calls["n"] == 0
 
-    assert out == {}
 
-
-async def test_regroup_leaves_same_source_pairs_to_the_within_source_merge():
+async def test_regroup_leaves_same_source_pairs_to_the_within_source_merge(monkeypatch):
+    judge, _ = _judge(lambda a, b: "same")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
     item_by_id = {
-        2: {"id": 2, "summary": "a", "source_id": 11, "source_sort_order": 1},
-        3: {"id": 3, "summary": "b", "source_id": 11, "source_sort_order": 1},
+        2: {"id": 2, "raw_text": "a", "source_id": 11, "source_sort_order": 1},
+        3: {"id": 3, "raw_text": "b", "source_id": 11, "source_sort_order": 1},
     }
     vec = {2: _band_vec(0), 3: _band_vec(1)}
 
-    assert cd._regroup_rejected([(2, 1), (3, 1)], [{2, 3}], item_by_id, vec) == {}
+    assert await cd._regroup_rejected([(2, 1), (3, 1)], item_by_id, vec) == {}
 
 
-def test_regroup_never_crosses_categories():
-    """One confirm call packs primaries from several categories, so its partition can
-    hold a group spanning them. Muting across a category boundary would render the
-    duplicate's link under a primary the reader meets in a different section."""
+async def test_regroup_never_crosses_categories(monkeypatch):
+    """Muting across a category boundary would render the duplicate's link under a
+    primary the reader meets in a different section."""
+    judge, _ = _judge(lambda a, b: "same")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
     item_by_id = {
-        2: {"id": 2, "summary": "a", "source_id": 11, "source_sort_order": 1, "category": "crypto"},
-        3: {"id": 3, "summary": "b", "source_id": 12, "source_sort_order": 2, "category": "finance"},
+        2: {"id": 2, "raw_text": "a", "source_id": 11, "source_sort_order": 1, "category": "crypto"},
+        3: {"id": 3, "raw_text": "b", "source_id": 12, "source_sort_order": 2, "category": "finance"},
     }
     vec = {2: _band_vec(0), 3: _band_vec(1)}  # cosine ~1.0, would otherwise collapse
 
-    assert cd._regroup_rejected([(2, 1), (3, 1)], [{2, 3}], item_by_id, vec) == {}
+    assert await cd._regroup_rejected([(2, 1), (3, 1)], item_by_id, vec) == {}
 
 def test_sort_key_prefers_a_telegram_original_over_a_higher_ranked_feed():
     tg = {"id": 1, "source_type": "telegram", "source_sort_order": 9, "published_at": "2026-09-03"}
@@ -444,21 +337,20 @@ def _wire(monkeypatch, sent=(), same_event=True):
     async def fake_links(_ids):
         return {}
 
-    async def fake_group_by_topic(inputs, prompt_extra=None):
-        if same_event:
-            return [{"ids": [i["id"] for i in inputs], "summary": "x", "key_phrase": ""}]
-        return [{"ids": [i["id"]], "summary": "x", "key_phrase": ""} for i in inputs]
+    judge, _ = _judge(lambda a, b: "same" if same_event else "different")
 
     monkeypatch.setattr(cd, "get_recent_embedded_items", fake_recent)
     monkeypatch.setattr(cd, "mark_duplicate", fake_mark)
     monkeypatch.setattr(cd, "get_duplicate_links", fake_links)
-    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
+    monkeypatch.setattr(cd, "judge_pairs", judge)
     # The real from_blob rejects any length but the live model's; these vectors are 2-d.
     monkeypatch.setattr(cd, "from_blob", lambda b: np.frombuffer(b, dtype=np.float32) if b else None)
     monkeypatch.setattr(cd.settings, "dedup_shadow", False)
     monkeypatch.setattr(cd.settings, "dedup_log_floor", 0.86)
     monkeypatch.setattr(cd.settings, "dedup_cross_category_threshold", 0.90)
     monkeypatch.setattr(cd.settings, "merge_near_dup_threshold", 0.975)
+    monkeypatch.setattr(cd.settings, "dedup_auto_hide_threshold", 0.94)
+    monkeypatch.setattr(cd.settings, "dedup_auto_hide_in_digest_threshold", 0.90)
     return marked
 
 
@@ -546,13 +438,8 @@ async def test_an_item_rejected_against_the_sent_pool_still_collapses_with_its_p
     instead of shipping twice."""
     marked = _wire(monkeypatch, sent=[_sent(99, 3, _vec(1, 0))])
 
-    async def judge(inputs, prompt_extra=None):
-        ids = {i["id"] for i in inputs}
-        if 99 in ids:  # the shown story is a different event
-            return [{"ids": [i], "summary": "", "key_phrase": ""} for i in ids]
-        return [{"ids": sorted(ids), "summary": "", "key_phrase": ""}]
-
-    monkeypatch.setattr(cd, "group_by_topic", judge)
+    judge, _ = _judge(lambda a, b: "different" if a == "shown 99" else "same")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
     a = math.acos(0.87)
     items = [_row(1, 1, raw_text="x" * 400), _row(2, 2)]
     # 1~2 at cos(0.35) ~ 0.94: below the near-identical pass, so only the B1 fallback can pair them.
@@ -570,7 +457,7 @@ def test_sent_matches_skips_vectors_of_another_model():
     item_by_id = {1: {"id": 1, "category": "feed", "source_id": 1}}
     meta = {9: (np.ones(3, dtype=np.float32), "feed", 2), 10: (_vec(1, 0), "feed", 2)}
 
-    assert cd._sent_matches([(1, _vec(1, 0))], meta, item_by_id) == [(1, 10, pytest.approx(1.0))]
+    assert cd._sent_matches([(1, _vec(1, 0))], meta, item_by_id) == ([(1, 10, pytest.approx(1.0))], [])
 
 
 async def test_no_fallback_through_a_primary_that_is_itself_hidden(monkeypatch):
@@ -579,14 +466,9 @@ async def test_no_fallback_through_a_primary_that_is_itself_hidden(monkeypatch):
     compared with."""
     marked = _wire(monkeypatch, sent=[_sent(99, 3, _vec(1, 0)), _sent(98, 4, _vec(0, 1))])
 
-    async def judge(inputs, prompt_extra=None):
-        ids = {i["id"] for i in inputs}
-        # 1 is the shown story 99; 1 and 2 would also read as one story if ever asked.
-        pair = {1, 99} & ids if 99 in ids else {1, 2} & ids
-        rest = [{"ids": [i], "summary": "", "key_phrase": ""} for i in ids - pair]
-        return ([{"ids": sorted(pair), "summary": "", "key_phrase": ""}] if pair else []) + rest
-
-    monkeypatch.setattr(cd, "group_by_topic", judge)
+    # 1 is the shown story 99; 1 and 2 would also read as one story if ever asked.
+    judge, _ = _judge(lambda a, b: "different" if a == "shown 98" else "same")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
     # 1 is 0.92 to 99 and 2 is 0.92 to 98 on their own axes; 1~2 share only the third axis
     # (0.15), which the lowered floor lets union in this digest.
     items = [_row(1, 1), _row(2, 2)]
@@ -605,3 +487,180 @@ async def test_no_fallback_through_a_primary_that_is_itself_hidden(monkeypatch):
 
     assert [it["id"] for it in survivors] == [2]
     assert marked == [(1, 99)]
+
+
+async def test_an_update_to_a_shown_story_stays_and_links_back(monkeypatch):
+    """Another source moves a shown story on (a ruling after the strike): shown, with a
+    ↻ link to the post the reader already saw."""
+    marked = _wire(monkeypatch, sent=[_sent(99, 3, _vec(1, 0)) | {"original_url": "https://t.me/c/99",
+                                                                   "published_at": "2026-10-06T08:00"}])
+    judge, _ = _judge(lambda a, b: "update")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    items = [_row(1, 1), _row(2, 2)]
+
+    survivors, _ = await cd.deduplicate(items, {1: _at(0.90), 2: _vec(0, 1)})
+
+    assert marked == []
+    assert [it["id"] for it in survivors] == [1, 2]
+    assert survivors[0]["_earlier"] == [("2026-10-06T08:00", "https://t.me/c/99")]
+    assert "_earlier" not in survivors[1]
+
+
+async def test_a_sources_follow_up_is_linked_back_only_when_the_judge_reads_one_story(monkeypatch):
+    """Same-source pairs under the near-identical line are never hidden, and half of
+    them are a different event in the same words: the ↻ link waits for the verdict."""
+    shown = _sent(99, 1, _vec(1, 0)) | {"original_url": "https://t.me/c/99", "published_at": "2026-10-06T08:00"}
+    for verdict, linked in (("update", True), ("same", True), ("different", False)):
+        marked = _wire(monkeypatch, sent=[shown])
+        judge, calls = _judge(lambda a, b, v=verdict: v)
+        monkeypatch.setattr(cd, "judge_pairs", judge)
+        items = [_row(1, 1), _row(2, 2)]
+
+        survivors, _ = await cd.deduplicate(items, {1: _at(0.90), 2: _vec(0, 1)})
+
+        assert marked == []
+        assert [it["id"] for it in survivors] == [1, 2]
+        assert ("_earlier" in survivors[0]) is linked
+        assert calls["pairs"] == [("shown 99", "story 1")]
+
+
+async def test_a_close_pair_is_hidden_without_asking_the_judge(monkeypatch):
+    marked = _wire(monkeypatch)
+    judge, calls = _judge(lambda a, b: "different")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    items = [_row(1, 1), _row(2, 2)]
+
+    survivors, _ = await cd.deduplicate(items, {1: _vec(1, 0), 2: _at(0.95)})
+
+    assert [it["id"] for it in survivors] == [1]
+    assert marked == [(2, 1)]
+    assert calls["pairs"] == []
+
+
+async def test_the_auto_hide_line_is_lower_inside_one_digest(monkeypatch):
+    """At 0.92 a pair inside the digest hides without the judge (the hidden post stays
+    linked beside its primary); the same cosine against a shown story still asks."""
+    _wire(monkeypatch)
+    judge, calls = _judge(lambda a, b: "different")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    item_by_id = {1: {"id": 1, "raw_text": "p"}, 2: {"id": 2, "raw_text": "d"}, 3: {"id": 3, "raw_text": "e"}}
+    vec = {1: _vec(1, 0), 2: _at(0.92), 3: _at(0.92)}
+
+    confirmed, _ = await cd._confirm_mutes({2: 1, 3: 99}, item_by_id, {99: "shown"}, vec, {99: _vec(1, 0)})
+
+    assert confirmed == {2: 1}
+    assert calls["pairs"] == [("shown", "e")]
+
+
+async def test_a_cross_category_pair_in_one_digest_still_goes_to_the_judge(monkeypatch):
+    """The in-digest auto-hide line equals the cross-category candidate floor, so it
+    must not apply across categories, or no such pair would ever be judged."""
+    _wire(monkeypatch)
+    judge, calls = _judge(lambda a, b: "different")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    item_by_id = {1: {"id": 1, "raw_text": "p", "category": "feed"}, 2: {"id": 2, "raw_text": "d", "category": "finance"}}
+
+    confirmed, _ = await cd._confirm_mutes({2: 1}, item_by_id, {}, {1: _vec(1, 0), 2: _at(0.92)}, {})
+
+    assert confirmed == {}
+    assert len(calls["pairs"]) == 1
+
+
+async def test_an_update_never_hides_a_post_that_says_more_than_its_primary(monkeypatch):
+    """A one-line Telegram primary must not bury the article carrying the new figure."""
+    judge, _ = _judge(lambda a, b: "update")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    item_by_id = {1: {"id": 1, "raw_text": "short"}, 2: {"id": 2, "raw_text": "detail " * 60},
+                  3: {"id": 3, "raw_text": "short too"}}
+    vec = {1: _vec(1, 0), 2: _at(0.88), 3: _at(0.88)}
+
+    confirmed, updates = await cd._confirm_mutes({2: 1, 3: 1}, item_by_id, {}, vec, {})
+
+    assert confirmed == {3: 1}
+    assert updates == {}
+
+
+async def test_an_update_hidden_in_the_digest_hands_its_link_to_the_post_that_stays(monkeypatch):
+    """Item 1 continues a shown story; it is then hidden under item 2 from another
+    source. Item 2 shows the story now, so it gets the ↻ link."""
+    shown = _sent(99, 3, _vec(1, 0)) | {"original_url": "https://t.me/c/99", "published_at": "2026-10-06T08:00"}
+    _wire(monkeypatch, sent=[shown])
+    judge, _ = _judge(lambda a, b: "update" if a == "shown 99" else "same")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    a = math.acos(0.88)
+    items = [_row(1, 1), _row(2, 2, raw_text="x" * 400)]
+    vec = {1: _vec(math.cos(a), math.sin(a)), 2: _vec(math.cos(a + 0.4), math.sin(a + 0.4))}
+
+    survivors, _ = await cd.deduplicate(items, vec)
+
+    assert [it["id"] for it in survivors] == [2]
+    assert survivors[0]["_earlier"] == [("2026-10-06T08:00", "https://t.me/c/99")]
+
+
+async def test_the_in_digest_auto_hide_never_buries_a_richer_post(monkeypatch):
+    _wire(monkeypatch)
+    judge, calls = _judge(lambda a, b: "different")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    item_by_id = {1: {"id": 1, "raw_text": "one line"}, 2: {"id": 2, "raw_text": "detail " * 60}}
+
+    confirmed, _ = await cd._confirm_mutes({2: 1}, item_by_id, {}, {1: _vec(1, 0), 2: _at(0.92)}, {})
+
+    assert confirmed == {}
+    assert len(calls["pairs"]) == 1
+
+
+async def test_regroup_judges_only_pairs_linked_directly(monkeypatch):
+    """A~B and B~C clear the floor, A~C does not: C is never put before the judge
+    against A, whatever the judge would say."""
+    judge, calls = _judge(lambda a, b: "same")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    item_by_id = {i: {"id": i, "raw_text": f"t{i}", "source_id": 10 + i, "source_sort_order": i} for i in (1, 2, 3)}
+    vec = {1: _band_vec(0), 2: _band_vec(29), 3: _band_vec(58)}  # 1~2, 2~3 ~0.875; 1~3 ~0.53
+
+    out = await cd._regroup_rejected([(1, 9), (2, 9), (3, 9)], item_by_id, vec)
+
+    assert out == {2: 1}
+    assert [b for _a, b in calls["pairs"]] == ["t2"]
+
+
+async def test_a_follow_up_is_still_linked_when_its_cross_source_match_is_rejected(monkeypatch):
+    """The item resembles another source's shown post (judged different) and its own
+    source's shown post: the ↻ link back to its own story must not be lost."""
+    own = _sent(98, 1, _vec(1, 0)) | {"original_url": "https://t.me/c/98", "published_at": "2026-10-06T08:00"}
+    # item 1 sits 0.90 from its own shown post and ~0.90 from the other source's one
+    other = _sent(99, 3, _band_vec(math.degrees(2 * math.acos(0.90)))) | {"original_url": "https://t.me/c/99"}
+    _wire(monkeypatch, sent=[own, other])
+    judge, _ = _judge(lambda a, b: "update" if a == "shown 98" else "different")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    items = [_row(1, 1), _row(2, 2)]
+
+    survivors, _ = await cd.deduplicate(items, {1: _at(0.90), 2: _vec(0, -1)})
+
+    assert [it["id"] for it in survivors] == [1, 2]
+    assert survivors[0]["_earlier"] == [("2026-10-06T08:00", "https://t.me/c/98")]
+
+
+async def test_even_a_close_pair_never_buries_a_richer_post_without_a_verdict(monkeypatch):
+    _wire(monkeypatch)
+    judge, calls = _judge(lambda a, b: "different")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    item_by_id = {1: {"id": 1, "raw_text": "one line"}, 2: {"id": 2, "raw_text": "detail " * 60}}
+
+    confirmed, _ = await cd._confirm_mutes({2: 1}, item_by_id, {}, {1: _vec(1, 0), 2: _at(0.96)}, {})
+
+    assert confirmed == {}
+    assert len(calls["pairs"]) == 1
+
+
+async def test_a_close_pair_never_buries_a_richer_post_under_a_shown_one_without_a_verdict(monkeypatch):
+    """The 09:45 one-liner was shown; the 14:45 article with the new toll scores 0.95
+    against it and must reach the judge, whose "update" keeps it with a link back."""
+    _wire(monkeypatch)
+    judge, calls = _judge(lambda a, b: "update")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    item_by_id = {2: {"id": 2, "raw_text": "detail " * 60}}
+
+    confirmed, updates = await cd._confirm_mutes({2: 99}, item_by_id, {99: "one line"}, {2: _at(0.95)}, {99: _vec(1, 0)})
+
+    assert confirmed == {}
+    assert updates == {2: 99}

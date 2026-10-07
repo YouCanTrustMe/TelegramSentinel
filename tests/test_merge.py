@@ -146,3 +146,49 @@ async def test_group_without_a_summary_takes_the_newest_posts_text(monkeypatch):
     out = await mg._merge_via_group_by_topic(items)
     assert out[0]["summary"] == "Загинули двоє"
     assert out[0]["original_url"] == "https://t.me/l/2"
+
+
+def test_a_merged_line_keeps_a_members_link_to_a_story_shown_earlier():
+    """Dedup can tag an item as an update to a story shown in an earlier digest; folding
+    it into a same-source cluster must not drop that ↻ link."""
+    from src.processor.dedup.merge import _build_merged
+    a = {"id": 1, "summary": "s1", "published_at": "2026-10-07T09:00", "original_url": "u1",
+         "_earlier": [("2026-10-06T08:00", "u0")]}
+    b = {"id": 2, "summary": "s2", "published_at": "2026-10-07T10:00", "original_url": "u2"}
+
+    merged = _build_merged([b, a], "s", "")
+
+    assert merged["original_url"] == "u2"
+    assert merged["_earlier"] == [("2026-10-06T08:00", "u0"), ("2026-10-07T09:00", "u1")]
+
+
+def test_an_unmerged_item_keeps_its_link_to_a_story_shown_earlier():
+    """Most updates stay single in their source's block; the plain copy the merge makes
+    of them must carry the ↻ link too."""
+    item = {"id": 5, "summary": "s", "key_phrase": "", "original_url": "u5", "published_at": "2026-10-07T09:00",
+            "raw_text": "r", "_earlier": [("2026-10-06T08:00", "u0")]}
+
+    assert mg._items_as_plain([item])[0]["_earlier"] == [("2026-10-06T08:00", "u0")]
+
+
+def test_a_link_back_to_another_days_post_carries_its_date(monkeypatch):
+    monkeypatch.setattr(digest_builder.settings, "digest_timezone", "UTC")
+    item = {"summary": "s", "original_url": "u", "published_at": "2026-10-07T12:00:00+00:00",
+            "_earlier": [("2026-10-06T21:30:00+00:00", "https://t.me/l/0"), ("2026-10-07T04:00:00+00:00", "https://t.me/l/1")]}
+
+    assert digest_builder._earlier_line(item) == (
+        '<i>↻ earlier: <a href="https://t.me/l/0">06.10 21:30</a>, <a href="https://t.me/l/1">04:00</a></i>')
+
+
+def test_a_long_line_never_cuts_its_link_to_another_digest(monkeypatch):
+    """Six overnight reposts plus a link back to yesterday's shown story: the reposts
+    give way first."""
+    monkeypatch.setattr(digest_builder.settings, "digest_timezone", "UTC")
+    item = {"summary": "s", "original_url": "u", "published_at": "2026-10-07T09:00:00+00:00",
+            "_earlier": [("2026-10-06T08:00:00+00:00", "https://t.me/l/old")]
+                        + [(f"2026-10-07T0{h}:00:00+00:00", f"https://t.me/l/{h}") for h in range(1, 7)]}
+
+    line = digest_builder._earlier_line(item)
+
+    assert line.startswith("<i>↻ earlier: +3 · ")
+    assert ">06.10 08:00</a>" in line and ">06:00</a>" in line and ">03:00</a>" not in line

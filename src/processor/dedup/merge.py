@@ -32,6 +32,7 @@ def _items_as_plain(items: list) -> list[dict]:
             "published_at": item["published_at"],
             "raw_text": item["raw_text"],
             "_item_ids": [item["id"]],
+            "_earlier": list(row_get(item, "_earlier") or []),
         }
         for item in items
     ]
@@ -76,7 +77,10 @@ def _build_merged(cluster: list, summary: str, key_phrase: str) -> dict:
         "published_at": latest["published_at"] if latest else ordered[-1]["published_at"],
         "raw_text": None,
         "_item_ids": [it["id"] for it in cluster],
-        "_earlier": [(it["published_at"], it["original_url"]) for it in with_url[:-1]],
+        # A member's own ↻ link (an update to a story shown in an earlier digest) stays.
+        "_earlier": sorted({*((it["published_at"], it["original_url"]) for it in with_url[:-1]),
+                            *(e for it in cluster for e in (row_get(it, "_earlier") or []))},
+                           key=lambda e: e[0] or ""),
     }
 
 

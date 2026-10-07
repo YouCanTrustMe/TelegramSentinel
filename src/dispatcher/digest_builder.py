@@ -4,7 +4,7 @@ import re
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from zoneinfo import ZoneInfo
 
@@ -198,14 +198,37 @@ def _local_hhmm(published_at) -> str:
 _EARLIER_MAX_LINKS = 4
 
 
+# An earlier post at least this much older than the line's own predates the previous
+# digest (slots are under 12h apart; dedup links an update back up to
+# dedup_window_hours), so it carries its date and is never cut from the line.
+_EARLIER_DATED_AFTER = timedelta(hours=12)
+
+
+def _is_dated(published_at, line_published_at) -> bool:
+    dt, own = _parse_published(published_at), _parse_published(line_published_at)
+    return dt is not None and own is not None and own - dt >= _EARLIER_DATED_AFTER
+
+
+def _earlier_label(published_at, line_published_at) -> str:
+    dt = _parse_published(published_at)
+    if dt is None:
+        return "→"
+    local = dt.astimezone(_get_tz())
+    return f"{local:%d.%m %H:%M}" if _is_dated(published_at, line_published_at) else f"{local:%H:%M}"
+
+
 def _earlier_line(item) -> str:
-    """Second line of a merged story: the earlier posts it replaced, each reachable
-    by its time. Empty for an ordinary item."""
+    """Second line of a merged story or of an update to a story shown before: the
+    earlier posts, each reachable by its time. Empty for an ordinary item."""
     earlier = [(pub, url) for pub, url in (row_get(item, "_earlier") or []) if url]
     if not earlier:
         return ""
+    own = row_get(item, "published_at")
     shown = earlier[-_EARLIER_MAX_LINKS:]
-    links = [f'<a href="{escape(url, quote=True)}">{_local_hhmm(pub) or "→"}</a>' for pub, url in shown]
+    # The oldest link may be the story shown in an earlier digest: it outranks a repost.
+    if len(earlier) > len(shown) and _is_dated(earlier[0][0], own):
+        shown = [earlier[0]] + earlier[-(_EARLIER_MAX_LINKS - 1):]
+    links = [f'<a href="{escape(url, quote=True)}">{_earlier_label(pub, own)}</a>' for pub, url in shown]
     more = f"+{len(earlier) - len(shown)} · " if len(earlier) > len(shown) else ""
     return f"<i>↻ earlier: {more}{', '.join(links)}</i>"
 

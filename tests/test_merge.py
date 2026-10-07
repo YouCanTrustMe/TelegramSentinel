@@ -177,7 +177,7 @@ def test_a_link_back_to_another_days_post_carries_its_date(monkeypatch):
             "_earlier": [("2026-10-06T21:30:00+00:00", "https://t.me/l/0"), ("2026-10-07T04:00:00+00:00", "https://t.me/l/1")]}
 
     assert digest_builder._earlier_line(item) == (
-        '<i>↻ earlier: <a href="https://t.me/l/0">06.10 21:30</a>, <a href="https://t.me/l/1">04:00</a></i>')
+        '<i>↻ earlier: <a href="https://t.me/l/0">06/10 21:30</a>, <a href="https://t.me/l/1">04:00</a></i>')
 
 
 def test_a_long_line_never_cuts_its_link_to_another_digest(monkeypatch):
@@ -191,4 +191,4 @@ def test_a_long_line_never_cuts_its_link_to_another_digest(monkeypatch):
     line = digest_builder._earlier_line(item)
 
     assert line.startswith("<i>↻ earlier: +3 · ")
-    assert ">06.10 08:00</a>" in line and ">06:00</a>" in line and ">03:00</a>" not in line
+    assert ">06/10 08:00</a>" in line and ">06:00</a>" in line and ">03:00</a>" not in line

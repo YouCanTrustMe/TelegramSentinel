@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     # volume the old 0.82 gemini floor produced, so B1's token budget is unchanged.
     # Raising it to 0.88 would halve the candidates but drop recall to 79%.
     dedup_log_floor: float = 0.86
+    # Union floor for a pair from two DIFFERENT categories (a finance channel reposting a
+    # feed one's war news). Below it such pairs are mostly different events in shared vocabulary;
+    # at/above it 73 of 82 delivered prod pairs (2026-09-18..10-07, hand-labelled) were
+    # the same story — 162 of the 236 pairs >= 0.86 were feed<->finance alone.
+    dedup_cross_category_threshold: float = 0.90
     # Texts per rolling minute. Mistral's free tier absorbed 20 back-to-back calls in
     # 13s (median 0.35s), so this ceiling is politeness, not a measured limit.
     embed_rpm: int = 300

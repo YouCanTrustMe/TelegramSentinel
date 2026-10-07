@@ -11,7 +11,8 @@ Two safety nets:
   them, so the threshold can be validated on real digests before enforcing.
 """
 import logging
-from collections import defaultdict
+import re
+from collections import Counter, defaultdict
 
 import numpy as np
 
@@ -63,17 +64,40 @@ def _field(item, key, default=None):
     return default if val is None else val
 
 
-def _sort_key(item) -> tuple[int, float, str]:
+# Characters of post text per richness step. Coarse on purpose: a channel signature or
+# a hashtag line must not outrank the sort order, a paragraph of detail must.
+_RICHNESS_STEP = 150
+_URL_RE = re.compile(r"https?://\S+")
+_BRACKET_PREFIX_RE = re.compile(r"^\s*(\[[^\]]{0,300}\]\s*)+")
+
+
+def _richness(item) -> int:
+    """How much the post itself says, in _RICHNESS_STEP steps. The summaries are all
+    capped to one line, so the raw text is what tells a one-line repost ("Poland and
+    Romania refused the grain transit") from the report that also says why."""
+    text = _field(item, "raw_text", "") or ""
+    text = _BRACKET_PREFIX_RE.sub("", _URL_RE.sub("", text))
+    return len(" ".join(text.split())) // _RICHNESS_STEP
+
+
+def _sort_key(item) -> tuple[int, int, float, str]:
     """Primary selection: a Telegram source first (a t.me original opens in the app in
-    one tap, where an RSS original is a browser trip and often a paywall), then lowest
-    source sort_order (highest user priority, same order the digest renders in),
-    tie-broken by earliest published_at. Set primary_prefers_telegram=false to let
-    sort_order alone decide."""
+    one tap, where an RSS original is a browser trip and often a paywall), then the
+    post that says the most (_richness), then lowest source sort_order (highest user
+    priority, same order the digest renders in), tie-broken by earliest published_at.
+    Set primary_prefers_telegram=false to let richness and sort_order decide."""
     tg = 0 if (settings.primary_prefers_telegram
                and _field(item, "source_type") == "telegram") else 1
     so = _field(item, "source_sort_order")
     so = so if isinstance(so, (int, float)) else 1e9
-    return (tg, so, _field(item, "published_at", "9999") or "9999")
+    return (tg, -_richness(item), so, _field(item, "published_at", "9999") or "9999")
+
+
+def _union_floor(cat_a: str, cat_b: str) -> float:
+    """Cosine a pair must clear to become a candidate: the usual floor within one
+    category, a stricter one across two, where shared war vocabulary links unrelated
+    feed and finance posts."""
+    return settings.dedup_log_floor if cat_a == cat_b else settings.dedup_cross_category_threshold
 
 
 class _UnionFind:
@@ -274,9 +298,9 @@ def _regroup_rejected(
     Embeddings stay the gate: two rejected candidates are only collapsed when their own
     cosine also clears dedup_log_floor, so an LLM that over-groups cannot mute a pair
     the vectors never linked. Category is a gate too: one confirm call carries primaries
-    from several categories, so a group can span them — but every other mute path
-    clusters strictly per category, and a link belongs under a primary the reader sees
-    in the same section."""
+    from several categories, so a group can span them, and this second reading has no
+    pairing of its own to hold a cross-category pair to the stricter
+    dedup_cross_category_threshold the floor pass applies."""
     if not rejected:
         return {}
     primary_of = dict(rejected)
@@ -320,6 +344,49 @@ def _regroup_rejected(
     return out
 
 
+def _sent_matches(cur: list[tuple[int, np.ndarray]], sent_meta: dict, item_by_id: dict) -> list[tuple[int, int, float]]:
+    """(current id, sent id, cosine) for each current item's best match in the sent pool.
+
+    Each item is compared with the pool DIRECTLY, never through a chain of current items —
+    union-find once muted a "$81K Bitcoin" post at cosine 0.755 under a CLARITY Act one it
+    was only linked to via a third post. A post from the SAME source as the shown one is
+    that channel's next development of the story (a court ruling, a new death toll), so
+    only a near-identical repost of it counts: on 2026-09-18..10-07 such mutes were 42% of
+    all, and 26 of 30 checked by hand were new events or new facts. One matrix product,
+    since the pool spans every category (~1500 items against ~150)."""
+    if not cur or not sent_meta:
+        return []
+    # One length per model (from_blob already drops the others); the majority guards the
+    # product against a stray vector instead of trusting whichever item came first.
+    dim = Counter(v.shape for _, v in cur).most_common(1)[0][0]
+    sids = [sid for sid, (v, _c, _s) in sent_meta.items() if v.shape == dim]
+    rows = [(iid, v) for iid, v in cur if v.shape == dim]
+    if not sids or not rows:
+        return []
+
+    def _unit(m: np.ndarray) -> np.ndarray:
+        n = np.linalg.norm(m, axis=1, keepdims=True)
+        return m / np.where(n == 0, 1, n)
+
+    sims = _unit(np.stack([v for _, v in rows])) @ _unit(np.stack([sent_meta[s][0] for s in sids])).T
+    lowest = min(settings.dedup_log_floor, settings.dedup_cross_category_threshold)
+    out = []
+    for r, (iid, _v) in enumerate(rows):
+        item = item_by_id[iid]
+        cat, src = _field(item, "category", "other") or "other", _field(item, "source_id")
+        best: tuple[float, int] | None = None
+        for k in np.nonzero(sims[r] >= lowest)[0]:
+            sid, c = sids[k], float(sims[r, k])
+            _v, s_cat, s_src = sent_meta[sid]
+            if c < _union_floor(cat, s_cat) or (s_src == src and c < settings.merge_near_dup_threshold):
+                continue
+            if best is None or c > best[0]:
+                best = (c, sid)
+        if best is not None:
+            out.append((iid, best[1], best[0]))
+    return out
+
+
 async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, dict[int, list[tuple[str, str]]]]:
     items = list(items)
     if len(items) < 2 or len(vec) < 2:
@@ -331,7 +398,7 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
     # Comparison pool: items already embedded and SENT within the window, so a new item
     # can match one shown in a previous digest (not only this batch).
     window = await get_recent_embedded_items(settings.dedup_window_hours)
-    sent_pool: dict[str, list[tuple[int, np.ndarray, object, object]]] = defaultdict(list)
+    sent_meta: dict[int, tuple[np.ndarray, str, object]] = {}  # id -> (vector, category, source_id)
     sent_vec: dict[int, np.ndarray] = {}
     sent_summary: dict[int, str] = {}
     for row in window:
@@ -345,108 +412,98 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
             continue
         v = from_blob(row["embedding"])
         if v is not None:
-            sent_pool[row["category"] or "other"].append(
-                (row["id"], v, row["source_sort_order"], row["published_at"])
-            )
+            sent_meta[row["id"]] = (v, row["category"] or "other", row_get(row, "source_id"))
             sent_vec[row["id"]] = v
             sent_summary[row["id"]] = row_get(row, "summary", "") or ""
 
-    floor = settings.dedup_log_floor
     near_thr = settings.merge_near_dup_threshold
 
-    # Cluster per category (a cross-source duplicate is always same-category).
-    by_cat: dict[str, list] = defaultdict(list)
-    for item in items:
-        if _field(item, "id") in vec:
-            by_cat[_field(item, "category", "other") or "other"].append(item)
+    def _cat(item) -> str:
+        return _field(item, "category", "other") or "other"
+
+    def _src(item):
+        return _field(item, "source_id")
+
+    cur_all = [(_field(it, "id"), vec[_field(it, "id")]) for it in items if _field(it, "id") in vec]
 
     # Collapse cross-source near-identical current items without the LLM: such a pair can
-    # also union (at the lower floor) onto a weakly-related already-sent primary, and the
-    # confirm step only compares each member against THAT primary — missing the pair itself.
+    # also union onto a weakly-related already-sent primary, and the confirm step only
+    # compares each member against THAT primary — missing the pair itself.
     near_muted: dict[int, int] = {}
-    for cat, cat_items in by_cat.items():
-        cur = [(_field(it, "id"), vec[_field(it, "id")]) for it in cat_items]
-        uf = _UnionFind()
-        for a in range(len(cur)):
-            ida, va = cur[a]
-            uf.find(ida)
-            for b in range(a + 1, len(cur)):
-                idb, vb = cur[b]
-                if _field(item_by_id[ida], "source_id") != _field(item_by_id[idb], "source_id") \
-                        and cosine(va, vb) >= near_thr:
-                    uf.union(ida, idb)
-        comps: dict[int, list[int]] = defaultdict(list)
-        for ida, _ in cur:
-            comps[uf.find(ida)].append(ida)
-        for members in comps.values():
-            if len(members) < 2:
-                continue
-            primary = min(members, key=lambda i: _sort_key(item_by_id[i]))
-            psrc = _field(item_by_id[primary], "source_id")
-            for mid in members:
-                if mid != primary and _field(item_by_id[mid], "source_id") != psrc:
-                    near_muted[mid] = primary
+    uf = _UnionFind()
+    for a in range(len(cur_all)):
+        ida, va = cur_all[a]
+        uf.find(ida)
+        for b in range(a + 1, len(cur_all)):
+            idb, vb = cur_all[b]
+            if _src(item_by_id[ida]) != _src(item_by_id[idb]) and cosine(va, vb) >= near_thr:
+                uf.union(ida, idb)
+    comps: dict[int, list[int]] = defaultdict(list)
+    for ida, _ in cur_all:
+        comps[uf.find(ida)].append(ida)
+    for members in comps.values():
+        if len(members) < 2:
+            continue
+        primary = min(members, key=lambda i: _sort_key(item_by_id[i]))
+        psrc = _src(item_by_id[primary])
+        for mid in members:
+            if mid != primary and _src(item_by_id[mid]) != psrc:
+                near_muted[mid] = primary
 
+    # Keep the near-dups resolved above out of the floor pass, or they re-anchor onto a weak sent primary.
+    cur = [(iid, v) for iid, v in cur_all if iid not in near_muted]
     muted: dict[int, int] = {}  # duplicate id -> primary id (primary may be a sent-pool id)
-    for cat, cat_items in by_cat.items():
-        # Keep the near-dups resolved above out of the floor pass, or they re-anchor onto a weak sent primary.
-        cat_items = [it for it in cat_items if _field(it, "id") not in near_muted]
-        cur = [(_field(it, "id"), vec[_field(it, "id")]) for it in cat_items]
-        pool = sent_pool.get(cat, [])
-        uf = _UnionFind()
-        for a in range(len(cur)):
-            ida, va = cur[a]
-            uf.find(ida)
-            for b in range(a + 1, len(cur)):
-                idb, vb = cur[b]
-                c = cosine(va, vb)
-                ia, ib = item_by_id[ida], item_by_id[idb]
-                if c >= floor and _field(ia, "source_id") != _field(ib, "source_id"):
-                    # Per-pair tuning telemetry (O(pairs)) — DEBUG so it doesn't
-                    # flood INFO; the actual mute decisions are logged once below.
-                    log.debug("DEDUP-CANDIDATE cosine=%.3f tier=%s x-src same-digest [%s] | %s || %s",
-                              c, "strong" if c >= settings.dedup_threshold else "confirm",
-                              cat, (_field(ia, "summary", "") or "")[:60], (_field(ib, "summary", "") or "")[:60])
-                if c >= floor:
-                    uf.union(ida, idb)
-        sent_nodes: set[int] = set()
-        for ida, va in cur:
-            for sid, vs, _so, _pub in pool:
-                c = cosine(va, vs)
-                if c >= floor:
-                    log.debug("DEDUP-CANDIDATE cosine=%.3f tier=%s x-digest [%s] | %s || (sent) %s",
-                              c, "strong" if c >= settings.dedup_threshold else "confirm",
-                              cat, (_field(item_by_id[ida], "summary", "") or "")[:60], sent_summary.get(sid, "")[:60])
-                if c >= floor:
-                    uf.union(ida, sid)
-                    sent_nodes.add(sid)
 
-        comps: dict[int, list[int]] = defaultdict(list)
-        for ida, _ in cur:
-            comps[uf.find(ida)].append(ida)
-        comp_sent: dict[int, list[int]] = defaultdict(list)
-        for sid in sent_nodes:
-            comp_sent[uf.find(sid)].append(sid)
+    for ida, sid, c in _sent_matches(cur, sent_meta, item_by_id):
+        ia = item_by_id[ida]
+        log.debug("DEDUP-CANDIDATE cosine=%.3f x-digest [%s] | %s || (sent) %s", c, _cat(ia),
+                  (_field(ia, "summary", "") or "")[:60], sent_summary.get(sid, "")[:60])
+        # Story already delivered → mute, no link (the primary the user saw is not in this digest).
+        muted[ida] = sid
 
-        for root, members in comps.items():
-            already_sent = comp_sent.get(root, [])
-            if len(members) == 1 and not already_sent:
+    # Within this digest: only cross-source pairs union. Same-source ones are the
+    # within-source merge's job, and letting them union here chained a source's
+    # unrelated posts into one cluster. An item matched to the sent pool above stays in:
+    # if B1 rejects that match, it must still collapse with its partners in this digest.
+    uf = _UnionFind()
+    for a in range(len(cur)):
+        ida, va = cur[a]
+        uf.find(ida)
+        for b in range(a + 1, len(cur)):
+            idb, vb = cur[b]
+            ia, ib = item_by_id[ida], item_by_id[idb]
+            if _src(ia) == _src(ib):
                 continue
-            if already_sent:
-                # Story already delivered in a past digest → mute every current
-                # member, no link (the primary the user saw is not in this digest).
-                primary = already_sent[0]
-                for mid in members:
-                    muted[mid] = primary
+            c = cosine(va, vb)
+            if c >= _union_floor(_cat(ia), _cat(ib)):
+                # Per-pair tuning telemetry (O(pairs)) — DEBUG so it doesn't
+                # flood INFO; the actual mute decisions are logged once below.
+                log.debug("DEDUP-CANDIDATE cosine=%.3f tier=%s x-src same-digest [%s/%s] | %s || %s",
+                          c, "strong" if c >= settings.dedup_threshold else "confirm", _cat(ia), _cat(ib),
+                          (_field(ia, "summary", "") or "")[:60], (_field(ib, "summary", "") or "")[:60])
+                uf.union(ida, idb)
+    comps = defaultdict(list)
+    for ida, _ in cur:
+        comps[uf.find(ida)].append(ida)
+    # A sent-matched item's fallback primary in this digest, tried only if B1 rejects its
+    # sent match — so every mute is confirmed against the very item it hides under.
+    fallback: dict[int, int] = {}
+    for members in comps.values():
+        if len(members) < 2:
+            continue
+        unshown = [m for m in members if m not in muted] or members
+        primary = min(unshown, key=lambda i: _sort_key(item_by_id[i]))
+        primary_src = _src(item_by_id[primary])
+        for mid in members:
+            # Leave same-source duplicates to the within-source AI merge,
+            # which folds them into one richer summary; cross-source dedup
+            # only collapses the SAME story across DIFFERENT sources.
+            if mid == primary or _src(item_by_id[mid]) == primary_src:
+                continue
+            if mid in muted:
+                fallback[mid] = primary
             else:
-                primary = min(members, key=lambda i: _sort_key(item_by_id[i]))
-                primary_src = _field(item_by_id[primary], "source_id")
-                for mid in members:
-                    # Leave same-source duplicates to the within-source AI merge,
-                    # which folds them into one richer summary; cross-source dedup
-                    # only collapses the SAME story across DIFFERENT sources.
-                    if mid != primary and _field(item_by_id[mid], "source_id") != primary_src:
-                        muted[mid] = primary
+                muted[mid] = primary
 
     if not muted and not near_muted:
         log.info("Cross-source dedup: no duplicates among %d item(s)", len(items))
@@ -459,9 +516,10 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
             primary_vec = sent_vec.get(pid)
         score = f"{cosine(vec[mid], primary_vec):.3f}" if (mid in vec and primary_vec is not None) else "n/a"
         log.info(
-            "%s cross-source duplicate: item id=%d (%s) -> primary id=%d | cosine=%s | summary=%s",
+            "%s cross-source duplicate: item id=%d (%s/%s) -> primary id=%d | cosine=%s | summary=%s",
             "WOULD-MUTE" if settings.dedup_shadow else "Candidate",
-            mid, _field(it, "source_name", "?"), pid, score, (_field(it, "summary", "") or "")[:80],
+            mid, _field(it, "source_name", "?"), _field(it, "category", "?"), pid, score,
+            (_field(it, "summary", "") or "")[:80],
         )
     for mid, pid in near_muted.items():
         it = item_by_id.get(mid)
@@ -478,6 +536,12 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
 
     candidates = len(muted)
     confirmed = await _confirm_mutes(muted, item_by_id, sent_summary, vec, sent_vec) if muted else {}
+    # A fallback whose own primary is being hidden would re-point through it to a shown
+    # story the item was never compared with — skip those.
+    retry = {mid: pid for mid, pid in fallback.items() if mid not in confirmed and pid not in confirmed}
+    if retry:
+        candidates += len(retry)
+        confirmed.update(await _confirm_mutes(retry, item_by_id, sent_summary, vec, sent_vec))
     confirmed.update(near_muted)
     if not confirmed:
         log.info("Cross-source dedup: %d candidate(s) all rejected by LLM, nothing muted", candidates)

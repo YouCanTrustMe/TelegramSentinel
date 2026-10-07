@@ -3,6 +3,8 @@ and the B1 LLM-confirmation gate that keeps a bare cosine threshold from hiding
 distinct cross-source stories that merely share vocabulary."""
 import math
 
+import pytest
+
 import numpy as np
 
 import src.processor.dedup.cross_dedup as cd
@@ -396,6 +398,8 @@ async def test_sent_pool_ignores_placeholder_vectors(monkeypatch):
     monkeypatch.setattr(cd, "mark_duplicate", fake_mark)
     monkeypatch.setattr(cd, "get_duplicate_links", fake_links)
     monkeypatch.setattr(cd.settings, "dedup_shadow", False)
+    # Without this the 2-d pool vector is rejected for its length and the test proves nothing.
+    monkeypatch.setattr(cd, "from_blob", lambda b: np.frombuffer(b, dtype=np.float32) if b else None)
 
     items = [
         {"id": 1, "category": "feed", "source_id": 1, "source_sort_order": 0,
@@ -409,3 +413,195 @@ async def test_sent_pool_ignores_placeholder_vectors(monkeypatch):
 
     assert [it["id"] for it in survivors] == [1, 2]
     assert marked == []
+
+
+def _at(cos: float) -> np.ndarray:
+    """A unit vector whose cosine with (1, 0) is exactly `cos`."""
+    return _vec(cos, math.sqrt(1 - cos * cos))
+
+
+def _row(i, src, cat="feed", **kw):
+    return {"id": i, "category": cat, "source_id": src, "source_name": f"S{src}", "source_sort_order": src,
+            "published_at": f"2026-10-0{i % 9 + 1}", "summary": f"story {i}", "raw_text": f"story {i}",
+            "source_type": "telegram", **kw}
+
+
+def _sent(i, src, vec, cat="feed"):
+    return {"id": i, "category": cat, "source_id": src, "published_at": "2026-10-01", "sent": 1,
+            "embedding": to_blob(vec), "summary": f"shown {i}", "source_sort_order": src}
+
+
+def _wire(monkeypatch, sent=(), same_event=True):
+    """Stub the DB and the LLM; returns the list of (muted, primary) marks."""
+    marked: list[tuple[int, int]] = []
+
+    async def fake_recent(_hours):
+        return list(sent)
+
+    async def fake_mark(mid, pid):
+        marked.append((mid, pid))
+
+    async def fake_links(_ids):
+        return {}
+
+    async def fake_group_by_topic(inputs, prompt_extra=None):
+        if same_event:
+            return [{"ids": [i["id"] for i in inputs], "summary": "x", "key_phrase": ""}]
+        return [{"ids": [i["id"]], "summary": "x", "key_phrase": ""} for i in inputs]
+
+    monkeypatch.setattr(cd, "get_recent_embedded_items", fake_recent)
+    monkeypatch.setattr(cd, "mark_duplicate", fake_mark)
+    monkeypatch.setattr(cd, "get_duplicate_links", fake_links)
+    monkeypatch.setattr(cd, "group_by_topic", fake_group_by_topic)
+    # The real from_blob rejects any length but the live model's; these vectors are 2-d.
+    monkeypatch.setattr(cd, "from_blob", lambda b: np.frombuffer(b, dtype=np.float32) if b else None)
+    monkeypatch.setattr(cd.settings, "dedup_shadow", False)
+    monkeypatch.setattr(cd.settings, "dedup_log_floor", 0.86)
+    monkeypatch.setattr(cd.settings, "dedup_cross_category_threshold", 0.90)
+    monkeypatch.setattr(cd.settings, "merge_near_dup_threshold", 0.975)
+    return marked
+
+
+async def test_a_sources_next_post_on_a_shown_story_is_not_hidden(monkeypatch):
+    """Index.hr's "court bans the strike" must not vanish under its own "strike day 3"
+    from the previous digest: the same channel moving a story on is news."""
+    marked = _wire(monkeypatch, sent=[_sent(99, 1, _vec(1, 0))])
+    items = [_row(1, 1), _row(2, 2)]
+    vec = {1: _at(0.90), 2: _vec(0, 1)}
+
+    survivors, _ = await cd.deduplicate(items, vec)
+
+    assert [it["id"] for it in survivors] == [1, 2]
+    assert marked == []
+
+
+async def test_a_sources_verbatim_repost_of_a_shown_post_is_hidden(monkeypatch):
+    marked = _wire(monkeypatch, sent=[_sent(99, 1, _vec(1, 0))])
+    items = [_row(1, 1), _row(2, 2)]
+    vec = {1: _at(0.99), 2: _vec(0, 1)}
+
+    survivors, _ = await cd.deduplicate(items, vec)
+
+    assert [it["id"] for it in survivors] == [2]
+    assert marked == [(1, 99)]
+
+
+async def test_a_shown_story_mutes_only_what_matches_it_directly(monkeypatch):
+    """Item 1 repeats a shown story; item 2 only resembles item 1. The old union-find
+    chained item 2 onto the shown story too and hid it with no link."""
+    marked = _wire(monkeypatch, sent=[_sent(99, 3, _vec(1, 0))])
+    ang = math.acos(0.90)
+    items = [_row(1, 1), _row(2, 2)]
+    # 1~sent 0.90; 1~2 0.90; 2~sent = cos(2*ang) ~ 0.62
+    vec = {1: _vec(math.cos(ang), math.sin(ang)), 2: _vec(math.cos(2 * ang), math.sin(2 * ang))}
+
+    survivors, _ = await cd.deduplicate(items, vec)
+
+    assert [it["id"] for it in survivors] == [2]
+    assert marked == [(1, 99)]
+
+
+async def test_a_cross_category_pair_needs_the_stricter_threshold(monkeypatch):
+    marked = _wire(monkeypatch)
+    items = [_row(1, 1, "feed"), _row(2, 2, "finance")]
+
+    survivors, _ = await cd.deduplicate(items, {1: _vec(1, 0), 2: _at(0.88)})
+    assert [it["id"] for it in survivors] == [1, 2]
+
+    survivors, _ = await cd.deduplicate(items, {1: _vec(1, 0), 2: _at(0.93)})
+    assert [it["id"] for it in survivors] == [1]
+    assert marked == [(2, 1)]
+
+
+async def test_a_shown_story_from_another_category_mutes_its_repeat(monkeypatch):
+    """Бабель (feed) carried it in the morning; ПроБізнес (finance) repeats it at noon."""
+    marked = _wire(monkeypatch, sent=[_sent(99, 3, _vec(1, 0), cat="feed")])
+    items = [_row(1, 1, "finance"), _row(2, 2, "finance")]
+
+    survivors, _ = await cd.deduplicate(items, {1: _at(0.93), 2: _vec(0, 1)})
+
+    assert [it["id"] for it in survivors] == [2]
+    assert marked == [(1, 99)]
+
+
+def test_sort_key_prefers_the_post_that_says_more():
+    """ПроБізнес's one-line «Польща та Румунія відмовили» vs Бабель's report with the
+    reasons: the reasons win even from a source ranked lower."""
+    short = {"id": 1, "source_type": "telegram", "source_sort_order": 0, "published_at": "2026-10-04T11:13",
+             "raw_text": "Польща та Румунія відмовили Україні у збільшенні транзиту зерна, — Politico. → Про Бізнес"}
+    long = {"id": 2, "source_type": "telegram", "source_sort_order": 5, "published_at": "2026-10-04T10:27",
+            "raw_text": "Румунія та Польща заявили, що не готові розширювати транзит. " * 6}
+
+    assert min([short, long], key=cd._sort_key) is long
+
+
+def test_richness_ignores_links_and_context_prefixes():
+    padded = {"raw_text": "[Context: " + "x" * 280 + "] short post https://example.com/" + "y" * 300}
+    assert cd._richness(padded) == 0
+
+
+async def test_an_item_rejected_against_the_sent_pool_still_collapses_with_its_partner(monkeypatch):
+    """Item 1 scores 0.87 against an unrelated shown story, item 2 is the same story as
+    item 1 from another source. B1 rejects 1→shown, and the pair must still collapse
+    instead of shipping twice."""
+    marked = _wire(monkeypatch, sent=[_sent(99, 3, _vec(1, 0))])
+
+    async def judge(inputs, prompt_extra=None):
+        ids = {i["id"] for i in inputs}
+        if 99 in ids:  # the shown story is a different event
+            return [{"ids": [i], "summary": "", "key_phrase": ""} for i in ids]
+        return [{"ids": sorted(ids), "summary": "", "key_phrase": ""}]
+
+    monkeypatch.setattr(cd, "group_by_topic", judge)
+    a = math.acos(0.87)
+    items = [_row(1, 1, raw_text="x" * 400), _row(2, 2)]
+    # 1~2 at cos(0.35) ~ 0.94: below the near-identical pass, so only the B1 fallback can pair them.
+    vec = {1: _vec(math.cos(a), math.sin(a)), 2: _vec(math.cos(a + 0.35), math.sin(a + 0.35))}
+
+    survivors, _ = await cd.deduplicate(items, vec)
+
+    assert [it["id"] for it in survivors] == [2]
+    assert marked == [(1, 2)]
+
+
+def test_sent_matches_skips_vectors_of_another_model():
+    """A pool row embedded by a previous model has another length; it must be ignored,
+    not crash the matrix product and with it the whole dedup pass."""
+    item_by_id = {1: {"id": 1, "category": "feed", "source_id": 1}}
+    meta = {9: (np.ones(3, dtype=np.float32), "feed", 2), 10: (_vec(1, 0), "feed", 2)}
+
+    assert cd._sent_matches([(1, _vec(1, 0))], meta, item_by_id) == [(1, 10, pytest.approx(1.0))]
+
+
+async def test_no_fallback_through_a_primary_that_is_itself_hidden(monkeypatch):
+    """Both items match shown stories; B1 confirms 1→99 and rejects 2→98. Item 2 must
+    not then hide under item 1, which would land it under 99 — a story it was never
+    compared with."""
+    marked = _wire(monkeypatch, sent=[_sent(99, 3, _vec(1, 0)), _sent(98, 4, _vec(0, 1))])
+
+    async def judge(inputs, prompt_extra=None):
+        ids = {i["id"] for i in inputs}
+        # 1 is the shown story 99; 1 and 2 would also read as one story if ever asked.
+        pair = {1, 99} & ids if 99 in ids else {1, 2} & ids
+        rest = [{"ids": [i], "summary": "", "key_phrase": ""} for i in ids - pair]
+        return ([{"ids": sorted(pair), "summary": "", "key_phrase": ""}] if pair else []) + rest
+
+    monkeypatch.setattr(cd, "group_by_topic", judge)
+    # 1 is 0.92 to 99 and 2 is 0.92 to 98 on their own axes; 1~2 share only the third axis
+    # (0.15), which the lowered floor lets union in this digest.
+    items = [_row(1, 1), _row(2, 2)]
+    v1 = np.array([0.92, 0.0, math.sqrt(1 - 0.92 ** 2)], dtype=np.float32)
+    v2 = np.array([0.0, 0.92, math.sqrt(1 - 0.92 ** 2)], dtype=np.float32)
+    monkeypatch.setattr(cd.settings, "dedup_log_floor", 0.15)
+    monkeypatch.setattr(cd.settings, "dedup_cross_category_threshold", 0.90)
+    sent = [_sent(99, 3, np.array([1, 0, 0], dtype=np.float32)), _sent(98, 4, np.array([0, 1, 0], dtype=np.float32))]
+
+    async def fake_recent(_hours):
+        return sent
+
+    monkeypatch.setattr(cd, "get_recent_embedded_items", fake_recent)
+
+    survivors, _ = await cd.deduplicate(items, {1: v1, 2: v2})
+
+    assert [it["id"] for it in survivors] == [2]
+    assert marked == [(1, 99)]

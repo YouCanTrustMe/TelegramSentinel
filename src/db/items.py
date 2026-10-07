@@ -96,7 +96,11 @@ async def mark_duplicate(item_id: int, primary_id: int) -> None:
 async def get_recent_embedded_items(window_hours: int) -> list[aiosqlite.Row]:
     """Items with a stored embedding within the window (sent and unsent), used as
     the comparison pool for cross-source dedup — lets a new item match one already
-    sent in a previous digest, not only items in the current batch."""
+    sent in a previous digest, not only items in the current batch.
+
+    Content-filtered items are excluded: mark_blocked sets sent=1, but nobody saw
+    them, so a real report matching a blocked air-raid alert was muted as a repeat
+    of a post that never reached the digest."""
     async with get_db() as db:
         async with db.execute(
             """SELECT items.id, items.category, items.source_id, items.published_at,
@@ -105,6 +109,7 @@ async def get_recent_embedded_items(window_hours: int) -> list[aiosqlite.Row]:
                FROM items
                LEFT JOIN sources ON items.source_id = sources.id
                WHERE items.embedding IS NOT NULL
+                 AND items.blocked_reason IS NULL
                  AND julianday(items.processed_at) >= julianday('now', ?)""",
             (f"-{window_hours} hours",),
         ) as cur:

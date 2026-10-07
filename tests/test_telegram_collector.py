@@ -246,3 +246,41 @@ async def test_an_old_streak_does_not_carry_into_a_later_failure(monkeypatch):
                         {77: (tc._SERVER_ERROR_WARN_STREAK - 1, tc.time.monotonic() - 7 * 86400)})
     await _poll(monkeypatch, fail=True)
     assert tc._server_error_streak[77][0] == 1
+
+
+class _History:
+    def __init__(self, messages):
+        self.messages = messages
+
+    def get_chat_history(self, _chat_id, limit):
+        async def gen():
+            for message in self.messages:
+                yield message
+        return gen()
+
+
+async def test_a_new_channel_skips_its_old_posts_but_moves_past_them(monkeypatch):
+    """2026-10-07: the central bank channel's first poll took 20 posts, 19 of them older than two days."""
+    from datetime import timedelta
+
+    now = datetime.now()
+    messages = [_msg(id=30, date=now - timedelta(hours=1), text="fresh", chat=None),
+                _msg(id=20, date=now - timedelta(days=3), text="old", chat=None),
+                _msg(id=10, date=now - timedelta(days=20), text="older", chat=None)]
+    processed, bookmark = [], {}
+
+    async def fake_process(chat_ref, source, message, parent_msg=None):
+        processed.append(message.id)
+        return True
+
+    async def fake_bookmark(source_id, msg_id):
+        bookmark[source_id] = msg_id
+
+    monkeypatch.setattr(tc, "userbot", _History(messages))
+    monkeypatch.setattr(tc, "_process_message", fake_process)
+    monkeypatch.setattr(tc, "set_source_last_message_id", fake_bookmark)
+    monkeypatch.setattr(tc, "_server_error_streak", {})
+
+    saved = await tc._poll_channel(CHAT, {"id": 91, "name": "NBU", "last_message_id": None, "chat_id": 1})
+    assert saved == 1 and processed == [30]
+    assert bookmark == {91: 30}

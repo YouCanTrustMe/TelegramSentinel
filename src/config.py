@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     # digest is still caught. 48h (was 24h) covers a story that resurfaces a day
     # or two later, which a 24h window missed.
     dedup_window_hours: int = 48
+    # Older posts are never shown: a new source's history (01portal: 82 of 100 entries
+    # older than two days, WSJ back a month) or a catch-up after downtime.
+    max_item_age_hours: int = 48
     # Union floor: any cross-source pair at/above this cosine becomes an LLM-confirmed
     # candidate. Below it pairs are never even considered. On mistral-embed 0.86 catches
     # 88% of true duplicates at ~41 candidate pairs per digest — the same candidate

@@ -131,10 +131,15 @@ async def _silent_sources_job() -> None:
         await set_app_setting("silent_sources_alerted", ",".join(str(i) for i in sorted(current)))
 
 
-async def _revive_rss_job() -> None:
+# Re-probe a failed feed every 30 min while it is fresh (fewer than this many failures,
+# ~5h), then only daily — a long-dead feed costs one request a day and alerts no more.
+_RSS_FAST_REVIVE_MAX_FAILS = 12
+
+
+async def _revive_rss_job(max_fail_count: int | None = None) -> None:
     from src.db.models import revive_error_rss_sources
 
-    revived = await revive_error_rss_sources()
+    revived = await revive_error_rss_sources(max_fail_count)
     if revived:
         log.info("RSS revive: re-activated %d error source(s) for re-probe: %s", len(revived), ", ".join(revived))
 
@@ -274,6 +279,15 @@ async def _add_maintenance_jobs() -> None:
         _revive_rss_job,
         CronTrigger(hour=4, minute=15, timezone=settings.digest_timezone),
         id="revive_rss",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    _scheduler.add_job(
+        _revive_rss_job,
+        CronTrigger(minute="10,40", timezone=settings.digest_timezone),
+        kwargs={"max_fail_count": _RSS_FAST_REVIVE_MAX_FAILS},
+        id="revive_rss_fast",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

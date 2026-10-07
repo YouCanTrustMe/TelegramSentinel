@@ -78,36 +78,51 @@ async def _parse_with_ua_fallback(url: str, name: str):
 
 # A single bad response is usually transient; only disable a feed after this many consecutive failures.
 _FAIL_THRESHOLD = 3
+# A disabled feed is re-probed every 30 minutes (scheduler `revive_rss_fast`), one more
+# failure each, so 8 in a row is a feed that has been down for about three hours. Its own
+# outages are shorter: hnrss.org's 502 on 2026-10-06 cleared within the hour, and still
+# sent the admin two messages at 03:15.
+_REMOTE_ALERT_FAILS = 8
+# A 4xx is OUR problem — a moved, renamed or newly gated feed — and will not heal.
+_CLIENT_ALERT_FAILS = 2
+
+
+def _is_client_error(status: int) -> bool:
+    """A 4xx that a human must fix (moved, renamed, gated feed). 408 and 429 are the
+    server asking us to wait — they heal by themselves like a 5xx."""
+    return 400 <= status < 500 and status not in (408, 429)
+
+
+def _down_alert(name: str, url: str, reason: str, fails: int, remote_fault: bool) -> str:
+    # The reason can be an exception text such as "<urlopen error ...>": unescaped, it
+    # makes the HTML message unparseable and the only alert for the outage is lost.
+    name, url, reason = html.escape(name), html.escape(url), html.escape(reason)
+    if remote_fault:
+        return (f"⚠️ <b>Source down</b>\n<b>{name}</b> has failed {fails} polls in a row (~3h, {reason}).\n"
+                f"It is re-probed every 30 min and will resume by itself.\n<i>{url}</i>")
+    return (f"⚠️ <b>Source broken</b>\n<b>{name}</b> answered {reason} — the feed moved or is "
+            f"gated, check the URL.\n<i>{url}</i>")
 
 
 async def _mark_failure(source_id: int, name: str, url: str, reason: str,
                         remote_fault: bool = True) -> None:
     """Count a consecutive failure; disable the source once it crosses the threshold.
 
-    fail_count is NOT reset here: it keeps climbing so the daily revive job can tell
-    a transient hiccup (recovers on revive, reset to 0 by a successful poll) from a
-    genuinely dead feed (keeps re-failing) and eventually stop reviving it. The admin
-    alert fires only on the first crossing so a dead feed does not spam daily."""
+    fail_count is NOT reset here: it keeps climbing through the re-probes, so it doubles
+    as "how long has this been down". A successful poll resets it to 0. The admin hears
+    about it through one channel (this message — the log line stays INFO, or the WARNING
+    forwarder would send it twice) and only when waiting has stopped helping: once for an
+    outage, and for a 4xx early plus once more if it is still broken ~3h later."""
     fails = await increment_source_fail_count(source_id)
-    # Who has to act decides when to escalate. A 4xx is OUR problem — a moved,
-    # renamed or newly gated feed that will not heal, so it warns as soon as it
-    # repeats. A 5xx or an unreachable host is the feed's own outage, and there is
-    # nothing to do but wait: hnrss.org served three of those in eight days, each
-    # one clearing itself, each one waking the admin at 2/3. Those stay quiet until
-    # the threshold, where the source is disabled and gets its own alert anyway.
-    level = logging.WARNING if (fails >= _FAIL_THRESHOLD or (fails >= 2 and not remote_fault)) \
-        else logging.DEBUG
-    log.log(level, "RSS source '%s' failed (%d/%d): %s", name, fails, _FAIL_THRESHOLD, reason)
+    log.log(logging.INFO if fails >= _FAIL_THRESHOLD else logging.DEBUG,
+            "RSS source '%s' failed (%d in a row): %s", name, fails, reason)
     if fails >= _FAIL_THRESHOLD:
         await update_source_status(source_id, "error")
-        if fails == _FAIL_THRESHOLD:
-            await send_to(
-                settings.telegram_admin_id,
-                f"⚠️ <b>Source error</b>\n"
-                f"<b>{name}</b> failed {fails} times ({reason}).\n"
-                f"Status set to <b>error</b>.\n"
-                f"<i>{url}</i>",
-            )
+    # A 4xx alerts early; ANY failure at the long mark alerts, so a feed whose errors
+    # switch between 5xx and 4xx cannot step past both thresholds and never be reported.
+    if fails == _REMOTE_ALERT_FAILS or (not remote_fault and fails == _CLIENT_ALERT_FAILS):
+        log.info("RSS source '%s' still failing after %d polls, alerting the admin", name, fails)
+        await send_to(settings.telegram_admin_id, _down_alert(name, url, reason, fails, remote_fault))
 
 
 async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_extra: str | None = None) -> int:
@@ -126,8 +141,8 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
     unreachable = not feed.entries and getattr(feed, "bozo", False) and http_status != 200
     if http_failed or unreachable:
         reason = f"HTTP {http_status}" if http_failed else "unreachable / no parseable entries"
-        client_error = http_failed and 400 <= http_status < 500
-        await _mark_failure(source_id, name, url, reason, remote_fault=not client_error)
+        await _mark_failure(source_id, name, url, reason,
+                            remote_fault=not (http_failed and _is_client_error(http_status)))
         return 0
 
     await reset_source_fail_count(source_id)

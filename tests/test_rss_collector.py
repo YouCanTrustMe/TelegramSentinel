@@ -110,24 +110,32 @@ async def test_ua_fallback_does_not_retry_a_real_outage(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fails,remote,expected", [
-    (1, True, logging.DEBUG),      # first miss of anything: quiet
-    (2, True, logging.DEBUG),      # hnrss 502 twice: the feed's outage, nothing to do
-    (3, True, logging.WARNING),    # threshold: the source is disabled, so speak up
-    (1, False, logging.DEBUG),
-    (2, False, logging.WARNING),   # a repeated 4xx will not heal — a human must act
+@pytest.mark.parametrize("fails,remote,alerted,disabled", [
+    (1, True, False, False),   # first miss of anything: quiet
+    (2, True, False, False),   # hnrss 502 twice: the feed's outage, nothing to do
+    (3, True, False, True),    # disabled and re-probed every 30 min — still nothing to do
+    (7, True, False, True),
+    (8, True, True, True),     # ~3h down: now the admin hears, once
+    (9, True, False, True),    # ...and not again on every re-probe
+    (1, False, False, False),
+    (2, False, True, False),   # a repeated 4xx will not heal — a human must act
+    (3, False, False, True),
+    (8, False, True, True),    # fails 1-2 were 5xx, then the feed moved: still reported once
 ])
-async def test_failure_log_level_depends_on_whose_fault_it_is(monkeypatch, caplog, fails, remote, expected):
-    """hnrss.org served three 5xx/unreachable spells in 8 days, each clearing itself,
-    and each woke the admin at 2/3. Only a client error escalates before the threshold."""
+async def test_a_failing_feed_alerts_once_and_only_when_waiting_stopped_helping(
+        monkeypatch, caplog, fails, remote, alerted, disabled):
+    """2026-10-06: hnrss.org 502'd for under an hour and the admin still got two
+    messages (a forwarded WARNING plus the Source error one) for an outage that healed."""
+    sent, statuses = [], []
+
     async def fake_increment(source_id):
         return fails
 
-    async def fake_status(*a, **kw):
-        return None
+    async def fake_status(source_id, status):
+        statuses.append(status)
 
-    async def fake_send(*a, **kw):
-        return None
+    async def fake_send(chat_id, text):
+        sent.append(text)
 
     monkeypatch.setattr(rss_collector, "increment_source_fail_count", fake_increment)
     monkeypatch.setattr(rss_collector, "update_source_status", fake_status)
@@ -136,5 +144,20 @@ async def test_failure_log_level_depends_on_whose_fault_it_is(monkeypatch, caplo
     caplog.set_level(logging.DEBUG, logger=rss_collector.log.name)
     await rss_collector._mark_failure(1, "Hacker News", "u", "HTTP 502", remote_fault=remote)
 
-    levels = [r.levelno for r in caplog.records if "failed" in r.message]
-    assert levels == [expected]
+    assert len(sent) == (1 if alerted else 0)
+    assert statuses == (["error"] if disabled else [])
+    # One channel: the message. A WARNING would be forwarded as a second copy.
+    assert all(r.levelno < logging.WARNING for r in caplog.records)
+
+
+def test_down_alert_escapes_what_the_feed_or_the_exception_said():
+    text = rss_collector._down_alert("A&B <news>", "https://x/?a=1&b=2",
+                                     "parse error: <urlopen error [Errno -2]>", 8, True)
+    assert "<urlopen" not in text and "&lt;urlopen error" in text
+    assert "A&amp;B &lt;news&gt;" in text and "a=1&amp;b=2" in text
+
+
+@pytest.mark.parametrize("status,ours", [(404, True), (403, True), (410, True), (429, False), (408, False),
+                                         (502, False), (503, False)])
+def test_only_a_4xx_that_will_not_heal_counts_as_our_fault(status, ours):
+    assert rss_collector._is_client_error(status) is ours

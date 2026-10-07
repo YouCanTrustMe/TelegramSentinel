@@ -161,3 +161,98 @@ def test_down_alert_escapes_what_the_feed_or_the_exception_said():
                                          (502, False), (503, False)])
 def test_only_a_4xx_that_will_not_heal_counts_as_our_fault(status, ours):
     assert rss_collector._is_client_error(status) is ours
+
+
+def _entry(n, age_hours=None):
+    from datetime import datetime, timedelta, timezone
+
+    from feedparser.util import FeedParserDict
+
+    entry = FeedParserDict(link=f"https://x.hr/{n}", title=f"Story number {n}", summary="A body long enough")
+    if age_hours is not None:
+        entry["published_parsed"] = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).timetuple()
+    return entry
+
+
+async def _poll(monkeypatch, sid, entries):
+    async def _parse(url, name):
+        return _Resp(200, entries)
+
+    monkeypatch.setattr(rss_collector, "_parse_with_ua_fallback", _parse)
+    return await rss_collector.fetch_feed(sid, "01portal", "https://x.hr/feed", "hrvatska")
+
+
+@pytest.mark.asyncio
+async def test_a_new_feed_does_not_dump_its_history_on_the_second_poll(tmp_path, monkeypatch):
+    """2026-10-07: 01portal's first poll took 10 entries, the second took all 100 of
+    them — 82 older than two days — and the next two digests carried 50+ stale lines."""
+    from src.config import settings
+    from src.db.base import init_db
+    from src.db.models import add_source, get_unsent_items
+
+    monkeypatch.setattr(settings, "database_path", str(tmp_path / "t.db"))
+    await init_db()
+    sid = await add_source("rss", "01portal", "https://x.hr/feed", "hrvatska")
+    feed = [_entry(n, age_hours=1) for n in range(30)]
+
+    assert await _poll(monkeypatch, sid, feed) == 10
+    assert await _poll(monkeypatch, sid, [_entry("fresh", age_hours=0)] + feed) == 1
+    unsent = await get_unsent_items()
+    assert len(unsent) == 11
+    assert all(row["summary"] == "" for row in unsent)
+
+
+@pytest.mark.asyncio
+async def test_an_entry_older_than_two_days_is_recorded_but_never_shown(tmp_path, monkeypatch):
+    from src.config import settings
+    from src.db.base import init_db
+    from src.db.models import add_source, get_sent_empty_items, get_unsent_items, save_item
+
+    monkeypatch.setattr(settings, "database_path", str(tmp_path / "t.db"))
+    await init_db()
+    sid = await add_source("rss", "WSJ", "https://x.hr/feed", "finance")
+    await save_item(source_id=sid, message_id="seed", raw_text="seed", original_url=None,
+                    published_at=None, summary="seed", category="finance", processed_at="2026-10-01", sent=True)
+
+    feed = [_entry("new", age_hours=3), _entry("undated"), _entry("stale", age_hours=24 * 30)]
+    assert await _poll(monkeypatch, sid, feed) == 2
+    assert {row["original_url"] for row in await get_unsent_items()} == {"https://x.hr/new", "https://x.hr/undated"}
+    # Retired with a summary, so the classifier's backfill leaves it alone, and stored,
+    # so the next poll sees it as known instead of judging it again.
+    assert await get_sent_empty_items(10) == []
+    assert await _poll(monkeypatch, sid, feed) == 0
+
+
+@pytest.mark.asyncio
+async def test_an_atom_entry_with_only_updated_is_aged_too(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from feedparser.util import FeedParserDict
+
+    from src.config import settings
+    from src.db.base import init_db
+    from src.db.models import add_source, get_unsent_items, save_item
+
+    monkeypatch.setattr(settings, "database_path", str(tmp_path / "t.db"))
+    await init_db()
+    sid = await add_source("rss", "Releases", "https://x.hr/feed", "dev")
+    await save_item(source_id=sid, message_id="seed", raw_text="seed", original_url=None, published_at=None,
+                    summary="seed", category="dev", processed_at="2026-10-01", sent=True)
+    old = FeedParserDict(link="https://x.hr/old", title="Old release notes", summary="body",
+                         updated_parsed=(datetime.now(timezone.utc) - timedelta(days=20)).timetuple())
+    assert await _poll(monkeypatch, sid, [old]) == 0
+    assert await get_unsent_items() == []
+
+
+@pytest.mark.asyncio
+async def test_a_new_feed_listing_oldest_first_still_shows_its_fresh_entries(tmp_path, monkeypatch):
+    from src.config import settings
+    from src.db.base import init_db
+    from src.db.models import add_source, get_unsent_items
+
+    monkeypatch.setattr(settings, "database_path", str(tmp_path / "t.db"))
+    await init_db()
+    sid = await add_source("rss", "Oldest first", "https://x.hr/feed", "dev")
+    feed = [_entry(n, age_hours=24 * 30) for n in range(12)] + [_entry(f"new{n}", age_hours=1) for n in range(3)]
+    assert await _poll(monkeypatch, sid, feed) == 3
+    assert len(await get_unsent_items()) == 3

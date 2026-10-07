@@ -262,6 +262,14 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
     return True
 
 
+def _too_old(message: Message) -> bool:
+    """A new channel's first poll fetches its last 20 posts, which can be weeks old
+    (the central bank channel: 19 of 20 older than two days). Pyrogram's naive local `date` round-trips
+    through timestamp(), so no timezone is assumed here."""
+    date = getattr(message, "date", None)
+    return date is not None and time.time() - date.timestamp() > settings.max_item_age_hours * 3600
+
+
 async def _poll_channel(chat_ref: str, source: dict) -> int:
     if chat_ref.lstrip("-").isdigit():
         chat_id: int | str = int(chat_ref)
@@ -295,6 +303,7 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
                 await _warn_if_duplicate_chat(source["id"], source["name"], resolved_chat_id)
 
         max_seen_id = 0
+        stale = 0
         seen_group_ids: set = set()
         messages_by_id = {m.id: m for m in messages}
         for message in messages:
@@ -307,9 +316,15 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
                 seen_group_ids.add(group_id)
                 group_msgs = [m for m in messages if m.media_group_id == group_id]
                 message = next((m for m in group_msgs if (m.text or m.caption)), group_msgs[0])
+            # The bookmark still moves past it, so it is never fetched again.
+            if _too_old(message):
+                stale += 1
+                continue
             parent_msg = messages_by_id.get(message.reply_to_message_id) if message.reply_to_message_id else None
             if await _process_message(chat_ref, source, message, parent_msg=parent_msg):
                 saved += 1
+        if stale:
+            log.info("Source '%s': skipped %d post(s) older than %dh", source["name"], stale, settings.max_item_age_hours)
 
         if max_seen_id:
             await set_source_last_message_id(source["id"], max_seen_id)

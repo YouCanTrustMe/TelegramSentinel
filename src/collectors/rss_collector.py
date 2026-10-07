@@ -2,7 +2,7 @@ import asyncio
 import html
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import feedparser
 
@@ -152,8 +152,11 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
             row = await cur.fetchone()
             is_new = row[0] == 0
 
-    entries = feed.entries[:_BOOTSTRAP_LIMIT] if is_new else feed.entries
+    entries = feed.entries
     log.info("RSS '%s': %d feed entries (bootstrap=%s)", name, len(entries), is_new)
+    now = datetime.now(timezone.utc)
+    max_age = timedelta(hours=settings.max_item_age_hours)
+    overflow = old = fresh = 0
 
     for entry in entries:
         entry_url = entry.get("link", "")
@@ -167,9 +170,22 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
         if not raw_text:
             continue
 
-        published_at = None
-        if hasattr(entry, "published_parsed") and entry.published_parsed:
-            published_at = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc).isoformat()
+        published = _entry_time(entry)
+        published_at = published.isoformat() if published else None
+
+        # Stored and retired, not skipped: the stored message_id is the feed's only
+        # memory, so a merely skipped entry would come back on the next poll. Age goes
+        # first, so a feed listing oldest first still shows its fresh entries on day one.
+        # Older entries are recorded as seen and never shown; a feed can also re-surface old ones.
+        if published and now - published > max_age:
+            old += 1
+            await _save_retired(source_id, message_id, raw_text, entry_url, published_at, category)
+            continue
+        if is_new and fresh >= _BOOTSTRAP_LIMIT:
+            overflow += 1
+            await _save_retired(source_id, message_id, raw_text, entry_url, published_at, category)
+            continue
+        fresh += 1
 
         if len(raw_text.strip()) < 15:
             summary = raw_text.strip()
@@ -192,8 +208,38 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
         log.info("Saved item from '%s' | category=%s | %s", name, category, (entry_url or message_id)[:80])
         saved += 1
 
-    log.info("RSS '%s': %d new items", name, saved)
+    if overflow or old:
+        log.info("RSS '%s': %d new items, retired unshown: %d past the first %d of a new source, %d older than %dh",
+                 name, saved, overflow, _BOOTSTRAP_LIMIT, old, settings.max_item_age_hours)
+    else:
+        log.info("RSS '%s': %d new items", name, saved)
     return saved
+
+
+def _entry_time(entry) -> datetime | None:
+    # An Atom entry may carry only <updated>, which feedparser does not copy into published.
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    return datetime(*parsed[:6], tzinfo=timezone.utc) if parsed else None
+
+
+async def _save_retired(source_id: int, message_id: str, raw_text: str, entry_url: str,
+                        published_at: str | None, category: str) -> None:
+    # A non-empty summary, or the classifier's backfill would pick the row up, embed it and
+    # put an item nobody saw into the dedup comparison pool (see discard_unsent_items).
+    # processed_at stays "now", not the entry's date: retention prunes by it, and a month-old
+    # entry pruned at night would be stored again by the next poll, every day.
+    await save_item(
+        source_id=source_id,
+        message_id=message_id,
+        raw_text=raw_text,
+        original_url=entry_url or None,
+        published_at=published_at,
+        summary=raw_text[:200],
+        category=category,
+        processed_at=datetime.now(timezone.utc).isoformat(),
+        key_phrase="",
+        sent=True,
+    )
 
 
 async def skip_feed_to_head(source_id: int, name: str, url: str, category: str) -> int | None:
@@ -219,20 +265,9 @@ async def skip_feed_to_head(source_id: int, name: str, url: str, category: str) 
         raw_text = _compose_raw_text(_strip_html(entry.get("title", "")), _strip_html(entry.get("summary", "")))
         if not raw_text:
             continue
-        await save_item(
-            source_id=source_id,
-            message_id=message_id,
-            raw_text=raw_text,
-            original_url=entry_url or None,
-            published_at=None,
-            # Not empty: an empty summary on a sent row is what the classifier's backfill
-            # hunts for, and re-summarising an entry we deliberately never showed would
-            # put it back into the dedup comparison pool.
-            summary=raw_text[:200],
-            category=category,
-            processed_at=datetime.now(timezone.utc).isoformat(),
-            key_phrase="",
-        )
+        published = _entry_time(entry)
+        await _save_retired(source_id, message_id, raw_text, entry_url,
+                            published.isoformat() if published else None, category)
         saved += 1
     log.info("RSS '%s': marked %d entry/entries as seen without showing them", name, saved)
     return saved

@@ -214,7 +214,7 @@ def _earlier_label(published_at, line_published_at) -> str:
     if dt is None:
         return "→"
     local = dt.astimezone(_get_tz())
-    return f"{local:%d.%m %H:%M}" if _is_dated(published_at, line_published_at) else f"{local:%H:%M}"
+    return f"{local:%d/%m %H:%M}" if _is_dated(published_at, line_published_at) else f"{local:%H:%M}"
 
 
 def _earlier_line(item) -> str:

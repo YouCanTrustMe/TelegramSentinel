@@ -13,12 +13,16 @@ from src.processor.llm.prompts import (
     _WAR_SYSTEM_PROMPT,
     _PAIR_JUDGE_PROMPT,
 )
-from src.common.util import needs_summary
+from src.common.util import detect_footers, needs_summary, row_get, strip_footers
 
 log = logging.getLogger(__name__)
 
 _MEDIA_PREFIX_RE = re.compile(r"^\[(?:Photo|Video|Video note|Audio|Voice|Doc|Document|Sticker|GIF|Animation|Media)\]\s*", re.IGNORECASE)
-_TRIVIAL_MAX_LEN = 60
+# A Ukrainian post shorter than this is shown as written. Over 14 days of 60-79 char
+# posts the model distorted 7 of 62 (Merz became Scholz, a vibe-coded project "raised
+# $1M") and only reworded the rest; a non-Ukrainian post always goes to the model,
+# which is the only way it gets translated.
+_TRIVIAL_MAX_LEN = 80
 
 # Only the first N chars of a post are fed to the model; longer posts are
 # truncated, so their summary covers just the beginning.
@@ -125,15 +129,32 @@ def _wants_no_translate(prompt_extra: str | None) -> bool:
     return any(kw in lower for kw in _NO_TRANSLATE_KEYWORDS)
 
 
+_RUSSIAN_ONLY = set("\u044b\u044d\u044a\u0451")
+_UKRAINIAN_ONLY = set("\u0456\u0457\u0454\u0491")
+
+
 def _looks_ukrainian(summary: str) -> bool:
     """True if the summary's alphabetic content is mostly Cyrillic (i.e. actually translated)."""
     if not summary:
         return True
+    # Russian is Cyrillic too: a post carrying its letters is not Ukrainian, short or not.
+    if _RUSSIAN_ONLY & set(summary.lower()):
+        return False
     letters = [c for c in summary if c.isalpha()]
     if len(letters) < 4:
         return True
     cyrillic = sum(1 for c in letters if "Ѐ" <= c <= "ӿ")
     return cyrillic / len(letters) >= 0.4
+
+
+def _reads_ukrainian(text: str) -> bool:
+    """Stricter than _looks_ukrainian, for text shown as written: a short Russian post
+    often has none of the Russian-only letters ("Putin flew to Beijing" does not), so a
+    letter only Ukrainian has must be present too. Text with almost no letters (an
+    emoji, a media chip) passes."""
+    if sum(1 for c in text if c.isalpha()) < 4:
+        return True
+    return _looks_ukrainian(text) and bool(_UKRAINIAN_ONLY & set(text.lower()))
 
 
 async def _ensure_ukrainian(summary: str, key_phrase: str) -> tuple[str, str]:
@@ -304,14 +325,30 @@ async def classify_pending_items(limit: int = 3) -> None:
         await _classify_pending_items(limit)
 
 
-async def split_for_summary(rows: list) -> tuple[list, list]:
+async def split_for_summary(rows: list, label: str = "Background classify") -> tuple[list, list]:
     """Split rows needing a summary into (item, text) pairs shown as written and pairs
-    for the model. Shared by the background pass and the digest's re-classify, so an
-    item gets the same treatment whichever reaches it first."""
+    for the model, the text with its channel's signature cut. Shared by the background
+    pass and the digest's re-classify, so an item gets the same treatment whichever
+    reaches it first."""
+    from src.db.models import get_recent_raw_texts
+
+    footers_by_source: dict[int, set[str]] = {}
     short, long_items = [], []
+    stripped = 0
     for item in rows:
-        raw = (item["raw_text"] or "").strip()
-        (short if len(_strip_media_prefix(raw)) < _TRIVIAL_MAX_LEN else long_items).append((item, raw))
+        source_id = item["source_id"]
+        if source_id not in footers_by_source:
+            footers_by_source[source_id] = detect_footers(await get_recent_raw_texts(source_id))
+        full = (item["raw_text"] or "").strip()
+        raw = strip_footers(full, footers_by_source[source_id]) or full
+        stripped += raw != full
+        text = _strip_media_prefix(raw)
+        trivial = len(text) < _TRIVIAL_MAX_LEN and (
+            _reads_ukrainian(text) or _wants_no_translate(row_get(item, "source_prompt_extra")))
+        (short if trivial else long_items).append((item, raw))
+    if stripped:
+        log.info("%s: channel signature cut from %d of %d item(s) | %s", label, stripped, len(rows),
+                 {sid: sorted(f) for sid, f in footers_by_source.items() if f})
     return short, long_items
 
 

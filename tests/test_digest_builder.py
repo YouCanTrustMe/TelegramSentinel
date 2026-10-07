@@ -524,9 +524,10 @@ async def test_reclassify_summarises_a_flood_in_batches_not_one_call_per_item(mo
     import src.dispatcher.digest_builder as db_mod
     from src.processor.llm.classifier import ClassificationResult
 
+    import src.db.models as models
     items = [{"id": n, "source_id": 1, "raw_text": f"Post number {n}, long enough that no short-text rule would ever show it as written", "summary": "", "key_phrase": ""}
              for n in range(30)]
-    # Same rules as the background pass: a short post is shown as written.
+    # Same rules as the background pass: a short Ukrainian post is shown as written.
     items.append({"id": 99, "source_id": 1, "raw_text": "Київ від ранку під ударом безпілотників.", "summary": "", "key_phrase": ""})
     calls, stored = [], {}
 
@@ -543,6 +544,11 @@ async def test_reclassify_summarises_a_flood_in_batches_not_one_call_per_item(mo
     monkeypatch.setattr(db_mod, "classify_batch", fake_batch)
     monkeypatch.setattr(db_mod, "update_item_classification", fake_store)
     monkeypatch.setattr(db_mod, "is_task_dead", lambda *_: False)
+
+    async def no_history(*a, **k):
+        return []
+
+    monkeypatch.setattr(models, "get_recent_raw_texts", no_history)
 
     out = await db_mod._reclassify_empty_summaries(items, no_status)
     assert [len(c) for c in calls] == [25, 5]

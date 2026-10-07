@@ -11,6 +11,46 @@ def needs_summary(item) -> bool:
     return not (item["summary"] or "").strip() and bool((item["raw_text"] or "").strip())
 
 
+def _lines(text: str) -> list[str]:
+    return [line.strip() for line in (text or "").split("\n") if line.strip()]
+
+
+def detect_footers(texts: list[str], min_count: int = 5, rounds: int = 3) -> set[str]:
+    """Lines a channel signs its posts with: a last line that ends at least `min_count`
+    posts, under different text in at least half of them. Found from the posts
+    themselves, so a new channel's signature needs no list. The different-text share
+    keeps a template channel's recurring line ("Threat: drones" / "Kyiv region") —
+    which is the news — from passing for a signature: on prod, real signatures sat under
+    different text in 81-100% of posts, a template line in 12%. Several rounds, because some sign with two lines
+    ("➕ Subscribe", then "📸 Send news") and the inner one only becomes last once the
+    outer is gone."""
+    footers: set[str] = set()
+    for _ in range(rounds):
+        above: dict[str, set[str]] = {}
+        ends: dict[str, int] = {}
+        for text in texts:
+            lines = _lines(text)
+            while len(lines) > 1 and lines[-1] in footers:
+                lines.pop()
+            if len(lines) > 1:
+                above.setdefault(lines[-1], set()).add("\n".join(lines[:-1]))
+                ends[lines[-1]] = ends.get(lines[-1], 0) + 1
+        found = {line for line, bodies in above.items()
+                 if len(bodies) >= min_count and len(bodies) * 2 >= ends[line]}
+        if found <= footers:
+            break
+        footers |= found
+    return footers
+
+
+def strip_footers(text: str, footers: set[str]) -> str:
+    """Drop trailing signature lines, never the post's only line."""
+    lines = (text or "").rstrip().split("\n")
+    while sum(1 for line in lines if line.strip()) > 1 and (not lines[-1].strip() or lines[-1].strip() in footers):
+        lines.pop()
+    return "\n".join(lines).rstrip()
+
+
 def source_link(type_: str, url: str) -> str | None:
     """Clickable link for a source: a Telegram handle becomes a t.me link, an RSS
     feed links straight to its url. None when there is nothing linkable — a numeric

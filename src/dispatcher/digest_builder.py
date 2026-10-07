@@ -615,7 +615,7 @@ async def _reclassify_empty_summaries(items: list, update: Callable[[str], Await
     items = list(items)
     reclassify_start = time.monotonic()
     index_of = {item["id"]: i for i, item in enumerate(items)}
-    short, todo = await split_for_summary(empty)
+    short, todo = await split_for_summary(empty, "Re-classify")
     for item, text in short:
         await update_item_classification(item["id"], text, "")
         items[index_of[item["id"]]] = {**dict(item), "summary": text, "key_phrase": ""}

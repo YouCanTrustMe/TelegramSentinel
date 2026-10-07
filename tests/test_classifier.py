@@ -62,13 +62,18 @@ async def test_classify_pending_embeds_freshly_classified(monkeypatch):
     their vectors cached instead of embedding everything at once."""
     long_text = "Реальна новина про важливу подію " * 4  # > _TRIVIAL_MAX_LEN
     items = [
-        {"id": 1, "summary": "", "raw_text": long_text},
-        {"id": 2, "summary": "", "raw_text": long_text},
+        {"id": 1, "source_id": 5, "summary": "", "raw_text": long_text},
+        {"id": 2, "source_id": 5, "summary": "", "raw_text": long_text},
     ]
     embedded: dict = {}
 
     async def fake_get_unsent_items(*a, **k):
         return items
+
+    async def no_history(*a, **k):
+        return []
+
+    monkeypatch.setattr(models, "get_recent_raw_texts", no_history)
 
     async def fake_update(item_id, summary, key_phrase):
         pass
@@ -482,3 +487,51 @@ async def test_the_digest_can_hold_the_lock_a_background_pass_takes(monkeypatch)
     assert not second.done()
     classifier.release_classify_lock()
     await second
+
+
+async def test_a_short_ukrainian_post_is_shown_as_written_without_its_signature(monkeypatch):
+    """60-79 char Ukrainian posts: the model distorted 7 of 62 (Merz became Scholz)."""
+    sig = "\n\n➕ Підписатись на LIVE"
+    history = [f"Пост номер {n}{sig}" for n in range(5)]
+    ua = "Канцлер Німеччини Фрідріх Мерц прибув до Києва із неоголошеним візитом."
+    en = "Germany's chancellor Merz arrived in Kyiv"   # short, but needs translating
+    items = [{"id": 1, "source_id": 5, "summary": "", "raw_text": ua + sig},
+             {"id": 2, "source_id": 5, "summary": "", "raw_text": en}]
+    stored, sent_to_model = {}, []
+
+    async def fake_unsent(*a, **k):
+        return items
+
+    async def fake_history(source_id, limit=100):
+        return history
+
+    async def fake_store(item_id, summary, key_phrase):
+        stored[item_id] = summary
+
+    async def fake_batch(payload):
+        sent_to_model.extend(row["id"] for row in payload)
+        return {row["id"]: ClassificationResult(summary="переклад") for row in payload}
+
+    async def no_embed(_pairs):
+        pass
+
+    monkeypatch.setattr(models, "get_unsent_items", fake_unsent)
+    monkeypatch.setattr(models, "get_recent_raw_texts", fake_history)
+    monkeypatch.setattr(models, "update_item_classification", fake_store)
+    monkeypatch.setattr(classifier, "classify_batch", fake_batch)
+    monkeypatch.setattr(classifier, "is_task_dead", lambda *_: False)
+    monkeypatch.setattr(classifier, "_embed_classified", no_embed)
+
+    await classify_pending_items(limit=10)
+    assert stored[1] == ua
+    assert sent_to_model == [2] and stored[2] == "переклад"
+
+
+def test_a_russian_post_is_not_taken_for_ukrainian():
+    """Short posts that look Ukrainian are shown as written, so Russian must not pass."""
+    assert not _looks_ukrainian("Путин заявил, что переговоры с Киевом пока невозможны")
+    assert not _looks_ukrainian("Объявлена воздушная тревога")
+    assert _looks_ukrainian("Київ від ранку під ударом безпілотників.")
+    # Shown as written only with a letter only Ukrainian has.
+    assert not classifier._reads_ukrainian("Путин прилетел в Пекин на саммит ШОС")
+    assert classifier._reads_ukrainian("Працює ППО") and classifier._reads_ukrainian("😁")

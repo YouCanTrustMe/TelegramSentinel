@@ -30,3 +30,21 @@ async def test_a_blocked_item_is_not_in_the_dedup_sent_pool(db):
     assert [r["id"] for r in rows] == [shown]
     # B1 judges the raw post, and an update links back to it.
     assert (rows[0]["raw_text"], rows[0]["original_url"]) == ("shown post", "https://t.me/a/1")
+
+
+async def test_the_backfill_rows_carry_their_sources_prompt_extra(db):
+    """classify reads "no translate" from source_prompt_extra; the backfill query used
+    SELECT * on items alone, so a no-translate source's post got translated there."""
+    from src.db.base import get_db
+    from src.db.items import get_sent_empty_items
+
+    sid = await add_source("rss", "A", "https://a/feed", "dev")
+    async with get_db() as conn:
+        await conn.execute("UPDATE sources SET prompt_extra = 'no translate' WHERE id = ?", (sid,))
+        await conn.commit()
+    now = datetime.now(timezone.utc).isoformat()
+    iid = await save_item(sid, "a1", "Short English post", None, now, "", "dev", now)
+    await mark_sent([iid])
+
+    (row,) = await get_sent_empty_items(5)
+    assert row["source_prompt_extra"] == "no translate"

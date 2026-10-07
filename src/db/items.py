@@ -142,14 +142,25 @@ async def get_duplicate_links(primary_ids: list[int]) -> dict[int, list[tuple[st
     return out
 
 
+async def get_recent_raw_texts(source_id: int, limit: int = 100) -> list[str]:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT raw_text FROM items WHERE source_id = ? ORDER BY id DESC LIMIT ?",
+            (source_id, limit),
+        ) as cur:
+            return [row[0] or "" for row in await cur.fetchall()]
+
+
 async def get_sent_empty_items(limit: int = 5) -> list[aiosqlite.Row]:
     async with get_db() as db:
         async with db.execute(
-            """SELECT * FROM items
-               WHERE sent = 1
-                 AND (summary IS NULL OR trim(summary) = '')
-                 AND trim(raw_text) <> ''
-               ORDER BY id DESC LIMIT ?""",
+            # The source's prompt_extra rides along: classify honours "no translate" from it.
+            """SELECT items.*, sources.prompt_extra AS source_prompt_extra FROM items
+               LEFT JOIN sources ON sources.id = items.source_id
+               WHERE items.sent = 1
+                 AND (items.summary IS NULL OR trim(items.summary) = '')
+                 AND trim(items.raw_text) <> ''
+               ORDER BY items.id DESC LIMIT ?""",
             (limit,),
         ) as cur:
             return await cur.fetchall()

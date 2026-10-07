@@ -437,3 +437,48 @@ async def test_judge_pairs_fails_open(monkeypatch):
     monkeypatch.setattr(classifier, "llm_json", boom)
 
     assert await classifier.judge_pairs([("a", "b"), ("c", "d")]) == [None, None]
+
+
+def test_a_dead_group_chain_does_not_warn_the_admin_per_source(monkeypatch, caplog):
+    """2026-10-07: with the chain quota-dead, every source's merge fell back and each
+    one sent the admin the same WARNING — 30 in two digests, on top of the quota alert."""
+    import asyncio
+    import logging
+    items = [{"id": 1, "text": "a"}, {"id": 2, "text": "b"}]
+
+    async def no_answer(messages, max_retries=3, task="group"):
+        return {}
+
+    monkeypatch.setattr(classifier, "llm_json", no_answer)
+    for dead, level in ((True, logging.INFO), (False, logging.WARNING)):
+        monkeypatch.setattr(classifier, "is_task_dead", lambda *_: dead)
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=classifier.log.name):
+            groups = asyncio.run(classifier.group_by_topic(items))
+        assert [g["ids"] for g in groups] == [[1], [2]]
+        assert [r.levelno for r in caplog.records if "grouping" in r.getMessage()] == [level]
+
+
+async def test_the_digest_can_hold_the_lock_a_background_pass_takes(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(classifier, "_pending_lock", asyncio.Lock())
+    release = asyncio.Event()
+
+    async def slow_pass(limit):
+        await release.wait()
+
+    monkeypatch.setattr(classifier, "_classify_pending_items", slow_pass)
+    running = asyncio.create_task(classify_pending_items(limit=999))
+    await asyncio.sleep(0)
+
+    assert classifier.background_classify_running()
+    assert await classifier.acquire_classify_lock(0.05) is False
+    release.set()
+    assert await classifier.acquire_classify_lock(1) is True
+    await running
+    # Held: a pass that starts now waits for the digest instead of running beside it.
+    second = asyncio.create_task(classify_pending_items(limit=3))
+    await asyncio.sleep(0.01)
+    assert not second.done()
+    classifier.release_classify_lock()
+    await second

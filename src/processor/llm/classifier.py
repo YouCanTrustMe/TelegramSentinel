@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from src.config import settings
 from src.processor.llm.llm_client import llm_json, is_task_dead
 from src.processor.llm.prompts import (
-    _SYSTEM_PROMPT,
     _BATCH_SYSTEM_PROMPT,
     _MULTI_SYSTEM_PROMPT,
     _TRANSLATE_ONLY_PROMPT,
@@ -23,7 +22,6 @@ _TRIVIAL_MAX_LEN = 60
 
 # Only the first N chars of a post are fed to the model; longer posts are
 # truncated, so their summary covers just the beginning.
-_SINGLE_INPUT_CAP = 1500
 _BATCH_INPUT_CAP = 700
 _BIG_NEWS_MARK = "…"
 _CLASSIFY_CHUNK = 25
@@ -66,43 +64,6 @@ def _rows(data: dict, key: str) -> list[dict]:
 class ClassificationResult:
     summary: str
     key_phrase: str = field(default="")
-
-
-async def classify(text: str, prompt_extra: str | None = None, max_retries: int = 5) -> ClassificationResult:
-    stripped = _strip_media_prefix(text)
-    # Short text is its own summary only when it is already Ukrainian (or translation
-    # is disabled); a short non-Ukrainian post still needs the model to translate it.
-    if len(stripped) < _TRIVIAL_MAX_LEN and (_wants_no_translate(prompt_extra) or _looks_ukrainian(stripped)):
-        log.debug("classify: trivial Ukrainian/short text (%d chars after strip), using raw as summary", len(stripped))
-        return ClassificationResult(summary=text.strip(), key_phrase="")
-
-    system = _SYSTEM_PROMPT
-    if prompt_extra:
-        system = f"{_SYSTEM_PROMPT}\n\nAdditional instructions: {prompt_extra}"
-
-    data = await llm_json(
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": text[:_SINGLE_INPUT_CAP]},
-        ],
-        max_retries=max_retries,
-        task="classify",
-    )
-    result = ClassificationResult(
-        summary=_as_text(data.get("summary")),
-        key_phrase=_as_text(data.get("key_phrase")),
-    )
-    if data and not result.summary:
-        # The answer arrived and parsed, but carried no usable summary. Record the
-        # shape: knowing WHAT came back is what ended the month-long "unparseable
-        # JSON" hunt, and the caller only ever sees an empty result.
-        log.info("classify: answer had no usable summary | keys=%s value=%r",
-                 sorted(data)[:8], repr(data.get("summary"))[:120])
-    if not _wants_no_translate(prompt_extra):
-        result.summary, result.key_phrase = await _ensure_ukrainian(result.summary, result.key_phrase)
-    result.summary = _mark_big(result.summary, text, _SINGLE_INPUT_CAP)
-    log.debug("Classified: %s | key=%s", result.summary, result.key_phrase)
-    return result
 
 
 async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
@@ -257,7 +218,13 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
     )
     groups = _rows(data, "groups")
     if not groups:
-        log.warning("Batch grouping returned empty, falling back to individual items")
+        # A dead chain already alerted once through the quota alert; warning here too sent
+        # the admin a copy per source on every digest (30 on 2026-10-07) for a harmless
+        # fallback — the lines just stay unmerged.
+        if is_task_dead("group"):
+            log.info("Batch grouping skipped: group-task models quota dead, keeping items individual")
+        else:
+            log.warning("Batch grouping returned empty, falling back to individual items")
         return [{"ids": [item["id"]], "summary": "", "key_phrase": ""} for item in items]
 
     result = []
@@ -307,8 +274,48 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
 
 _CLASSIFY_MAX_ATTEMPTS = 3
 
+# Held while a background pass runs. The pre-digest pass starts a minute before the
+# digest and on a big queue was still running when the digest's own re-classify began
+# on the SAME items: every item was summarised twice, which killed the quota for both
+# (2026-10-07: 75 and 57 empty items, 41 and 24 of them shipped as bare links).
+_pending_lock = asyncio.Lock()
+
+
+def background_classify_running() -> bool:
+    return _pending_lock.locked()
+
+
+async def acquire_classify_lock(timeout: float) -> bool:
+    """Take the lock a background pass holds, so the digest's own re-classify never
+    runs beside one. False on timeout — the caller goes on without it."""
+    try:
+        await asyncio.wait_for(_pending_lock.acquire(), timeout)
+    except asyncio.TimeoutError:
+        return False
+    return True
+
+
+def release_classify_lock() -> None:
+    _pending_lock.release()
+
 
 async def classify_pending_items(limit: int = 3) -> None:
+    async with _pending_lock:
+        await _classify_pending_items(limit)
+
+
+async def split_for_summary(rows: list) -> tuple[list, list]:
+    """Split rows needing a summary into (item, text) pairs shown as written and pairs
+    for the model. Shared by the background pass and the digest's re-classify, so an
+    item gets the same treatment whichever reaches it first."""
+    short, long_items = [], []
+    for item in rows:
+        raw = (item["raw_text"] or "").strip()
+        (short if len(_strip_media_prefix(raw)) < _TRIVIAL_MAX_LEN else long_items).append((item, raw))
+    return short, long_items
+
+
+async def _classify_pending_items(limit: int) -> None:
     from src.db.models import (
         get_sent_empty_items,
         get_unsent_items,
@@ -321,14 +328,6 @@ async def classify_pending_items(limit: int = 3) -> None:
     # path. Otherwise every item is embedded in one burst at digest time, which is
     # what hammers the Gemini quota on big digests.
     classified: list[tuple[int, str]] = []
-
-    def _split(rows: list) -> tuple[list, list]:
-        short, long_items = [], []
-        for item in rows:
-            raw = (item["raw_text"] or "").strip()
-            target = short if len(_strip_media_prefix(raw)) < _TRIVIAL_MAX_LEN else long_items
-            target.append((item, raw))
-        return short, long_items
 
     async def _classify_store(batch: list, label: str) -> int:
         results = await classify_batch([{"id": item["id"], "text": raw} for item, raw in batch])
@@ -352,7 +351,7 @@ async def classify_pending_items(limit: int = 3) -> None:
 
     items = await get_unsent_items()
     pending = [item for item in items if needs_summary(item)]
-    short, long_items = _split(pending)
+    short, long_items = await split_for_summary(pending)
     for item, raw in short:
         await update_item_classification(item["id"], raw, "")
         classified.append((item["id"], raw))
@@ -377,7 +376,7 @@ async def classify_pending_items(limit: int = 3) -> None:
         if not backlog:
             log.debug("Background classify: no pending items, nothing to backfill")
         else:
-            bshort, blong = _split(backlog)
+            bshort, blong = await split_for_summary(backlog)
             for item, raw in bshort:
                 await update_item_classification(item["id"], raw, "")
                 classified.append((item["id"], raw))

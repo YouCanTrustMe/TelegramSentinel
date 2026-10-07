@@ -146,27 +146,23 @@ async def update_source_status(source_id: int, status: str) -> None:
     log.info("Source id=%d status → %s", source_id, status)
 
 
-async def revive_error_rss_sources(max_fail_count: int = 6) -> list[str]:
-    """Flip transiently-failed RSS sources back to 'active' so they get re-probed.
+@retry_on_locked
+async def revive_error_rss_sources(max_fail_count: int | None = None) -> list[str]:
+    """Flip failed RSS sources back to 'active' so they get re-probed.
 
-    A feed that recovered (transient 404, UA block) starts collecting again and a
-    successful poll resets its fail_count. A genuinely dead feed keeps re-failing,
-    so its fail_count climbs past `max_fail_count` and we stop reviving it — it stays
-    'error' permanently instead of flapping and re-alerting forever. fail_count is
-    intentionally not reset here (that escalation is the whole point).
-    """
+    A feed that recovered starts collecting again and its first good poll resets
+    fail_count. fail_count is intentionally not reset here: it keeps counting the
+    re-probes, which is how the collector knows a feed has been down for hours.
+    `max_fail_count` limits the call to feeds that failed fewer times than that (the
+    frequent re-probe); None re-probes every failed feed (the daily one)."""
+    where = "type = 'rss' AND status = 'error'" + ("" if max_fail_count is None else " AND fail_count < ?")
+    params = () if max_fail_count is None else (max_fail_count,)
+    # One statement, so the names logged are exactly the rows flipped: at 48 runs a day a
+    # poll can mark a feed failed between a separate SELECT and UPDATE.
     async with get_db() as db:
-        async with db.execute(
-            "SELECT name FROM sources WHERE type = 'rss' AND status = 'error' AND fail_count < ?",
-            (max_fail_count,),
-        ) as cur:
+        async with db.execute(f"UPDATE sources SET status = 'active' WHERE {where} RETURNING name", params) as cur:
             names = [row["name"] for row in await cur.fetchall()]
-        if names:
-            await db.execute(
-                "UPDATE sources SET status = 'active' WHERE type = 'rss' AND status = 'error' AND fail_count < ?",
-                (max_fail_count,),
-            )
-            await db.commit()
+        await db.commit()
     return names
 
 

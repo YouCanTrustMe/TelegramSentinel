@@ -458,21 +458,63 @@ _FILTER_CONCURRENCY = 4
 _LITERAL_RULE_PREFIX = "="
 
 
+# The dashes and minus signs channels put between a marker and its word, ➖ included.
+_DASH_CHARS = ("-\u058a\u05be\u1400\u1806\u2010\u2011\u2012\u2013\u2014\u2015\u2e17\u2e1a\u2e3a"
+               "\u2e3b\u2e40\u2e5d\ufe31\ufe32\ufe58\ufe63\uff0d\u2212\u2043\u2796")
+_DASHES = re.escape(_DASH_CHARS)
+_APOSTROPHES = "'\u2018\u2019\u02bc\u02b9\u2032\uff07`"
+_INVISIBLE_RE = re.compile("[\u00ad\u200b-\u200d\u2060\ufeff\ufe0e\ufe0f]")
+_RULE_TOKEN_RE = re.compile(rf"(\s*[{_DASHES}][\s{_DASHES}]*|[{_APOSTROPHES}]|\s+)")
+# One run of dashes and spaces, possessive so a long separator line cannot make it backtrack.
+_DASH_RUN = rf"\s*+[{_DASHES}]++(?:\s*+[{_DASHES}]++)*+\s*+"
+
+
 def _normalize_for_match(text: str) -> str:
-    return " ".join((text or "").split()).casefold()
+    """Case, runs of whitespace and invisible characters (zero-width space, emoji
+    variation selectors, soft hyphen) do not matter on either side of a literal rule."""
+    return " ".join(_INVISIBLE_RE.sub("", text or "").split()).casefold()
 
 
-def _literal_rules(rules: list[str]) -> dict[int, str]:
+def _literal_pattern(rule_text: str) -> "re.Pattern | None":
+    """A literal rule as a regex over normalised text. A dash in the rule, with whatever
+    spaces it has around it, matches any run of dashes with or without spaces — channels
+    mark an ad "📣 - реклама", "📣- реклама", "📣 – реклама", "📣➖реклама" alike, and one
+    rule should catch them all. The flip side: a rule that STARTS or ENDS with a dash
+    ("= - реклама", "= реклама -") also matches a hyphenated word ("інтернет-реклама"),
+    so anchor such a rule on its marker. Any apostrophe matches any other."""
+    text = _normalize_for_match(rule_text)
+    if not text:
+        return None
+    if not re.sub(rf"[\s{_DASHES}]", "", text):
+        # A rule of nothing but dashes ("= ➖➖➖", a separator line) is taken exactly as
+        # written; loosened, it would match every hyphen in every post.
+        return re.compile(re.escape(text))
+    parts = []
+    for piece in _RULE_TOKEN_RE.split(text):
+        if not piece:
+            continue
+        if piece.strip() and piece.strip()[0] in _DASH_CHARS:
+            parts.append(_DASH_RUN)
+        elif piece in _APOSTROPHES:
+            parts.append(f"[{_APOSTROPHES}]")
+        elif piece.isspace():
+            parts.append(r"\s+")
+        else:
+            parts.append(re.escape(piece))
+    return re.compile("".join(parts))
+
+
+def _literal_rules(rules: list[str]) -> dict[int, "re.Pattern | None"]:
     """{rule index: pattern} for the rules written as literals. A bare "=" has no
-    pattern; it maps to the empty string, which matches nothing and — because it stays
-    in this map — is never shown to the model as a semantic rule that matches anything."""
-    out: dict[int, str] = {}
+    pattern; it maps to None, which matches nothing and — because it stays in this
+    map — is never shown to the model as a semantic rule that matches anything."""
+    out: dict[int, re.Pattern | None] = {}
     for j, rule in enumerate(rules):
         stripped = (rule or "").strip()
         if not stripped.startswith(_LITERAL_RULE_PREFIX):
             continue
-        pattern = _normalize_for_match(stripped[len(_LITERAL_RULE_PREFIX):])
-        if not pattern:
+        pattern = _literal_pattern(stripped[len(_LITERAL_RULE_PREFIX):])
+        if pattern is None:
             log.warning("Filter: rule %r has no pattern after '=', ignoring it", rule)
         out[j] = pattern
     return out
@@ -487,7 +529,8 @@ async def check_blocked_filters(
 
     items: list of {"id": int, "text": str, "source": str, "category": str}
     rules: list of rule description strings. A rule starting with "=" is matched
-        literally in code (whitespace-normalised, case-insensitive substring) and
+        literally in code (case-insensitive; whitespace, dashes and apostrophes
+        normalised — see _literal_pattern) and
         never reaches the model; every other rule is judged semantically by the LLM.
     rule_scopes: aligned with `rules`; each entry is the set of categories a rule
         applies to, or None for "all categories". A blocked match is discarded if
@@ -513,7 +556,7 @@ async def check_blocked_filters(
             haystack = _normalize_for_match(item.get("text", ""))
             hit = next(
                 (j for j, pattern in literal.items()
-                 if pattern and pattern in haystack
+                 if pattern is not None and pattern.search(haystack)
                  and not (scopes[j] and item_category.get(item["id"]) not in scopes[j])),
                 None,
             )

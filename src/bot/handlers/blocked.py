@@ -85,7 +85,9 @@ def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
             "Enter a filter rule description (e.g. 'space launches and commercial rockets').\n"
             "Start with <code>=</code> to match the text literally instead of asking the model — "
             "the rest of the line is looked for anywhere in the post, so keep it specific "
-            "(e.g. <code>= all clear</code>):",
+            "(e.g. <code>= all clear</code>). Case, dash and apostrophe variants count as the same, "
+            "so <code>= 📣 - реклама</code> also catches 📣– реклама; a rule starting or ending "
+            "with a dash also matches hyphenated words:",
             reply_markup=_back_kb("blocked_list"),
         )
 

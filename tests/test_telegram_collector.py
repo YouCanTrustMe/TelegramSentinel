@@ -397,3 +397,127 @@ async def test_a_fork_message_forwarded_from_a_group_or_a_user(captured):
     user = ForkMessage(**vars(base), forward_origin=SimpleNamespace(sender_user=SimpleNamespace(first_name="Ann")))
     assert await tc._process_message(CHAT, SOURCE, user)
     assert captured["raw_text"] == "Body text"
+
+
+@pytest.fixture(autouse=True)
+def fresh_traced(monkeypatch):
+    monkeypatch.setattr(tc, "_traced", set())
+
+
+async def test_an_unreadable_post_is_kept_and_reported(captured, monkeypatch):
+    """A post whose shape the collector cannot read used to raise out of the poll and
+    stall the whole channel on it; now it is a 📦 placeholder and the admin is told what
+    fields it carried."""
+    alerts = []
+
+    async def fake_alert(text, key=None, silent=True):
+        alerts.append(text)
+
+    monkeypatch.setattr(tc, "admin_alert", fake_alert)
+    class NewOption:
+        @property
+        def text(self):
+            raise TypeError("an option shape nobody has seen")
+
+    weird = SimpleNamespace(question=None, options=[NewOption()])
+
+    assert await tc._process_message(CHAT, SOURCE, _msg(poll=weird, checklist="new"))
+    assert captured["raw_text"] == GENERIC_MEDIA_TOKEN and captured["summary"] == NO_TEXT
+    assert len(alerts) == 1 and "checklist" in alerts[0] and "t.me/c/2568789348/239" in alerts[0]
+
+    captured.clear()
+    assert not await tc._process_message(CHAT, SOURCE, _msg(poll=weird, service="pinned"))
+    assert not captured
+
+
+async def test_one_kind_of_failure_shares_one_alert_key(captured, monkeypatch):
+    """The key is the exception type and the line that raised, not its message, which may
+    carry per-post values and would turn the hourly throttle into one alert per post."""
+    keys = []
+
+    async def fake_alert(text, key=None, silent=True):
+        keys.append(key)
+
+    monkeypatch.setattr(tc, "admin_alert", fake_alert)
+
+    class NewOption:
+        def __init__(self, n):
+            self.n = n
+
+        @property
+        def text(self):
+            raise KeyError(self.n)
+
+    for n in (1, 2):
+        assert await tc._process_message(CHAT, SOURCE, _msg(id=n, poll=SimpleNamespace(question="Q", options=[NewOption(n)])))
+    assert len(keys) == 2 and keys[0] == keys[1]
+
+
+async def test_an_unreadable_post_keeps_the_text_it_still_gives_up(captured, monkeypatch):
+    async def fake_alert(text, key=None, silent=True):
+        pass
+
+    monkeypatch.setattr(tc, "admin_alert", fake_alert)
+
+    class NewOption:
+        @property
+        def text(self):
+            raise TypeError("new option shape")
+
+    poll = SimpleNamespace(question="Which one?", options=[NewOption()])
+    assert await tc._process_message(CHAT, SOURCE, _msg(poll=poll))
+    assert captured["raw_text"] == "Which one?" and captured["summary"] == "Which one?"
+
+
+async def test_a_failing_report_does_not_stall_the_channel(captured, monkeypatch):
+    async def broken_alert(text, key=None, silent=True):
+        raise RuntimeError("bot api down")
+
+    monkeypatch.setattr(tc, "admin_alert", broken_alert)
+
+    class NewOption:
+        @property
+        def text(self):
+            raise TypeError("new option shape")
+
+    poll = SimpleNamespace(question=None, options=[NewOption()])
+    assert await tc._process_message(CHAT, SOURCE, _msg(poll=poll))
+    assert captured["raw_text"] == GENERIC_MEDIA_TOKEN
+
+
+async def test_a_reply_poll_is_stored_without_labels(captured):
+    """Labels were only ever added to text posts; a poll keeps its plain [Poll] line."""
+    poll = SimpleNamespace(question="Q", options=[SimpleNamespace(text="A")])
+    parent = SimpleNamespace(text="Parent post", caption=None)
+    assert await tc._process_message(CHAT, SOURCE, _msg(poll=poll), parent_msg=parent)
+    assert captured["raw_text"] == "[Poll] Q (A)"
+
+
+async def test_a_broken_label_keeps_the_post_text(captured, monkeypatch):
+    """Only the forward/reply label is lost when it cannot be read; the post keeps its text."""
+    async def fake_alert(text, key=None, silent=True):
+        pass
+
+    monkeypatch.setattr(tc, "admin_alert", fake_alert)
+
+    class Origin:
+        @property
+        def chat(self):
+            raise TypeError("new origin shape")
+
+    msg = _msg(text="Body text")
+    del msg.forward_from_chat
+    msg.forward_origin = Origin()
+    parent = SimpleNamespace(text="Parent post", caption=None)
+    assert await tc._process_message(CHAT, SOURCE, msg, parent_msg=parent)
+    assert captured["raw_text"] == "[Context: Parent post]\nBody text"
+
+
+async def test_a_database_error_is_not_mistaken_for_an_unreadable_post(captured, monkeypatch):
+    async def broken_save(**_kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(tc, "save_item", broken_save)
+    with pytest.raises(RuntimeError):
+        await tc._process_message(CHAT, SOURCE, _msg(text="Body text"))
+

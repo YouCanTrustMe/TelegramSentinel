@@ -1,7 +1,9 @@
 import asyncio
 import html
 import logging
+import os
 import time
+import traceback
 from datetime import datetime, timezone
 
 from pyrogram import Client, raw as tg_raw
@@ -184,7 +186,14 @@ def _forwarded_from(message) -> str:
     return (getattr(chat, "title", None) or "").strip()
 
 
-async def _process_message(chat_ref: str, source: dict, message: Message, parent_msg: "Message | None" = None) -> bool:
+def _is_service(message: Message) -> bool:
+    """A service or empty message: never stored."""
+    return bool(getattr(message, "service", None) or getattr(message, "empty", None))
+
+
+def _read_message(message: Message) -> tuple[str, bool] | None:
+    """The text a post is stored with, and whether it is only a media token; None for a
+    service or empty message, which is not stored."""
     no_caption = False
     if message.poll:
         poll = message.poll
@@ -213,24 +222,87 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
                 # it IS a post (not service, not empty). Keep it as a generic
                 # placeholder so it surfaces in the digest as a 📦 chip with a link
                 # instead of vanishing silently.
-                if getattr(message, "service", None) or getattr(message, "empty", None):
-                    return False
+                if _is_service(message):
+                    return None
                 media_prefix = GENERIC_MEDIA_TOKEN + " "
             raw_text = media_prefix.strip()
             no_caption = True
-        else:
-            fwd_title = _forwarded_from(message)
-            if fwd_title:
-                raw_text = f"[Forwarded from {fwd_title}] {raw_text}"
 
-            if parent_msg is not None:
-                parent_text = (parent_msg.text or parent_msg.caption or "").strip()
-                if parent_text:
-                    raw_text = f"[Context: {parent_text[:200].split(chr(10))[0]}]\n{raw_text}"
+    return raw_text, no_caption
 
-    message_id = make_message_id("telegram", chat_ref, str(message.id))
-    if await is_duplicate(message_id):
+
+def _forward_label(raw_text: str, message: Message, _parent_msg: "Message | None") -> str:
+    fwd_title = _forwarded_from(message)
+    return f"[Forwarded from {fwd_title}] {raw_text}" if fwd_title else raw_text
+
+
+def _context_label(raw_text: str, _message: Message, parent_msg: "Message | None") -> str:
+    """For a reply, the first line of the post it answers."""
+    parent_text = (parent_msg.text or parent_msg.caption or "").strip() if parent_msg is not None else ""
+    return f"[Context: {parent_text[:200].split(chr(10))[0]}]\n{raw_text}" if parent_text else raw_text
+
+
+def _salvage_text(message: Message) -> str:
+    """Whatever text a post that failed to read still gives up: its body, or a poll's question."""
+    for read in (lambda: message.text or message.caption, lambda: message.poll.question):
+        try:
+            text = plain_text(read()).strip()
+        except Exception:
+            continue
+        if text:
+            return text
+    return ""
+
+
+_traced: set[str] = set()
+
+
+def _failure_kind(exc: Exception) -> str:
+    """The exception type and the function that raised: the same for every post of one
+    shape, unlike the message, which may carry per-post values, and unlike a line number,
+    which a deploy shifts."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    where = f" in {os.path.basename(frames[-1].filename)}:{frames[-1].name}" if frames else ""
+    return f"{type(exc).__name__}{where}"
+
+
+async def _report_unreadable(chat_ref: str, message: Message, url: str, exc: Exception, kept: str) -> None:
+    """A post the collector could not fully read. A pyrogram fork can hand a post type over
+    in a shape nobody has seen yet, and this is how we learn of it: the admin gets the
+    fields the post carried, once an hour per kind of failure."""
+    # A failure here must not escape: it would stall the channel all over again.
+    try:
+        kind = _failure_kind(exc)
+        attrs = vars(message) if hasattr(message, "__dict__") else {}
+        fields = sorted(k for k, v in attrs.items() if v is not None and v is not False and not k.startswith("_"))
+        first = kind not in _traced
+        _traced.add(kind)
+        log.info("Unreadable post from %s kept %s | %s: %r | fields=%s | %s",
+                 chat_ref, kept, kind, exc, ",".join(fields), url, exc_info=first)
+        await admin_alert(
+            f"⚠️ <b>Post could not be read</b>\n"
+            f"Kept {html.escape(kept)}: {html.escape(url)}\n"
+            f"<code>{html.escape(kind)}: {html.escape(repr(exc)[:200])}</code>\n"
+            f"Fields: {html.escape(', '.join(fields))}",
+            key=f"unreadable:{kind}",
+        )
+    except Exception as report_exc:
+        log.warning("Could not report an unreadable post from %s (%s): %r", chat_ref, url, report_exc)
+
+
+async def _process_message(chat_ref: str, source: dict, message: Message, parent_msg: "Message | None" = None) -> bool:
+    # One unreadable post used to raise out of the poll and stall its whole channel on it
+    # every 5 minutes until the rest aged out. Database errors are not caught here.
+    unreadable = None
+    try:
+        read = _read_message(message)
+    except Exception as exc:
+        unreadable = exc
+        salvaged = "" if _is_service(message) else _salvage_text(message)
+        read = None if _is_service(message) else (salvaged, False) if salvaged else (GENERIC_MEDIA_TOKEN, True)
+    if read is None:
         return False
+    raw_text, no_caption = read
 
     if chat_ref.lstrip("-").isdigit():
         raw_channel_id = abs(int(chat_ref)) - 1000000000000
@@ -238,6 +310,20 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
     else:
         username = chat_ref.lstrip("@")
         original_url = f"https://t.me/{username}/{message.id}"
+
+    message_id = make_message_id("telegram", chat_ref, str(message.id))
+    if await is_duplicate(message_id):
+        return False
+
+    if unreadable is not None:
+        kept = "as 📦" if no_caption else "with only the text it gave up"
+        await _report_unreadable(chat_ref, message, original_url, unreadable, kept=kept)
+    elif not no_caption and not message.poll:
+        for name, label in (("forward", _forward_label), ("reply context", _context_label)):
+            try:
+                raw_text = label(raw_text, message, parent_msg)
+            except Exception as exc:
+                await _report_unreadable(chat_ref, message, original_url, exc, kept=f"without its {name} label")
 
     published_at = message.date.replace(tzinfo=timezone.utc).isoformat() if message.date else None
 
@@ -250,8 +336,9 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
             summary = NO_TEXT
             # media=None here means an undecodable post (MessageMediaUnsupported —
             # Pyrogram layer too old); a non-None type is media we don't tag yet.
-            log.info("Unhandled/undecodable media-only post from %s | media=%s | %s",
-                     chat_ref, getattr(message, "media", None), original_url)
+            if unreadable is None:
+                log.info("Unhandled/undecodable media-only post from %s | media=%s | %s",
+                         chat_ref, getattr(message, "media", None), original_url)
         else:
             summary = raw_text
         key_phrase = ""
@@ -340,7 +427,7 @@ async def _poll_channel(chat_ref: str, source: dict, gaps: list | None = None) -
             # The bookmark still moves past it, so it is never fetched again. Service and
             # empty messages are dropped anyway, so they are not counted as lost posts.
             if _too_old(message):
-                if not (getattr(message, "service", None) or getattr(message, "empty", None)):
+                if not _is_service(message):
                     stale += 1
                 continue
             parent_msg = messages_by_id.get(message.reply_to_message_id) if message.reply_to_message_id else None

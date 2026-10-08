@@ -319,8 +319,8 @@ async def test_a_gap_in_many_channels_is_reported_in_one_message(monkeypatch):
 
 
 async def test_a_forward_is_labelled_in_either_library_shape(captured):
-    """Newer pyrogram forks dropped forward_from_chat for forward_origin; reading the old
-    name there raised on every post, which would stop collection outright."""
+    """Newer pyrogram forks moved the forward source to forward_origin, keeping
+    forward_from_chat only as a deprecated property that logs a warning per read."""
     old = _msg(text="Body text", forward_from_chat=SimpleNamespace(title="Source"))
     assert await tc._process_message(CHAT, SOURCE, old)
     assert captured["raw_text"] == "[Forwarded from Source] Body text"
@@ -335,4 +335,65 @@ async def test_a_forward_is_labelled_in_either_library_shape(captured):
     del plain.forward_from_chat
     plain.forward_origin = None
     assert await tc._process_message(CHAT, SOURCE, plain)
+    assert captured["raw_text"] == "Body text"
+
+
+async def test_a_poll_is_read_in_either_library_shape(captured):
+    """Newer pyrogram forks give the question and options as FormattedText objects; joining
+    them raised, and the error cut off the rest of the channel at its first poll (dry run
+    2026-10-08: Codu saved 14 of 188 posts)."""
+    class Formatted:
+        def __init__(self, text):
+            self.text = text
+
+        def __str__(self):  # as kurigram's: returns .text, so a None text raises
+            return self.text
+
+    for wrap in (str, Formatted):
+        poll = SimpleNamespace(question=wrap("Which one?"),
+                               options=[SimpleNamespace(text=wrap("A")), SimpleNamespace(text=wrap("B"))])
+        assert await tc._process_message(CHAT, SOURCE, _msg(poll=poll))
+        assert captured["raw_text"] == "[Poll] Which one? (A, B)"
+
+    texts = [None, "B", "C", "D", "E", "F"]
+    poll = SimpleNamespace(question=Formatted("Which one?"),
+                           options=[SimpleNamespace(text=Formatted(t)) for t in texts])
+    assert await tc._process_message(CHAT, SOURCE, _msg(poll=poll))
+    assert captured["raw_text"] == "[Poll] Which one? (B, C, D, E)"
+
+    poll = SimpleNamespace(question=Formatted(None), options=[SimpleNamespace(text="A")])
+    assert await tc._process_message(CHAT, SOURCE, _msg(poll=poll))
+    assert captured["raw_text"] == "[Poll] (A)"
+
+
+async def test_a_fork_message_is_not_asked_for_the_deprecated_forward_field(captured):
+    """kurigram keeps forward_from_chat only as a property that logs a warning per read."""
+    class ForkMessage(SimpleNamespace):
+        @property
+        def forward_from_chat(self):
+            raise AssertionError("deprecated field read")
+
+    msg = _msg(text="Body text")
+    del msg.forward_from_chat
+    fork = ForkMessage(**vars(msg), forward_origin=None)
+    assert await tc._process_message(CHAT, SOURCE, fork)
+    assert captured["raw_text"] == "Body text"
+
+
+async def test_a_fork_message_forwarded_from_a_group_or_a_user(captured):
+    """A group forward carries sender_chat; a user forward has no chat at all, and the
+    deprecated field must still not be read for it."""
+    class ForkMessage(SimpleNamespace):
+        @property
+        def forward_from_chat(self):
+            raise AssertionError("deprecated field read")
+
+    base = _msg(text="Body text")
+    del base.forward_from_chat
+    group = ForkMessage(**vars(base), forward_origin=SimpleNamespace(sender_chat=SimpleNamespace(title="Group")))
+    assert await tc._process_message(CHAT, SOURCE, group)
+    assert captured["raw_text"] == "[Forwarded from Group] Body text"
+
+    user = ForkMessage(**vars(base), forward_origin=SimpleNamespace(sender_user=SimpleNamespace(first_name="Ann")))
+    assert await tc._process_message(CHAT, SOURCE, user)
     assert captured["raw_text"] == "Body text"

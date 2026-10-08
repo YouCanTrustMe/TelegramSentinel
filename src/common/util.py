@@ -6,6 +6,14 @@ def row_get(row, key, default=None):
     return row[key] if key in row.keys() else default
 
 
+def plain_text(value) -> str:
+    """Telegram text as a str: pyrogram 2.0 (layer 158) hands over a str, newer forks wrap
+    it in TextWithEntities / FormattedText, whose .text holds it and may be None. Not
+    str(value): FormattedText.__str__ returns that None and raises."""
+    text = getattr(value, "text", value)
+    return "" if text is None else str(text)
+
+
 def needs_summary(item) -> bool:
     """True when an item has no usable summary yet but has raw text to build one from."""
     return not (item["summary"] or "").strip() and bool((item["raw_text"] or "").strip())

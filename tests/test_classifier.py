@@ -259,6 +259,51 @@ def test_literal_rule_normalizes_whitespace_and_case(monkeypatch):
     assert asyncio.run(classifier.check_blocked_filters(items, ["= ВІДБІЙ ТРИВОГИ"])) == {1: "= ВІДБІЙ ТРИВОГИ"}
 
 
+def test_literal_rule_treats_every_dash_alike(monkeypatch):
+    import asyncio
+    texts = ["Підписуйся 📣 - реклама", "Квитки тут 📣- реклама", "Деталі 📣 – реклама", "Новина про рекламу",
+             "Деталі 📣\ufe0f — реклама", "Деталі 📣 −реклама"]
+    items = [{"id": i, "text": t, "source": "s", "category": "feed"} for i, t in enumerate(texts)]
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        raise AssertionError("literal rules must not reach the model")
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    rule = "= 📣 - реклама"
+    assert asyncio.run(classifier.check_blocked_filters(items, [rule])) == {0: rule, 1: rule, 2: rule, 4: rule, 5: rule}
+
+
+def test_literal_rule_edge_cases(monkeypatch):
+    """A dash at the edge of a rule, a marker glued to its word, a zero-width space and
+    the other Ukrainian apostrophes all still match; prose without the marker does not."""
+    import asyncio
+    texts = ["знижка -5% на все", "Квитки 📣—реклама", "Підписуйся 📣\u200b - реклама",
+             "Обов′язкова підписка", "Головне джерело доходу Meta — реклама",
+             "Акція 📣 ➖ реклама", "Акція 📣 -- реклама"]
+    items = [{"id": i, "text": t, "source": "s", "category": "feed"} for i, t in enumerate(texts)]
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        raise AssertionError("literal rules must not reach the model")
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    rules = ["= -5%", "= 📣 - реклама", "= обовʼязкова підписка"]
+    assert asyncio.run(classifier.check_blocked_filters(items, rules)) == {0: rules[0], 1: rules[1], 2: rules[1], 3: rules[2],
+                                                                           5: rules[1], 6: rules[1]}
+
+
+def test_literal_rule_of_only_dashes_stays_exact_and_fast():
+    """A separator-line rule must not turn into "any hyphen"; a long dash line in a post
+    must not make a dash rule backtrack."""
+    import time
+    sep = classifier._literal_pattern("➖➖➖")
+    assert sep.search(classifier._normalize_for_match("Новина ➖➖➖ кінець"))
+    assert not sep.search(classifier._normalize_for_match("Київ-Одеса: нова траса"))
+    rule = classifier._literal_pattern("— — — реклама")
+    start = time.monotonic()
+    assert not rule.search(classifier._normalize_for_match("— " * 400 + "кінець"))
+    assert time.monotonic() - start < 0.5
+
+
 def test_literal_rule_respects_its_category_scope(monkeypatch):
     import asyncio
     items = [{"id": 1, "text": "відбій тривоги", "source": "s", "category": "crypto"}]

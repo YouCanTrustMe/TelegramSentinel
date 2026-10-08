@@ -316,3 +316,23 @@ async def test_a_gap_in_many_channels_is_reported_in_one_message(monkeypatch):
     await tc.poll_telegram_once()
     assert len(sent) == 1 and sent[0][0] == "stale_catchup:A&B 1,A&B 2"
     assert "A&amp;B 1: 3" in sent[0][1] and "A&amp;B 2: 3" in sent[0][1]
+
+
+async def test_a_forward_is_labelled_in_either_library_shape(captured):
+    """Newer pyrogram forks dropped forward_from_chat for forward_origin; reading the old
+    name there raised on every post, which would stop collection outright."""
+    old = _msg(text="Body text", forward_from_chat=SimpleNamespace(title="Source"))
+    assert await tc._process_message(CHAT, SOURCE, old)
+    assert captured["raw_text"] == "[Forwarded from Source] Body text"
+
+    new = _msg(text="Body text")
+    del new.forward_from_chat
+    new.forward_origin = SimpleNamespace(chat=SimpleNamespace(title="Source"))
+    assert await tc._process_message(CHAT, SOURCE, new)
+    assert captured["raw_text"] == "[Forwarded from Source] Body text"
+
+    plain = _msg(text="Body text")
+    del plain.forward_from_chat
+    plain.forward_origin = None
+    assert await tc._process_message(CHAT, SOURCE, plain)
+    assert captured["raw_text"] == "Body text"

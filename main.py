@@ -71,8 +71,10 @@ async def _supervise(name: str, factory: Callable[[], Awaitable[None]]) -> None:
 
 async def main() -> None:
     running_loop = asyncio.get_running_loop()
-    bot.dispatcher.loop = running_loop
-    userbot.dispatcher.loop = running_loop
+    # pyrogram 2.0's dispatcher keeps its own loop; newer forks read client.loop.
+    for client in (bot, userbot):
+        client.dispatcher.loop = running_loop
+        client.loop = running_loop
 
     set_loop(running_loop)
     _admin_handler = AdminAlertLogHandler()

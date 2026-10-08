@@ -1,3 +1,4 @@
+import inspect
 import logging
 
 from pyrogram import raw
@@ -9,11 +10,25 @@ log = logging.getLogger(__name__)
 SENTINEL_FOLDER = "Sentinel"
 
 
+def _title_text(title) -> str:
+    """A folder title as plain text: layer 158 (pyrogram 2.0) sends a string, newer
+    layers wrap it in TextWithEntities — compared as-is it never equals our title."""
+    return getattr(title, "text", title)
+
+
+def _folder_title(text: str, filter_cls=None):
+    """The title in the shape this library's DialogFilter declares."""
+    annotation = inspect.signature((filter_cls or raw.types.DialogFilter).__init__).parameters["title"].annotation
+    if "TextWithEntities" in str(annotation):
+        return raw.types.TextWithEntities(text=text, entities=[])
+    return text
+
+
 async def _get_folder(title: str) -> raw.types.DialogFilter | None:
     result = await userbot.invoke(raw.functions.messages.GetDialogFilters())
     filters = result.filters if hasattr(result, "filters") else result
     for f in filters:
-        if isinstance(f, raw.types.DialogFilter) and f.title == title:
+        if isinstance(f, raw.types.DialogFilter) and _title_text(f.title) == title:
             return f
     return None
 
@@ -33,7 +48,7 @@ async def add_to_folder(username: str, folder_title: str = SENTINEL_FOLDER) -> N
             folder_id = await _next_folder_id()
             folder = raw.types.DialogFilter(
                 id=folder_id,
-                title=folder_title,
+                title=_folder_title(folder_title),
                 pinned_peers=[],
                 include_peers=[peer],
                 exclude_peers=[],

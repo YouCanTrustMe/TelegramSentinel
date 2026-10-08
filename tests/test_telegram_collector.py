@@ -259,7 +259,7 @@ class _History:
         return gen()
 
 
-async def test_a_new_channel_skips_its_old_posts_but_moves_past_them(monkeypatch):
+async def test_old_posts_are_skipped_and_a_catch_up_gap_is_reported(monkeypatch):
     """2026-10-07: the central bank channel's first poll took 20 posts, 19 of them older than two days."""
     from datetime import timedelta
 
@@ -280,7 +280,39 @@ async def test_a_new_channel_skips_its_old_posts_but_moves_past_them(monkeypatch
     monkeypatch.setattr(tc, "_process_message", fake_process)
     monkeypatch.setattr(tc, "set_source_last_message_id", fake_bookmark)
     monkeypatch.setattr(tc, "_server_error_streak", {})
+    gaps = []
 
-    saved = await tc._poll_channel(CHAT, {"id": 91, "name": "NBU", "last_message_id": None, "chat_id": 1})
+    saved = await tc._poll_channel(CHAT, {"id": 91, "name": "NBU", "last_message_id": None, "chat_id": 1}, gaps)
     assert saved == 1 and processed == [30]
     assert bookmark == {91: 30}
+    assert gaps == []   # a new channel's history is expected, not a loss
+
+    # A catch-up that finds posts past the limit means news was lost unseen.
+    processed.clear()
+    messages.append(_msg(id=9, date=now - timedelta(days=4), service="pinned_message", chat=None))
+    saved = await tc._poll_channel(CHAT, {"id": 91, "name": "NBU", "last_message_id": 5, "chat_id": 1}, gaps)
+    assert processed == [30]
+    assert gaps == [("NBU", 2)]   # the service message is not a lost post
+
+
+async def test_a_gap_in_many_channels_is_reported_in_one_message(monkeypatch):
+    """An outage hits every channel at once; one alert per source arrived as a burst."""
+    sent = []
+
+    async def fake_sources(type_=None):
+        return [{"id": n, "name": f"A&B {n}", "category": "feed", "url": f"@c{n}", "chat_id": n,
+                 "last_message_id": 1} for n in (1, 2)]
+
+    async def fake_poll(chat_ref, source, gaps):
+        gaps.append((source["name"], 3))
+        return 0
+
+    async def fake_alert(text, key=None, silent=True):
+        sent.append((key, text))
+
+    monkeypatch.setattr(tc, "get_active_sources", fake_sources)
+    monkeypatch.setattr(tc, "_poll_channel", fake_poll)
+    monkeypatch.setattr(tc, "admin_alert", fake_alert)
+    await tc.poll_telegram_once()
+    assert len(sent) == 1 and sent[0][0] == "stale_catchup:A&B 1,A&B 2"
+    assert "A&amp;B 1: 3" in sent[0][1] and "A&amp;B 2: 3" in sent[0][1]

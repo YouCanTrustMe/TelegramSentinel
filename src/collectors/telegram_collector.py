@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import time
 from datetime import datetime, timezone
@@ -262,6 +263,12 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
     return True
 
 
+def _gap_report(gaps: list[tuple[str, int]]) -> str:
+    lines = [f"• {html.escape(name)}: {count}" for name, count in gaps]
+    return (f"⚠️ <b>Posts skipped after a gap</b>\n"
+            f"Older than {settings.max_item_age_hours}h when collected, so not shown:\n" + "\n".join(lines))
+
+
 def _too_old(message: Message) -> bool:
     """A new channel's first poll fetches its last 20 posts, which can be weeks old
     (the central bank channel: 19 of 20 older than two days). Pyrogram's naive local `date` round-trips
@@ -270,7 +277,7 @@ def _too_old(message: Message) -> bool:
     return date is not None and time.time() - date.timestamp() > settings.max_item_age_hours * 3600
 
 
-async def _poll_channel(chat_ref: str, source: dict) -> int:
+async def _poll_channel(chat_ref: str, source: dict, gaps: list | None = None) -> int:
     if chat_ref.lstrip("-").isdigit():
         chat_id: int | str = int(chat_ref)
     else:
@@ -316,15 +323,21 @@ async def _poll_channel(chat_ref: str, source: dict) -> int:
                 seen_group_ids.add(group_id)
                 group_msgs = [m for m in messages if m.media_group_id == group_id]
                 message = next((m for m in group_msgs if (m.text or m.caption)), group_msgs[0])
-            # The bookmark still moves past it, so it is never fetched again.
+            # The bookmark still moves past it, so it is never fetched again. Service and
+            # empty messages are dropped anyway, so they are not counted as lost posts.
             if _too_old(message):
-                stale += 1
+                if not (getattr(message, "service", None) or getattr(message, "empty", None)):
+                    stale += 1
                 continue
             parent_msg = messages_by_id.get(message.reply_to_message_id) if message.reply_to_message_id else None
             if await _process_message(chat_ref, source, message, parent_msg=parent_msg):
                 saved += 1
         if stale:
             log.info("Source '%s': skipped %d post(s) older than %dh", source["name"], stale, settings.max_item_age_hours)
+            # On a first poll that is just the channel's history. On a catch-up it means news
+            # was lost unseen, and while RSS keeps arriving nothing else would say so.
+            if last_msg_id is not None and gaps is not None:
+                gaps.append((source["name"], stale))
 
         if max_seen_id:
             await set_source_last_message_id(source["id"], max_seen_id)
@@ -430,6 +443,10 @@ async def keep_userbot_online() -> None:
 
 
 async def poll_telegram_once() -> None:
+    # Catch-up gaps are reported as ONE message after the cycle: an outage hits every
+    # channel at once, and a message per source would arrive as a burst that also holds
+    # up polling the rest. Local, because the pre-digest collect runs a cycle of its own.
+    gaps: list[tuple[str, int]] = []
     try:
         sources = await get_active_sources(type_="telegram")
         for row in sources:
@@ -451,13 +468,17 @@ async def poll_telegram_once() -> None:
                 if not chat_ref:
                     continue
 
-            saved = await _poll_channel(chat_ref, source)
+            saved = await _poll_channel(chat_ref, source, gaps)
             if saved:
                 log.info("Telegram poll %s: %d new items", chat_ref, saved)
             else:
                 log.debug("Telegram poll %s: 0 new items", chat_ref)
     except Exception as exc:
         log.exception("Telegram collector iteration failed: %s", exc)
+    if gaps:
+        log.info("Telegram poll: posts skipped after a gap in %d source(s): %s", len(gaps), gaps)
+        # Keyed by the channels, so a gap found in other channels within the hour still reports.
+        await admin_alert(_gap_report(gaps), key="stale_catchup:" + ",".join(sorted(name for name, _ in gaps)))
 
 
 async def run_telegram_collector() -> None:

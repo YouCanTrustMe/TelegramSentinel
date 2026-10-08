@@ -13,7 +13,7 @@ from src.db.models import find_sources_by_chat_id, get_active_sources, increment
 from src.dispatcher.admin_alert import admin_alert
 from src.common.media import GENERIC_MEDIA_TOKEN, MEDIA_TOKENS, MEDIA_TYPES, NO_TEXT
 from src.processor.dedup.deduplicator import is_duplicate, make_message_id
-from src.common.util import row_get
+from src.common.util import plain_text, row_get
 
 log = logging.getLogger(__name__)
 
@@ -174,11 +174,13 @@ async def _resolve_invite_link(url: str, source_id: int, source_name: str) -> st
 def _forwarded_from(message) -> str:
     """Title of the channel or group a post was forwarded from. pyrogram 2.0 exposes it
     as forward_from_chat; newer forks dropped that field for forward_origin (.chat for a
-    channel, .sender_chat for a group), and reading the old name there raises on every post."""
-    chat = getattr(message, "forward_from_chat", None)
-    if chat is None:
-        origin = getattr(message, "forward_origin", None)
+    channel, .sender_chat for a group), keeping the old name only as a deprecated property
+    that logs a warning on every read — so the new field is read first."""
+    if hasattr(message, "forward_origin"):
+        origin = message.forward_origin
         chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
+    else:
+        chat = getattr(message, "forward_from_chat", None)
     return (getattr(chat, "title", None) or "").strip()
 
 
@@ -186,8 +188,10 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
     no_caption = False
     if message.poll:
         poll = message.poll
-        opts = ", ".join(opt.text for opt in (poll.options or [])[:4])
-        raw_text = f"[Poll] {poll.question}" + (f" ({opts})" if opts else "")
+        # Newer pyrogram forks hand option text over as FormattedText; join() on it raised
+        # and cut off the rest of the channel at its first poll.
+        opts = ", ".join([t for t in (plain_text(opt.text) for opt in poll.options or []) if t][:4])
+        raw_text = " ".join(p for p in ("[Poll]", plain_text(poll.question), f"({opts})" if opts else "") if p)
     else:
         caption = message.text or message.caption or ""
         media_prefix = ""

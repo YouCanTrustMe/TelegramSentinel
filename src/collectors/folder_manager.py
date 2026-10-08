@@ -4,16 +4,11 @@ import logging
 from pyrogram import raw
 
 from src.collectors.telegram_collector import userbot
+from src.common.util import plain_text
 
 log = logging.getLogger(__name__)
 
 SENTINEL_FOLDER = "Sentinel"
-
-
-def _title_text(title) -> str:
-    """A folder title as plain text: layer 158 (pyrogram 2.0) sends a string, newer
-    layers wrap it in TextWithEntities — compared as-is it never equals our title."""
-    return getattr(title, "text", title)
 
 
 def _folder_title(text: str, filter_cls=None):
@@ -28,7 +23,7 @@ async def _get_folder(title: str) -> raw.types.DialogFilter | None:
     result = await userbot.invoke(raw.functions.messages.GetDialogFilters())
     filters = result.filters if hasattr(result, "filters") else result
     for f in filters:
-        if isinstance(f, raw.types.DialogFilter) and _title_text(f.title) == title:
+        if isinstance(f, raw.types.DialogFilter) and plain_text(f.title) == title:
             return f
     return None
 

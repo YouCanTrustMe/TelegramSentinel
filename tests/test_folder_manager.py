@@ -4,6 +4,7 @@ username no longer resolves — is still removed from the Sentinel folder."""
 from pyrogram import raw
 
 import src.collectors.folder_manager as fm
+from src.common.util import plain_text
 
 
 async def test_remove_from_folder_resolves_by_numeric_ref(monkeypatch):
@@ -134,8 +135,8 @@ def test_a_folder_title_is_found_in_either_library_shape():
     """pyrogram 2.0 (layer 158) sends the title as a string; newer forks wrap it in
     TextWithEntities, which never equals "Sentinel" when compared as-is."""
     from types import SimpleNamespace
-    assert fm._title_text("Sentinel") == "Sentinel"
-    assert fm._title_text(SimpleNamespace(text="Sentinel", entities=[])) == "Sentinel"
+    assert plain_text("Sentinel") == "Sentinel"
+    assert plain_text(SimpleNamespace(text="Sentinel", entities=[])) == "Sentinel"
 
 
 def test_a_new_folder_title_takes_the_shape_its_library_declares():
@@ -157,4 +158,4 @@ def test_a_new_folder_serialises_with_the_installed_library():
         id=5, title=fm._folder_title("Sentinel"), pinned_peers=[],
         include_peers=[raw.types.InputPeerChannel(channel_id=1, access_hash=2)], exclude_peers=[])
     back = raw.types.DialogFilter.read(BytesIO(folder.write()[4:]))
-    assert fm._title_text(back.title) == "Sentinel" and len(back.include_peers) == 1
+    assert plain_text(back.title) == "Sentinel" and len(back.include_peers) == 1

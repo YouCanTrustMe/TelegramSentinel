@@ -128,3 +128,33 @@ async def test_remove_from_folder_strips_a_pinned_chat_too(monkeypatch):
     await fm.remove_from_folder(222)
 
     assert [p.channel_id for p in folder.pinned_peers] == []
+
+
+def test_a_folder_title_is_found_in_either_library_shape():
+    """pyrogram 2.0 (layer 158) sends the title as a string; newer forks wrap it in
+    TextWithEntities, which never equals "Sentinel" when compared as-is."""
+    from types import SimpleNamespace
+    assert fm._title_text("Sentinel") == "Sentinel"
+    assert fm._title_text(SimpleNamespace(text="Sentinel", entities=[])) == "Sentinel"
+
+
+def test_a_new_folder_title_takes_the_shape_its_library_declares():
+    class OldFilter:
+        def __init__(self, *, title: str): ...
+
+    class NewFilter:
+        def __init__(self, *, title: "raw.base.TextWithEntities"): ...
+
+    assert fm._folder_title("Sentinel", OldFilter) == "Sentinel"
+    wrapped = fm._folder_title("Sentinel", NewFilter)
+    assert isinstance(wrapped, raw.types.TextWithEntities) and wrapped.text == "Sentinel"
+
+
+def test_a_new_folder_serialises_with_the_installed_library():
+    """Whichever pyrogram is installed, the folder we build must write and read back."""
+    from io import BytesIO
+    folder = raw.types.DialogFilter(
+        id=5, title=fm._folder_title("Sentinel"), pinned_peers=[],
+        include_peers=[raw.types.InputPeerChannel(channel_id=1, access_hash=2)], exclude_peers=[])
+    back = raw.types.DialogFilter.read(BytesIO(folder.write()[4:]))
+    assert fm._title_text(back.title) == "Sentinel" and len(back.include_peers) == 1

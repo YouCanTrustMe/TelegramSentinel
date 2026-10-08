@@ -1,4 +1,4 @@
-pyrogram==2.0.106
+kurigram==2.2.26
 TgCrypto==1.2.5
 feedparser==6.0.11
 aiosqlite==0.20.0

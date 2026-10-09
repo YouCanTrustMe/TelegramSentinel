@@ -232,6 +232,29 @@ async def test_a_503_counts_as_telegram_side_too(monkeypatch):
     assert tc._server_error_streak[77][0] == 1
 
 
+async def test_kurigram_retry_exhaustion_stays_quiet_until_it_repeats(monkeypatch, caplog):
+    # kurigram turns ten 500s in a row into this bare TimeoutError; 2026-10-09 00:01 it
+    # reached the admin as ERROR for a one-minute Telegram blip on three channels.
+    monkeypatch.setattr(tc, "_server_error_streak", {})
+    caplog.set_level("INFO", logger=tc.log.name)
+    exhausted = TimeoutError('Failed to invoke "messages.GetHistory" after 10 retries')
+    for _ in range(tc._SERVER_ERROR_WARN_STREAK - 1):
+        await _poll(monkeypatch, fail=exhausted)
+    assert not [r for r in caplog.records if r.levelname in ("WARNING", "ERROR")]
+    assert tc._server_error_streak[77][0] == tc._SERVER_ERROR_WARN_STREAK - 1
+    await _poll(monkeypatch, fail=exhausted)
+    assert [r.levelname for r in caplog.records if r.levelname != "INFO"] == ["WARNING"]
+
+
+async def test_a_long_flood_wait_still_reaches_the_admin(monkeypatch, caplog):
+    # A FloodWait above the sleep threshold is raised as itself, not as a TimeoutError.
+    monkeypatch.setattr(tc, "_server_error_streak", {})
+    caplog.set_level("INFO", logger=tc.log.name)
+    await _poll(monkeypatch, fail=tc.FloodWait(value=600))
+    assert [r.levelname for r in caplog.records if r.levelname != "INFO"] == ["ERROR"]
+    assert tc._server_error_streak == {}
+
+
 def test_a_channel_that_never_heals_warns_again_every_few_hours():
     first = tc._SERVER_ERROR_WARN_STREAK
     warned = [n for n in range(1, first + 2 * tc._SERVER_ERROR_REWARN_EVERY + 1)
@@ -242,10 +265,24 @@ def test_a_channel_that_never_heals_warns_again_every_few_hours():
 async def test_an_old_streak_does_not_carry_into_a_later_failure(monkeypatch):
     # A source paused mid-streak is never polled, so nothing clears it; a 500 a
     # week after resuming must start from one, not warn as the sixth in a row.
-    monkeypatch.setattr(tc, "_server_error_streak",
-                        {77: (tc._SERVER_ERROR_WARN_STREAK - 1, tc.time.monotonic() - 7 * 86400)})
+    monkeypatch.setattr(tc, "_poll_cycle", 2016)
+    monkeypatch.setattr(tc, "_server_error_streak", {77: (tc._SERVER_ERROR_WARN_STREAK - 1, 0)})
     await _poll(monkeypatch, fail=True)
     assert tc._server_error_streak[77][0] == 1
+
+
+async def test_a_slow_outage_cycle_still_counts_as_in_a_row(monkeypatch, caplog):
+    # 19 channels x ten retries each made one outage cycle longer than the old
+    # wall-clock gap, so every failure restarted the streak and none ever warned.
+    monkeypatch.setattr(tc, "_server_error_streak", {})
+    monkeypatch.setattr(tc, "_poll_cycle", 0)
+    caplog.set_level("INFO", logger=tc.log.name)
+    for _ in range(tc._SERVER_ERROR_WARN_STREAK):
+        tc._poll_cycle += 1
+        monkeypatch.setattr(tc.time, "monotonic", lambda: tc._poll_cycle * 3600.0)
+        await _poll(monkeypatch, fail=TimeoutError("Failed to invoke"))
+    assert tc._server_error_streak[77][0] == tc._SERVER_ERROR_WARN_STREAK
+    assert [r.levelname for r in caplog.records if r.levelname != "INFO"] == ["WARNING"]
 
 
 class _History:

@@ -26,7 +26,8 @@ _INVITE_FAIL_THRESHOLD = 20  # mark source as 'error' after this many consecutiv
 # pull a channel's whole history; a burst beyond it is reported, not silently lost.
 _BOOTSTRAP_LIMIT = 20
 _CATCHUP_LIMIT = 200
-# A Telegram 5xx is Telegram's own outage: pyrogram has already retried it ten
+# A Telegram 5xx is Telegram's own outage (kurigram reports ten of them, or ten dropped
+# connections, as a bare TimeoutError): the library has already retried it ten
 # times, and the next poll almost always goes through — three in eight days, each
 # a different channel, all near midnight UTC, each one waking the admin. Only a
 # streak this long (6 polls = 30 min) on the same source is worth a warning, and
@@ -34,11 +35,13 @@ _CATCHUP_LIMIT = 200
 # template, so a single warning could be swallowed by another channel's.
 _SERVER_ERROR_WARN_STREAK = 6
 _SERVER_ERROR_REWARN_EVERY = 72
-# source id -> (streak, monotonic time of its last 500). A source that stops being
+# source id -> (streak, poll cycle of its last failure). A source that stops being
 # polled (paused, erroring, deleted) never gets the success that clears it, so a
-# failure only extends a streak whose previous one was a poll or two ago.
-_server_error_streak: dict[int, tuple[int, float]] = {}
-_SERVER_ERROR_STREAK_GAP = 2 * POLL_INTERVAL + 60
+# failure only extends a streak whose previous one was a cycle or two ago. Counted in
+# cycles, not seconds: ten retries per failing channel stretch a cycle during an outage.
+_server_error_streak: dict[int, tuple[int, int]] = {}
+_SERVER_ERROR_STREAK_GAP = 2
+_poll_cycle = 0
 
 
 def _server_error_level(streak: int) -> int:
@@ -462,13 +465,14 @@ async def _poll_channel(chat_ref: str, source: dict, gaps: list | None = None) -
             f"<i>{exc}</i>",
             key=f"source_inaccessible:{source['id']}",
         )
-    except (InternalServerError, ServiceUnavailable) as exc:
+    # kurigram retries a 500/503, a dropped connection or a short FloodWait ten times inside
+    # invoke and then raises a bare TimeoutError; pyrogram 2.0.106 re-raised the 500 itself.
+    except (InternalServerError, ServiceUnavailable, TimeoutError) as exc:
         server_error = True
-        now = time.monotonic()
-        previous, last_at = _server_error_streak.get(source["id"], (0, now))
-        streak = previous + 1 if now - last_at <= _SERVER_ERROR_STREAK_GAP else 1
-        _server_error_streak[source["id"]] = (streak, now)
-        log.log(_server_error_level(streak), "Telegram server error polling '%s' (%s), %d poll(s) in a row: %s",
+        previous, last_cycle = _server_error_streak.get(source["id"], (0, _poll_cycle))
+        streak = previous + 1 if _poll_cycle - last_cycle <= _SERVER_ERROR_STREAK_GAP else 1
+        _server_error_streak[source["id"]] = (streak, _poll_cycle)
+        log.log(_server_error_level(streak), "Telegram server error or timeout polling '%s' (%s), %d poll(s) in a row: %s",
                 source["name"], chat_ref, streak, exc)
     except Exception as exc:
         log.error("Failed to poll %s: %s", chat_ref, exc)
@@ -547,6 +551,8 @@ async def poll_telegram_once() -> None:
     # Catch-up gaps are reported as ONE message after the cycle: an outage hits every
     # channel at once, and a message per source would arrive as a burst that also holds
     # up polling the rest. Local, because the pre-digest collect runs a cycle of its own.
+    global _poll_cycle
+    _poll_cycle += 1
     gaps: list[tuple[str, int]] = []
     try:
         sources = await get_active_sources(type_="telegram")

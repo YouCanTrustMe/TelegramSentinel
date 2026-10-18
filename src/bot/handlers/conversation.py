@@ -7,6 +7,7 @@ import feedparser
 from pyrogram import filters as pf
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from src.bot.handlers.blocked import _render_blocked_view, parse_rule_label
 from src.bot.handlers.categories import _finalize_add_category
 from src.bot.handlers.sources import _finalize_add_source
 from src.bot.keyboards import (
@@ -33,6 +34,7 @@ from src.db.models import (
     get_source_health,
     get_sources_by_category,
     rename_source,
+    set_blocked_label,
     set_source_prompt_extra,
     source_exists,
     update_category,
@@ -121,6 +123,18 @@ def register_conversation_handler(bot, admin_msg, admin_cb) -> None:
                 _slot_text(time_str, cats),
                 reply_markup=_slot_keyboard(time_str, cats),
             )
+
+        elif action == "label_blocked_word":
+            del _pending[uid]
+            label = parse_rule_label(text)
+            await set_blocked_label(data["word_id"], label)
+            log.info("Filter rule id=%d short name set to %r", data["word_id"], label)
+            rendered = await _render_blocked_view(data["word_id"])
+            if rendered is None:
+                await message.reply("Filter rule not found.")
+                return
+            view_text, kb = rendered
+            await message.reply(view_text, reply_markup=kb)
 
         elif action == "add_blocked_word":
             added = await add_blocked_word(text)

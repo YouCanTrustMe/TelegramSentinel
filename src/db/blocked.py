@@ -20,6 +20,13 @@ async def add_blocked_word(word: str) -> bool:
             return False
 
 
+async def set_blocked_label(word_id: int, label: str | None) -> bool:
+    async with get_db() as db:
+        cur = await db.execute("UPDATE blocked_words SET label = ? WHERE id = ?", (label, word_id))
+        await db.commit()
+        return cur.rowcount > 0
+
+
 async def remove_blocked_word(word_id: int) -> bool:
     async with get_db() as db:
         await db.execute("DELETE FROM blocked_word_categories WHERE word_id = ?", (word_id,))

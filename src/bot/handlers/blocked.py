@@ -18,6 +18,16 @@ from src.db.models import (
 
 log = logging.getLogger(__name__)
 
+# Room for a block title in the digest's Filtered section; the cut rule text it
+# replaces runs to 45.
+RULE_LABEL_MAX = 40
+
+
+def parse_rule_label(text: str) -> str | None:
+    """A short name as typed: "-" clears it, so the block falls back to the cut rule text."""
+    label = " ".join(text.split())
+    return None if label in ("", "-") else label[:RULE_LABEL_MAX]
+
 async def _render_blocked_view(word_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
     words = await get_blocked_words()
     word = next((w for w in words if w["id"] == word_id), None)
@@ -37,12 +47,17 @@ async def _render_blocked_view(word_id: int) -> tuple[str, InlineKeyboardMarkup]
             row = []
     if row:
         buttons.append(row)
-    buttons.append([InlineKeyboardButton("🗑 Remove", callback_data=f"blocked_del:{word_id}")])
+    buttons.append([
+        InlineKeyboardButton("🏷 Short name", callback_data=f"blocked_label:{word_id}"),
+        InlineKeyboardButton("🗑 Remove", callback_data=f"blocked_del:{word_id}"),
+    ])
     buttons.append([InlineKeyboardButton("« Back", callback_data="blocked_list")])
 
     applies = f"selected ({len(scoped)})" if scoped else "all categories"
+    short = word["label"] or "—"
     text = (
         f"🔴 {escape(word['rule'])}\n\n"
+        f"<b>Short name:</b> {escape(short)}\n"
         f"<b>Applies to:</b> {applies}\n"
         f"<i>Tap a category to toggle this filter. None selected = applies everywhere.</i>"
     )
@@ -121,6 +136,17 @@ def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
             return
         text, kb = rendered
         await query.message.edit_text(text, reply_markup=kb)
+
+    @bot.on_callback_query(pf.regex(r"^blocked_label:\d+$") & admin_cb)
+    async def cb_blocked_label(_, query: CallbackQuery) -> None:
+        word_id = int(query.data.split(":", 1)[1])
+        _pending[query.from_user.id] = {"action": "label_blocked_word", "step": 0, "data": {"word_id": word_id}}
+        await query.message.edit_text(
+            f"Send a short name for this rule (up to {RULE_LABEL_MAX} characters), e.g. "
+            "<code>crypto noise</code>. It titles the rule's block under Filtered in the digest "
+            "and its row here. Send <code>-</code> to drop it.",
+            reply_markup=_back_kb(f"blocked_view:{word_id}"),
+        )
 
     @bot.on_callback_query(pf.regex(r"^blocked_del:") & admin_cb)
     async def cb_blocked_del(_, query: CallbackQuery) -> None:

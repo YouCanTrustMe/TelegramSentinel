@@ -88,3 +88,10 @@ def test_the_wizard_reads_only_data_keys_its_opener_sets():
         written = set(re.findall(r'data\["(\w+)"\]\s*=(?!=)', block))
         read = set(re.findall(r'data\["(\w+)"\]', block)) - written
         assert read <= produced.get(action, set()), (action, read - produced.get(action, set()))
+
+
+def test_rule_short_name_is_trimmed_capped_and_cleared_by_a_dash():
+    from src.bot.handlers.blocked import RULE_LABEL_MAX, parse_rule_label
+    assert parse_rule_label("  crypto   noise ") == "crypto noise"
+    assert parse_rule_label("-") is None and parse_rule_label("   ") is None
+    assert len(parse_rule_label("x" * 100)) == RULE_LABEL_MAX

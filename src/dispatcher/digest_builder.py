@@ -234,6 +234,17 @@ def _earlier_line(item) -> str:
     return f"<i>↻ earlier: {more}{', '.join(links)}</i>"
 
 
+# Telegram turns a name like "Index.hr ZAGREB" into a link to index.hr by itself. A word
+# joiner after the dot breaks its domain detection (checked against the Bot API's own
+# entities on 2026-10-18) without showing anything or adding a line-break point.
+_NAME_DOT_RE = re.compile(r"(?<=\w)\.(?=\w)")
+
+
+def _plain_name(name: str) -> str:
+    """A source name escaped for HTML and kept from being auto-linked as a domain."""
+    return _NAME_DOT_RE.sub(".⁠", escape(name))
+
+
 def _format_item(item: dict, dup_links: dict[int, list[tuple[str, str]]] | None = None) -> str:
     """Render an item line, appending clickable source links for any cross-source
     duplicates muted under it, and the earlier updates of a merged story below it."""
@@ -246,15 +257,17 @@ def _format_item(item: dict, dup_links: dict[int, list[tuple[str, str]]] | None 
             for name, url in dup_links.get(iid, []):
                 if url:
                     links.append(f'<a href="{escape(url, quote=True)}">{escape(name)}</a>')
-    if links:
+    via = row_get(item, "_via")
+    if via:
+        # A block mixing sources (the war block) names each line's channel, and its
+        # muted duplicates follow that name in the same tail: "(A) · B" read as two
+        # separate attributions.
+        line = f"{line} <i>· {', '.join([_plain_name(via)] + links)}</i>"
+    elif links:
         # Italic including the brackets: the trailing source names are provenance, not
         # part of the headline, and the slant separates them at a glance from the link
         # the summary itself carries.
         line = f"{line} <i>({', '.join(links)})</i>"
-    via = row_get(item, "_via")
-    if via:
-        # A block mixing sources (the overnight war block) names each line's channel.
-        line = f"{line} <i>· {escape(via)}</i>"
     earlier = _earlier_line(item)
     return f"{line}\n{earlier}" if earlier else line
 
@@ -308,7 +321,7 @@ def _source_blocks(
     if not rendered:
         return []
 
-    header = f"<b>{escape(source_name)}</b>"
+    header = f"<b>{_plain_name(source_name)}</b>"
 
     def _wrap(lines: list[str]) -> str:
         return "<blockquote expandable>" + "\n".join([header] + lines) + "</blockquote>"
@@ -371,15 +384,25 @@ def _build_digest_text(
                 segments.append((block_text, block_ids))
 
     if blocked_items:
-        segments.append(("\n<b>🚫 Filtered</b>", []))
+        segments.append(("\n<b>🚫 🚫 🚫 Filtered</b>", []))
         filtered_by_word: dict[str, list] = defaultdict(list)
+        titles: dict[str, str] = {}
         for item in blocked_items:
             rule = item.get("blocked_by") or "?"
             # Keyed by the full rule, so two rules that open alike keep their own blocks.
-            filtered_by_word[_LITERAL_FILTER_TITLE if rule.lstrip().startswith("=") else rule].append(item)
+            key = _LITERAL_FILTER_TITLE if rule.lstrip().startswith("=") else rule
+            filtered_by_word[key].append(item)
+            label = (item.get("blocked_label") or "").strip()
+            titles.setdefault(key, label if label and key != _LITERAL_FILTER_TITLE else _filter_title(key))
+        literal = filtered_by_word.pop(_LITERAL_FILTER_TITLE, [])
         for word, word_items in filtered_by_word.items():
-            for block_text, _ in _source_blocks(_filter_title(word), word_items):
+            for block_text, _ in _source_blocks(f"{titles[word]} · {len(word_items)}", word_items):
                 segments.append((block_text, []))
+        if literal:
+            # Literal hits are code matches that cannot be wrong, and listing them took up
+            # to 32 lines of a morning digest (18.10: 52 hidden lines vs 23 news), so only
+            # their count is shown; each hit stays in items.blocked_reason.
+            segments.append((f"<blockquote><b>{_LITERAL_FILTER_TITLE} · {len(literal)}</b></blockquote>", []))
 
     return segments
 
@@ -425,10 +448,10 @@ async def _build_silent_block() -> str:
     for row in sources:
         hours = row["hours_silent"]
         age = f"{hours // 24}d" if hours is not None else "never"
-        name = escape(row["name"])
+        name = _plain_name(row["name"])
         url = _quiet_source_url(row)
         label = f'<a href="{escape(url, quote=True)}">{name}</a>' if url else name
-        lines.append(f"• {label} [{row['type']}] — {age}")
+        lines.append(f"• {label} — {age}")
     return "<blockquote expandable>" + "\n".join(lines) + "</blockquote>"
 
 
@@ -572,19 +595,32 @@ def _split_into_messages(
 ) -> list[tuple[str, list[int]]]:
     limit = _TELEGRAM_LIMIT - reserve
     messages: list[tuple[str, list[int]]] = []
-    cur_text, cur_ids = "", []
+    cur: list[tuple[str, list[int]]] = []
+
+    def _join(parts: list[tuple[str, list[int]]]) -> str:
+        return "\n".join(text for text, _ in parts).lstrip("\n")
+
     for text, ids in segments:
-        candidate = (cur_text + "\n" + text).lstrip("\n")
-        if len(candidate) > limit:
-            if cur_text:
-                messages.append((cur_text, cur_ids))
-            cur_text, cur_ids = text, list(ids)
-        else:
-            cur_text = candidate
-            cur_ids = cur_ids + list(ids)
-    if cur_text:
-        messages.append((cur_text, cur_ids))
+        if cur and len(_join(cur + [(text, ids)])) > limit:
+            # A heading closing a message would sit apart from its blocks: 24 of 143
+            # digest messages ended on a category rule before this.
+            carried: list[tuple[str, list[int]]] = []
+            while len(cur) > len(carried) + 1 and _is_heading(cur[-1 - len(carried)][0]):
+                carried.insert(0, cur[-1 - len(carried)])
+            if carried and len(_join(carried + [(text, ids)])) > limit:
+                carried = []   # it would push the next message past the limit: it stays put
+            kept = cur[:len(cur) - len(carried)]
+            messages.append((_join(kept), [i for _, seg_ids in kept for i in seg_ids]))
+            cur = carried
+        cur.append((text, list(ids)))
+    if cur:
+        messages.append((_join(cur), [i for _, seg_ids in cur for i in seg_ids]))
     return messages
+
+
+def _is_heading(text: str) -> bool:
+    """A category rule or the Filtered title: every block of content is a blockquote."""
+    return "<blockquote" not in text
 
 
 async def _discard_building(building_msg_id: int | None) -> None:
@@ -682,6 +718,9 @@ async def _defer_empty_items(items: list) -> tuple[list, int]:
     return kept, deferred
 
 
+_UNSIGNED_AD_LABEL = "unsigned ads"
+
+
 def _is_unsigned_own_post(raw: str, footers: set[str]) -> bool:
     """A post its channel did not sign: the channel has a signature, the post's last line does
     not end with it (an album caption reads "[Photo] → Про Бізнес"), and it is neither a forward
@@ -725,7 +764,8 @@ async def _judge_unsigned_ads(items: list) -> tuple[list, list]:
           "source": item["source_name"] or "unknown", "category": item["category"] or "other"}
          for item in candidates],
         [UNSIGNED_AD_RULE], [None])
-    blocked = [{**item, "blocked_by": UNSIGNED_AD_RULE} for item in candidates if item["id"] in blocked_map]
+    blocked = [{**item, "blocked_by": UNSIGNED_AD_RULE, "blocked_label": _UNSIGNED_AD_LABEL}
+               for item in candidates if item["id"] in blocked_map]
     log.info("Unsigned-ad check: %d of %d unsigned post(s) from no-filter sources blocked | ids=%s",
              len(blocked), len(candidates), [item["id"] for item in blocked])
     if not blocked:
@@ -751,6 +791,7 @@ async def _apply_rule_filter(items: list) -> tuple[list, list]:
         return items, blocked_items
     try:
         rules = [r["rule"] for r in filter_rules_rows]
+        labels = {r["rule"]: row_get(r, "label") for r in filter_rules_rows}
         scope_map = await get_word_category_map()
         # Aligned with `rules`: None means the rule applies to every category.
         rule_scopes = [scope_map.get(r["id"]) or None for r in filter_rules_rows]
@@ -782,7 +823,7 @@ async def _apply_rule_filter(items: list) -> tuple[list, list]:
             for item in filterable:
                 matched_rule = blocked_map.get(item["id"])
                 if matched_rule is not None:
-                    blocked_items.append({**item, "blocked_by": matched_rule})
+                    blocked_items.append({**item, "blocked_by": matched_rule, "blocked_label": labels.get(matched_rule)})
                     log.info("Blocked item id=%d | rule=%r | summary=%s", item["id"], matched_rule, (item["summary"] or "")[:80])
             await mark_blocked([(item["id"], item["blocked_by"]) for item in blocked_items])
             log.info("Blocked %d item(s) by semantic filter", len(blocked_items))

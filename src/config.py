@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     # lower: on the same 54 pairs 0.90 caught 2 more duplicates and hid no story, while
     # 0.90 against already-shown stories would have hidden 10.
     dedup_auto_hide_in_digest_threshold: float = 0.90
+    # Floor for the second look at a survivor and its closest twin it was never judged
+    # with (_judge_direct_pairs). Replay of 10-08..10-18 at the 0.86 candidate floor: 8
+    # real duplicates hidden and 5 real stories, 4 of those at 0.862-0.869 (a Rivne
+    # mall strike hidden under a "drone heading to Rivne" alert).
+    dedup_direct_pair_floor: float = 0.88
     # Texts per rolling minute. Mistral's free tier absorbed 20 back-to-back calls in
     # 13s (median 0.35s), so this ceiling is politeness, not a measured limit.
     embed_rpm: int = 300

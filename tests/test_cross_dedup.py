@@ -208,6 +208,24 @@ async def test_confirm_mutes_regroups_candidates_rejected_against_a_weak_primary
     assert confirmed == {3: 2}             # muted under the other candidate, not the anchor
 
 
+async def test_a_pair_judged_in_the_regroup_is_recorded_as_judged(monkeypatch):
+    """The direct-twin pass skips pairs already judged; one rejected in the regroup must
+    not go to the judge a second time, where another verdict could hide it."""
+    judge, _calls = _judge(lambda a, b: "different")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    item_by_id = {
+        1: {"id": 1, "raw_text": "anchor", "source_id": 10, "source_sort_order": 0},
+        2: {"id": 2, "raw_text": "Ka-27 destroyed", "source_id": 11, "source_sort_order": 1},
+        3: {"id": 3, "raw_text": "a Ka-27 lost", "source_id": 12, "source_sort_order": 2},
+    }
+    vec = {1: _band_vec(0), 2: _band_vec(28), 3: _band_vec(29)}
+    judged: set = set()
+
+    await cd._confirm_mutes({2: 1, 3: 1}, item_by_id, {}, vec, {}, judged)
+
+    assert frozenset((2, 3)) in judged
+
+
 async def test_regroup_requires_the_pair_to_clear_the_cosine_floor(monkeypatch):
     """Embeddings stay the gate: the judge is never even asked about a pair whose own
     vectors never linked them."""
@@ -664,3 +682,43 @@ async def test_a_close_pair_never_buries_a_richer_post_under_a_shown_one_without
 
     assert confirmed == {}
     assert updates == {2: 99}
+
+
+async def test_direct_twins_never_judged_together_get_their_own_verdict(monkeypatch):
+    """10-10: three channels on the Miami talks ending early were each judged against a
+    different post and all shipped; the pair itself never reached the judge."""
+    judge, calls = _judge(lambda a, b: "same")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    monkeypatch.setattr(cd.settings, "dedup_direct_pair_floor", 0.88)
+    monkeypatch.setattr(cd.settings, "dedup_log_floor", 0.86)
+    item_by_id = {1: _row(1, 1, raw_text="talks ended early, second day cancelled, details " * 5),
+                  2: _row(2, 2, raw_text="talks ended early"),
+                  3: _row(3, 3, raw_text="an unrelated story")}
+    vec = {1: _vec(1, 0), 2: _at(0.91), 3: _vec(0, 1)}
+
+    assert await cd._judge_direct_pairs(item_by_id, vec, {}, set()) == {2: 1}
+    assert len(calls["pairs"]) == 1
+
+
+async def test_direct_twins_skip_pairs_already_judged_below_the_floor_or_from_one_source(monkeypatch):
+    judge, calls = _judge(lambda a, b: "same")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    monkeypatch.setattr(cd.settings, "dedup_direct_pair_floor", 0.88)
+    monkeypatch.setattr(cd.settings, "dedup_log_floor", 0.86)
+    pair = {1: _row(1, 1), 2: _row(2, 2)}
+
+    assert await cd._judge_direct_pairs(pair, {1: _vec(1, 0), 2: _at(0.91)}, {}, {frozenset((1, 2))}) == {}
+    assert await cd._judge_direct_pairs(pair, {1: _vec(1, 0), 2: _at(0.87)}, {}, set()) == {}
+    one_source = {1: _row(1, 1), 2: _row(2, 1)}
+    assert await cd._judge_direct_pairs(one_source, {1: _vec(1, 0), 2: _at(0.95)}, {}, set()) == {}
+    assert calls["n"] == 0
+
+
+async def test_direct_twins_leave_an_already_hidden_post_alone(monkeypatch):
+    judge, calls = _judge(lambda a, b: "same")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    monkeypatch.setattr(cd.settings, "dedup_direct_pair_floor", 0.88)
+    item_by_id = {1: _row(1, 1), 2: _row(2, 2)}
+
+    assert await cd._judge_direct_pairs(item_by_id, {1: _vec(1, 0), 2: _at(0.91)}, {2: 99}, set()) == {}
+    assert calls["n"] == 0

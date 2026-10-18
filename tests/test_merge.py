@@ -192,3 +192,13 @@ def test_a_long_line_never_cuts_its_link_to_another_digest(monkeypatch):
 
     assert line.startswith("<i>↻ earlier: +3 · ")
     assert ">06/10 08:00</a>" in line and ">06:00</a>" in line and ">03:00</a>" not in line
+
+
+def test_a_post_republished_under_a_second_url_is_not_an_earlier_post():
+    """Croatia Week posted one article twice at 11:59:18 under two URLs: the merged line
+    carried "↻ earlier: 13:59" pointing at the same article."""
+    a = {**_item(1), "published_at": "2026-10-16T11:59:18+00:00"}
+    b = {**_item(2), "published_at": "2026-10-16T11:59:18+00:00"}
+    older = {**_item(3), "published_at": "2026-10-16T08:00:00+00:00"}
+    assert mg._build_merged([a, b], "s", "")["_earlier"] == []
+    assert [url for _p, url in mg._build_merged([a, b, older], "s", "")["_earlier"]] == ["https://example.com/3"]

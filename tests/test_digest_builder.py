@@ -554,3 +554,101 @@ async def test_reclassify_summarises_a_flood_in_batches_not_one_call_per_item(mo
     assert [len(c) for c in calls] == [25, 5]
     assert stored[99] == "Київ від ранку під ударом безпілотників." and stored[3] == "s3"
     assert 7 not in stored and out[7]["summary"] == ""   # left for _defer_empty_items
+
+
+def test_unsigned_own_post_detection():
+    footers = {"→ Про Бізнес"}
+    assert digest_builder._is_unsigned_own_post("ПУМБ – вигідний зарплатний проєкт\n✅ Менеджер 24/7", footers)
+    assert not digest_builder._is_unsigned_own_post("Новина про податки\n\n→ Про Бізнес", footers)
+    # padded with U+3164, or an album caption: still signed
+    assert not digest_builder._is_unsigned_own_post("Новина\n\n→ Про Бізнесㅤ", footers)
+    assert not digest_builder._is_unsigned_own_post("[Photo] → Про Бізнес", footers)
+    # a forward is signed by its origin; a textless album part says nothing
+    assert not digest_builder._is_unsigned_own_post("[Forwarded from Бенефіціар] Долар вище 45 грн", footers)
+    assert not digest_builder._is_unsigned_own_post("[Media]", footers)
+    # a channel with no signature has no unsigned posts
+    assert not digest_builder._is_unsigned_own_post("Будь-який текст", set())
+    # a "signature" of padding alone signs nothing
+    assert digest_builder._is_unsigned_own_post("Реклама\n✅ Менеджер 24/7", {"ㅤ", "→ Про Бізнес"})
+    assert not digest_builder._is_unsigned_own_post("Реклама", {"ㅤ"})
+
+
+@pytest.mark.asyncio
+async def test_no_filter_source_has_only_its_unsigned_posts_judged_as_ads(monkeypatch):
+    """ПроБізнес bypasses the filter; its 7 unsigned own posts in 30 days were all paid ads.
+    Only those reach the model, with the one unsigned-ad rule; the rest stays unfiltered."""
+    from src.processor.llm.prompts import UNSIGNED_AD_RULE, UNSIGNED_TAG
+    calls: list = []
+
+    async def fake_recent(source_id, limit=100):
+        return [f"Новина {i}\n\n→ Про Бізнес" for i in range(10)]
+
+    async def fake_check(check_input, rules, rule_scopes):
+        calls.append(([c["id"] for c in check_input], rules, [c["text"] for c in check_input]))
+        return {c["id"]: rules[0] for c in check_input}
+
+    async def fake_mark_blocked(pairs):
+        calls.append(("marked", pairs))
+
+    async def no_rules():
+        return []
+
+    monkeypatch.setattr(digest_builder, "get_recent_raw_texts", fake_recent)
+    monkeypatch.setattr(digest_builder, "check_blocked_filters", fake_check)
+    monkeypatch.setattr(digest_builder, "mark_blocked", fake_mark_blocked)
+    monkeypatch.setattr(digest_builder, "get_blocked_words", no_rules)
+    no_filter = "No filter — bypass the blocklist for this source."
+    items = [
+        {"id": 1, "source_id": 66, "summary": "ПУМБ пропонує зарплатний проєкт", "category": "finance",
+         "raw_text": "ПУМБ – вигідний зарплатний проєкт\n✅ Менеджер 24/7", "source_name": "ПроБізнес",
+         "source_prompt_extra": no_filter},
+        {"id": 2, "source_id": 66, "summary": "Новина", "category": "finance",
+         "raw_text": "Аеропорт закрили\n\n→ Про Бізнес", "source_name": "ПроБізнес", "source_prompt_extra": no_filter},
+        {"id": 3, "source_id": 5, "summary": "Чужа реклама", "category": "finance",
+         "raw_text": "Купуйте зараз", "source_name": "Інший", "source_prompt_extra": None},
+    ]
+    kept, blocked = await digest_builder._apply_semantic_filter(items)
+
+    ids, rules, texts = calls[0]
+    assert ids == [1] and rules == [UNSIGNED_AD_RULE] and texts[0].startswith(UNSIGNED_TAG)
+    assert calls[1] == ("marked", [(1, UNSIGNED_AD_RULE)])
+    assert [b["id"] for b in blocked] == [1] and blocked[0]["blocked_by"] == UNSIGNED_AD_RULE
+    assert [k["id"] for k in kept] == [2, 3]
+    assert digest_builder._filter_title(UNSIGNED_AD_RULE) == "реклама без звичного підпису каналу…"
+
+
+@pytest.mark.asyncio
+async def test_unsigned_ad_check_fails_open(monkeypatch):
+    async def fake_recent(source_id, limit=100):
+        return [f"Новина {i}\n\n→ Про Бізнес" for i in range(10)]
+
+    async def broken_check(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(digest_builder, "get_recent_raw_texts", fake_recent)
+    monkeypatch.setattr(digest_builder, "check_blocked_filters", broken_check)
+    items = [{"id": 1, "source_id": 66, "summary": "x", "category": "finance", "raw_text": "Реклама без підпису",
+              "source_name": "ПроБізнес", "source_prompt_extra": "No filter"}]
+    kept, blocked = await digest_builder._filter_unsigned_ads(items)
+    assert kept == items and blocked == []
+
+
+@pytest.mark.asyncio
+async def test_unsigned_ad_check_fails_open_on_a_db_error(monkeypatch):
+    async def busy(*a, **k):
+        raise RuntimeError("database is locked")
+
+    async def fake_recent(source_id, limit=100):
+        return [f"Новина {i}\n\n→ Про Бізнес" for i in range(10)]
+
+    async def block_all(check_input, rules, rule_scopes):
+        return {c["id"]: rules[0] for c in check_input}
+
+    items = [{"id": 1, "source_id": 66, "summary": "x", "category": "finance", "raw_text": "Реклама без підпису",
+              "source_name": "ПроБізнес", "source_prompt_extra": "No filter"}]
+    monkeypatch.setattr(digest_builder, "get_recent_raw_texts", busy)
+    assert await digest_builder._filter_unsigned_ads(items) == (items, [])
+    monkeypatch.setattr(digest_builder, "get_recent_raw_texts", fake_recent)
+    monkeypatch.setattr(digest_builder, "check_blocked_filters", block_all)
+    monkeypatch.setattr(digest_builder, "mark_blocked", busy)
+    assert await digest_builder._filter_unsigned_ads(items) == (items, [])

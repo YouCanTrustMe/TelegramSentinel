@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import src.collectors.telegram_collector as tc
-from src.common.media import GENERIC_MEDIA_TOKEN, NO_TEXT
+from src.common.media import GENERIC_MEDIA_TOKEN, MEDIA_LABEL, NO_TEXT, is_media_placeholder
 
 CHAT = "-1002568789348"
 SOURCE = {"id": 20, "category": "hrvatska"}
@@ -50,6 +50,21 @@ def captured(monkeypatch):
     monkeypatch.setattr(tc, "is_duplicate", fake_is_duplicate)
     monkeypatch.setattr(tc, "save_item", fake_save_item)
     return saved
+
+
+async def test_giveaway_post_is_stored_under_its_own_token(captured):
+    # Лачен's giveaways (2026-10-12/17) reached the digest as a bare "📦 Media" while
+    # the library named the type all along.
+    kept = await tc._process_message(CHAT, SOURCE, _msg(media=SimpleNamespace(name="GIVEAWAY")))
+    assert kept is True
+    assert captured["raw_text"] == "[Giveaway]" and captured["summary"] == "[Giveaway]"
+    assert MEDIA_LABEL["[Giveaway]"] == "🎁 Giveaway"
+    assert is_media_placeholder("[Giveaway]")
+
+
+async def test_unknown_media_kind_still_falls_back_to_the_generic_chip(captured):
+    await tc._process_message(CHAT, SOURCE, _msg(media=SimpleNamespace(name="SOMETHING_NEW")))
+    assert captured["raw_text"] == GENERIC_MEDIA_TOKEN and captured["summary"] == NO_TEXT
 
 
 async def test_unsupported_media_post_kept_as_placeholder(captured):

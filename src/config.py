@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     # Older posts are never shown: a new source's history (01portal: 82 of 100 entries
     # older than two days, WSJ back a month) or a catch-up after downtime.
     max_item_age_hours: int = 48
+    # Feeds whose entries carry a headline only: the collector reads the article's own
+    # description or first paragraphs instead. hnrss.org gave "<title>. Article URL: …
+    # Points: 506" — the summary had nothing to work from but the title.
+    rss_article_lead_hosts: list[str] = ["hnrss.org"]
+    # Feeds that cut the article to a ~200-char teaser while the page serves it in plain
+    # paragraphs: the first few are read instead (Croatia Week: 190 chars in the feed,
+    # ~2000 on the page, and its page description repeats the teaser). Most feeds gain
+    # nothing — WSJ 401, CoinTelegraph's page leads with a price ticker, Index.hr/The
+    # Block/CNBC/Ars build theirs in scripts (checked 2026-10-18).
+    rss_article_body_hosts: list[str] = ["croatiaweek.com"]
     # Union floor: any cross-source pair at/above this cosine becomes an LLM-confirmed
     # candidate. Below it pairs are never even considered. On mistral-embed 0.86 catches
     # 88% of true duplicates at ~41 candidate pairs per digest — the same candidate

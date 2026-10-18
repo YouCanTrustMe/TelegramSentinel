@@ -13,7 +13,7 @@ from pyrogram.types import Message
 from src.config import settings
 from src.db.models import find_sources_by_chat_id, get_active_sources, increment_source_fail_count, reset_source_fail_count, save_item, set_source_chat_id, set_source_last_message_id, update_source_status, update_source_url
 from src.dispatcher.admin_alert import admin_alert
-from src.common.media import GENERIC_MEDIA_TOKEN, MEDIA_TOKENS, MEDIA_TYPES, NO_TEXT
+from src.common.media import GENERIC_MEDIA_TOKEN, MEDIA_KIND_TOKEN, MEDIA_TOKENS, MEDIA_TYPES, NO_TEXT
 from src.processor.dedup.deduplicator import is_duplicate, make_message_id
 from src.common.util import plain_text, row_get
 
@@ -212,8 +212,9 @@ def _read_message(message: Message) -> tuple[str, bool] | None:
                 media_prefix = token + " "
                 break
         else:
-            if getattr(message, "media", None) and not message.web_page:
-                media_prefix = GENERIC_MEDIA_TOKEN + " "
+            media = getattr(message, "media", None)
+            if media and not message.web_page:
+                media_prefix = MEDIA_KIND_TOKEN.get(getattr(media, "name", ""), GENERIC_MEDIA_TOKEN) + " "
 
         raw_text = (media_prefix + caption).strip()
         if not raw_text or raw_text in MEDIA_TOKENS:

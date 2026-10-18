@@ -1,5 +1,7 @@
 """Classifier pure helpers: Ukrainian detection, prompt-extra keyword switches,
 media-prefix stripping and the truncation marker."""
+import pytest
+
 import src.db.models as models
 import src.processor.llm.classifier as classifier
 import src.processor.dedup.cross_dedup as cross_dedup
@@ -78,7 +80,7 @@ async def test_classify_pending_embeds_freshly_classified(monkeypatch):
     async def fake_update(item_id, summary, key_phrase):
         pass
 
-    async def fake_classify_batch(payload):
+    async def fake_classify_batch(payload, task="batch"):
         return {row["id"]: ClassificationResult(summary=f"summary {row['id']}") for row in payload}
 
     async def fake_ensure_embeddings(passed):
@@ -553,7 +555,7 @@ async def test_a_short_ukrainian_post_is_shown_as_written_without_its_signature(
     async def fake_store(item_id, summary, key_phrase):
         stored[item_id] = summary
 
-    async def fake_batch(payload):
+    async def fake_batch(payload, task="batch"):
         sent_to_model.extend(row["id"] for row in payload)
         return {row["id"]: ClassificationResult(summary="переклад") for row in payload}
 
@@ -572,6 +574,68 @@ async def test_a_short_ukrainian_post_is_shown_as_written_without_its_signature(
     assert sent_to_model == [2] and stored[2] == "переклад"
 
 
+async def test_each_summary_call_is_stored_before_the_next_one(monkeypatch):
+    long_text = "Germany's chancellor arrived in Kyiv for talks on air defence and the reconstruction fund."
+    items = [{"id": i, "source_id": 5, "summary": "", "raw_text": f"{long_text} {i}"} for i in range(1, 8)]
+    stored = {}
+
+    async def fake_unsent(*a, **k):
+        return items
+
+    async def no_history(source_id, limit=100):
+        return []
+
+    async def fake_store(item_id, summary, key_phrase):
+        stored[item_id] = summary
+
+    async def fake_batch(payload, task="batch"):
+        if payload[0]["id"] > 3:
+            raise RuntimeError("pass cancelled")
+        return {row["id"]: ClassificationResult(summary="переклад") for row in payload}
+
+    monkeypatch.setattr(models, "get_unsent_items", fake_unsent)
+    monkeypatch.setattr(models, "get_recent_raw_texts", no_history)
+    monkeypatch.setattr(models, "update_item_classification", fake_store)
+    monkeypatch.setattr(classifier, "classify_batch", fake_batch)
+    monkeypatch.setattr(classifier, "is_task_dead", lambda *_: False)
+
+    with pytest.raises(RuntimeError):
+        await classifier._classify_pending_items(limit=10)
+    assert sorted(stored) == [1, 2, 3]
+
+
+async def test_a_ukrainian_source_shows_a_short_post_without_ukrainian_letters_as_written(monkeypatch):
+    """2026-10-18: "🛸25 км до Староконстянтинова" has no і/ї/є/ґ, so it went to the model
+    and came back as "Україна запустила ракету". A source whose posts read Ukrainian shows
+    it as written; the same text from a source with no such history still goes to the model."""
+    footer = "\n\n➕ Підписатись на LIVE\n📸 Надіслати новину"
+    ua_history = [f"Новина {i}: у Хмельницькому відкрили нову школу, працюють усі класи{footer}"
+                  for i in range(12)]
+    histories = {6: ua_history, 7: []}
+
+    async def fake_history(source_id, limit=100):
+        return histories[source_id]
+
+    monkeypatch.setattr(models, "get_recent_raw_texts", fake_history)
+    rows = [
+        {"id": 1, "source_id": 6, "raw_text": "🛸25 км до Староконстянтинова" + footer},
+        {"id": 2, "source_id": 6, "raw_text": "Объявлена тревога в городе" + footer},
+        {"id": 3, "source_id": 6, "raw_text": "Drone 25 km from the city" + footer},
+        {"id": 4, "source_id": 7, "raw_text": "🛸25 км до Староконстянтинова"},
+    ]
+    short, long_items = await classifier.split_for_summary(rows)
+
+    assert [(item["id"], text) for item, text in short] == [(1, "🛸25 км до Староконстянтинова")]
+    assert [item["id"] for item, _ in long_items] == [2, 3, 4]
+
+
+def test_a_source_with_a_signature_only_in_ukrainian_is_not_a_ukrainian_source():
+    texts = ["Путин прилетел в Пекин на саммит, переговоры продлятся два дня"] * 12
+    assert not classifier._source_writes_ukrainian(texts)
+    assert not classifier._source_writes_ukrainian(["Нова школа відкрилась у Хмельницькому сьогодні вранці"] * 9)
+    assert classifier._source_writes_ukrainian(["Нова школа відкрилась у Хмельницькому сьогодні вранці"] * 10)
+
+
 def test_a_russian_post_is_not_taken_for_ukrainian():
     """Short posts that look Ukrainian are shown as written, so Russian must not pass."""
     assert not _looks_ukrainian("Путин заявил, что переговоры с Киевом пока невозможны")
@@ -580,3 +644,39 @@ def test_a_russian_post_is_not_taken_for_ukrainian():
     # Shown as written only with a letter only Ukrainian has.
     assert not classifier._reads_ukrainian("Путин прилетел в Пекин на саммит ШОС")
     assert classifier._reads_ukrainian("Працює ППО") and classifier._reads_ukrainian("😁")
+
+
+async def test_background_summaries_go_three_posts_per_call(monkeypatch):
+    """The pre-digest pass runs with limit=999; it must still send the benched 3 posts per
+    call (flash-lite distorted facts at 10 and 25)."""
+    long_text = "Реальна новина про важливу подію " * 4
+    items = [{"id": i, "source_id": 5, "summary": "", "raw_text": long_text} for i in range(1, 8)]
+    sizes: list[int] = []
+
+    async def fake_get_unsent_items(*a, **k):
+        return items
+
+    async def no_history(*a, **k):
+        return []
+
+    async def fake_update(item_id, summary, key_phrase):
+        pass
+
+    async def fake_classify_batch(payload, task="batch"):
+        assert task == "summary"
+        sizes.append(len(payload))
+        return {row["id"]: ClassificationResult(summary=f"summary {row['id']}") for row in payload}
+
+    async def no_embed(passed):
+        return {}
+
+    monkeypatch.setattr(models, "get_recent_raw_texts", no_history)
+    monkeypatch.setattr(models, "get_unsent_items", fake_get_unsent_items)
+    monkeypatch.setattr(models, "update_item_classification", fake_update)
+    monkeypatch.setattr(classifier, "classify_batch", fake_classify_batch)
+    monkeypatch.setattr(classifier, "is_task_dead", lambda *_: False)
+    monkeypatch.setattr(cross_dedup, "ensure_embeddings", no_embed)
+
+    await classify_pending_items(limit=999)
+
+    assert sizes == [3, 3, 1]

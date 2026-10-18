@@ -14,12 +14,15 @@ from src.processor.llm.prompts import (
     _WAR_SYSTEM_PROMPT,
     _PAIR_JUDGE_PROMPT,
 )
+from src.common.media import MEDIA_KINDS
 from src.common.util import clean_invisible, detect_footers, needs_summary, row_get, strip_footers
 from src.processor.llm.fact_check import unsupported_facts
 
 log = logging.getLogger(__name__)
 
-_MEDIA_PREFIX_RE = re.compile(r"^\[(?:Photo|Video|Video note|Audio|Voice|Doc|Document|Sticker|GIF|Animation|Media)\]\s*", re.IGNORECASE)
+_MEDIA_PREFIX_RE = re.compile(
+    r"^(?:\[(?:Photo|Video|Video note|Audio|Voice|Doc|Document|Sticker|GIF|Animation|Media)\]|"
+    + "|".join(re.escape(token) for _kind, token, _emoji, _name in MEDIA_KINDS) + r")\s*", re.IGNORECASE)
 # A Ukrainian post shorter than this is shown as written. Over 14 days of 60-79 char
 # posts the model distorted 7 of 62 (Merz became Scholz, a vibe-coded project "raised
 # $1M") and only reworded the rest; a non-Ukrainian post always goes to the model,

@@ -49,6 +49,8 @@ def test_strip_media_prefix():
     assert _strip_media_prefix("[Photo] hello world") == "hello world"
     assert _strip_media_prefix("[Video] clip") == "clip"
     assert _strip_media_prefix("plain text") == "plain text"
+    assert _strip_media_prefix("[Paid media] Відео з фронту") == "Відео з фронту"
+    assert _strip_media_prefix("[Giveaway results] переможці") == "переможці"
 
 
 def test_mark_big_appends_only_when_truncated():

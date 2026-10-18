@@ -3,9 +3,11 @@ import html
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import feedparser
 
+from src.collectors.article_lead import fetch_article_body, fetch_article_lead
 from src.config import settings
 from src.db.models import (
     get_active_sources,
@@ -58,6 +60,11 @@ def _compose_raw_text(title: str, body: str) -> str:
     if body.lower() in title.lower():
         return title  # title already contains the body → it is the superset
     return f"{title}. {body}"
+
+def _host_listed(feed_url: str, hosts: list[str]) -> bool:
+    host = urlparse(feed_url).netloc.lower()
+    return any(host == h or host.endswith("." + h) for h in hosts)
+
 
 POLL_INTERVAL = 900
 _BOOTSTRAP_LIMIT = 10
@@ -200,6 +207,16 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
             await _save_retired(source_id, message_id, raw_text, entry_url, published_at, category)
             continue
         fresh += 1
+
+        if _host_listed(url, settings.rss_article_lead_hosts):
+            lead = await fetch_article_lead(entry_url)
+            # The feed's own body is hnrss's link/points boilerplate: drop it either way.
+            raw_text = _compose_raw_text(_strip_html(entry.get("title", "")), lead) or raw_text
+        elif _host_listed(url, settings.rss_article_body_hosts):
+            # The opening paragraphs contain the teaser, so they replace it; no page, keep it.
+            body = await fetch_article_body(entry_url)
+            if body:
+                raw_text = _compose_raw_text(_strip_html(entry.get("title", "")), body)
 
         if len(raw_text.strip()) < 15:
             summary = raw_text.strip()

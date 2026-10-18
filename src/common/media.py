@@ -15,12 +15,32 @@ MEDIA_TYPES: list[tuple[str, str, str]] = [
     ("voice", "[Voice]", "🎤"),
 ]
 
-# Media Pyrogram reports but we don't recognise specifically yet (dice, location…).
+# Media with no attribute of its own above, told apart by Message.media (a
+# MessageMediaType name). Before these, a giveaway and its results reached the digest
+# as a bare "📦 Media" (a news channel, 2026-10-12/17).
+MEDIA_KINDS: list[tuple[str, str, str, str]] = [
+    # (MessageMediaType name, token, digest emoji, digest word)
+    ("GIVEAWAY", "[Giveaway]", "🎁", "Giveaway"),
+    ("GIVEAWAY_WINNERS", "[Giveaway results]", "🎁", "Giveaway results"),
+    ("STORY", "[Story]", "📖", "Story"),
+    ("LOCATION", "[Location]", "📍", "Location"),
+    ("VENUE", "[Venue]", "📍", "Place"),
+    ("CONTACT", "[Contact]", "👤", "Contact"),
+    ("CHECKLIST", "[Checklist]", "☑️", "Checklist"),
+    ("PAID_MEDIA", "[Paid media]", "⭐", "Paid media"),
+    ("DICE", "[Dice]", "🎲", "Dice"),
+    ("GAME", "[Game]", "🎮", "Game"),
+    ("INVOICE", "[Invoice]", "🧾", "Invoice"),
+]
+MEDIA_KIND_TOKEN: dict[str, str] = {kind: token for kind, token, _, _ in MEDIA_KINDS}
+
+# Media we cannot name (an undecodable post, or a type missing from both tables).
 GENERIC_MEDIA_TOKEN = "[Media]"
 # Marker value stored for a generic-media post; never shown literally (renders 📦).
 NO_TEXT = "no text"
 
 MEDIA_EMOJI: dict[str, str] = {token: emoji for _, token, emoji in MEDIA_TYPES}
+MEDIA_EMOJI.update({token: emoji for _, token, emoji, _ in MEDIA_KINDS})
 MEDIA_EMOJI[NO_TEXT] = "📦"
 MEDIA_EMOJI[GENERIC_MEDIA_TOKEN] = "📦"
 
@@ -37,6 +57,7 @@ _MEDIA_WORD: dict[str, str] = {
     "[Voice]": "Voice",
     GENERIC_MEDIA_TOKEN: "Media",
     NO_TEXT: "Media",
+    **{token: word for _, token, _, word in MEDIA_KINDS},
 }
 
 MEDIA_LABEL: dict[str, str] = {
@@ -44,7 +65,9 @@ MEDIA_LABEL: dict[str, str] = {
 }
 
 # Bare tokens that, with no caption, mean a media-only post.
-MEDIA_TOKENS: set[str] = {token for _, token, _ in MEDIA_TYPES} | {GENERIC_MEDIA_TOKEN}
+MEDIA_TOKENS: set[str] = (
+    {token for _, token, _ in MEDIA_TYPES} | set(MEDIA_KIND_TOKEN.values()) | {GENERIC_MEDIA_TOKEN}
+)
 
 
 def is_media_placeholder(summary: str | None) -> bool:

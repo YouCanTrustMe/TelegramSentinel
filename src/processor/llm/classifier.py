@@ -8,12 +8,14 @@ from src.processor.llm.llm_client import llm_json, is_task_dead
 from src.processor.llm.prompts import (
     _BATCH_SYSTEM_PROMPT,
     _MULTI_SYSTEM_PROMPT,
+    _STRICT_SYSTEM_PROMPT,
     _TRANSLATE_ONLY_PROMPT,
     _FILTER_SYSTEM_PROMPT,
     _WAR_SYSTEM_PROMPT,
     _PAIR_JUDGE_PROMPT,
 )
 from src.common.util import detect_footers, needs_summary, row_get, strip_footers
+from src.processor.llm.fact_check import unsupported_facts
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +30,13 @@ _TRIVIAL_MAX_LEN = 80
 # truncated, so their summary covers just the beginning.
 _BATCH_INPUT_CAP = 700
 _BIG_NEWS_MARK = "…"
-_CLASSIFY_CHUNK = 25
+# Posts per background summary call. Benched 2026-10-18 on flash-lite with the strict
+# prompt (60 posts, 2 runs each): every size answered 60/60, but at 10 and 25 summaries
+# lost details and gained distortions that recur run to run («Ковель та Рівне зазнали
+# влучань», «більшість переїхала до Німеччини») which 3 per call did not make.
+_SUMMARY_CHUNK = 3
+# A fact-check rewrite that has not come back by then keeps the first summary.
+_RECHECK_TIMEOUT = 30.0
 
 
 def _strip_media_prefix(text: str) -> str:
@@ -70,11 +78,47 @@ class ClassificationResult:
     key_phrase: str = field(default="")
 
 
-async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
+async def _recheck(rid: int, text: str, summary: str, key_phrase: str, unsupported: list[str],
+                   task: str = "recheck") -> tuple[str, str]:
+    """A summary carrying a number or name its post does not is written once more, alone,
+    with the strict prompt; the rewrite is kept only if it brings in fewer such facts.
+    The digest's re-classify rewrites on its own chain: flash-lite fails under a burst."""
+    data = await llm_json(
+        messages=[
+            {"role": "system", "content": _STRICT_SYSTEM_PROMPT},
+            {"role": "user", "content": f"{rid}: {text}"},
+        ],
+        max_retries=2,
+        task=task,
+    )
+    row = next((r for r in _rows(data, "items") if str(r.get("id")) == str(rid)), {})
+    new_summary, new_key = await _ensure_ukrainian(_as_text(row.get("summary")), _as_text(row.get("key_phrase")))
+    still = unsupported_facts(new_summary, text) if new_summary else unsupported
+    if new_summary and len(still) < len(unsupported):
+        log.info("Fact check: item id=%d rewritten | unsupported=%s | was=%s | now=%s", rid, unsupported, summary, new_summary)
+        return new_summary, new_key
+    log.info("Fact check: item id=%d kept | unsupported=%s | summary=%s | rewrite=%s | rewrite unsupported=%s",
+             rid, unsupported, summary, new_summary or "-", still)
+    return summary, key_phrase
+
+
+async def _bounded_recheck(rid: int, text: str, summary: str, key_phrase: str, unsupported: list[str],
+                           task: str) -> tuple[str, str]:
+    try:
+        return await asyncio.wait_for(_recheck(rid, text, summary, key_phrase, unsupported, task), _RECHECK_TIMEOUT)
+    except asyncio.TimeoutError:
+        log.info("Fact check: item id=%d kept, rewrite timed out after %.0fs | unsupported=%s | summary=%s",
+                 rid, _RECHECK_TIMEOUT, unsupported, summary)
+        return summary, key_phrase
+
+
+async def classify_batch(items: list[dict], task: str = "batch") -> dict[int, ClassificationResult]:
     """
     items: list of {"id": int, "text": str}
     Returns: {id: ClassificationResult} for items the model returned.
     Missing ids are left for the caller to fall back on.
+    task "batch" is the digest-time path on the old prompt; "summary" is the background
+    pass, on its own model chain and the strict prompt.
     """
     if not items:
         return {}
@@ -82,19 +126,34 @@ async def classify_batch(items: list[dict]) -> dict[int, ClassificationResult]:
     numbered = "\n".join(f"{item['id']}: {item['text'][:_BATCH_INPUT_CAP]}" for item in items)
     data = await llm_json(
         messages=[
-            {"role": "system", "content": _MULTI_SYSTEM_PROMPT},
+            {"role": "system", "content": _MULTI_SYSTEM_PROMPT if task == "batch" else _STRICT_SYSTEM_PROMPT},
             {"role": "user", "content": numbered},
         ],
         max_retries=3,
-        task="batch",
+        task=task,
     )
-    out: dict[int, ClassificationResult] = {}
+    written: dict[int, tuple[str, str]] = {}
+    flagged: list[tuple[int, list[str]]] = []
     for row in _rows(data, "items"):
         try:
             rid = int(row["id"])
         except (KeyError, TypeError, ValueError):
             continue
         summary, key_phrase = await _ensure_ukrainian(_as_text(row.get("summary")), _as_text(row.get("key_phrase")))
+        written[rid] = (summary, key_phrase)
+        unsupported = unsupported_facts(summary, text_by_id[rid][:_BATCH_INPUT_CAP]) if summary and rid in text_by_id else []
+        if unsupported:
+            flagged.append((rid, unsupported))
+    if flagged:
+        # Side by side and bounded: the digest's re-classify waits on this whole call, and a
+        # timeout there would throw away every summary of the chunk, not just the flagged ones.
+        recheck_task = "recheck" if task == "summary" else task
+        rewrites = await asyncio.gather(*(
+            _bounded_recheck(rid, text_by_id[rid][:_BATCH_INPUT_CAP], *written[rid], unsupported, recheck_task)
+            for rid, unsupported in flagged))
+        written.update(zip((rid for rid, _ in flagged), rewrites))
+    out: dict[int, ClassificationResult] = {}
+    for rid, (summary, key_phrase) in written.items():
         out[rid] = ClassificationResult(
             summary=_mark_big(summary, text_by_id.get(rid, ""), _BATCH_INPUT_CAP),
             key_phrase=key_phrase,
@@ -155,6 +214,24 @@ def _reads_ukrainian(text: str) -> bool:
     if sum(1 for c in text if c.isalpha()) < 4:
         return True
     return _looks_ukrainian(text) and bool(_UKRAINIAN_ONLY & set(text.lower()))
+
+
+# A source writes Ukrainian when nearly all of its recent posts with enough letters to
+# judge read Ukrainian. Then a short post of its is shown as written even with none of the
+# Ukrainian-only letters: a realtime "drone 25 km from <town>" alert went to the model and
+# came back as "Ukraine launched a rocket" (66 such posts in 10 days, 56 from one regional
+# channel, ~32 shown invented).
+# Every Ukrainian source on prod scores 0.98-1.00, every other one 0.
+_SOURCE_UA_SAMPLE_LETTERS = 40
+_SOURCE_UA_MIN_POSTS = 10
+_SOURCE_UA_SHARE = 0.9
+
+
+def _source_writes_ukrainian(texts: list[str]) -> bool:
+    sample = [t for t in texts if sum(1 for c in t if c.isalpha()) >= _SOURCE_UA_SAMPLE_LETTERS]
+    if len(sample) < _SOURCE_UA_MIN_POSTS:
+        return False
+    return sum(_reads_ukrainian(t) for t in sample) / len(sample) >= _SOURCE_UA_SHARE
 
 
 async def _ensure_ukrainian(summary: str, key_phrase: str) -> tuple[str, str]:
@@ -271,6 +348,13 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
         key_phrase = _as_text(g.get("key_phrase"))
         if translate:
             summary, key_phrase = await _ensure_ukrainian(summary, key_phrase)
+        if len(ids) > 1 and summary:
+            # Logged only, to see in the post-deploy check whether merged lines invent
+            # as single ones do before anything rewrites them.
+            seen = "\n".join(text_by_id.get(i, "")[:_BATCH_INPUT_CAP] for i in ids)
+            unsupported = unsupported_facts(summary, seen)
+            if unsupported:
+                log.info("Fact check: merged ids=%s | unsupported=%s | summary=%s", ids, unsupported, summary)
         if any(len(text_by_id.get(i, "")) > _BATCH_INPUT_CAP for i in ids):
             summary = _mark_big(summary, "x" * (_BATCH_INPUT_CAP + 1), _BATCH_INPUT_CAP)
         result.append({
@@ -333,18 +417,25 @@ async def split_for_summary(rows: list, label: str = "Background classify") -> t
     from src.db.models import get_recent_raw_texts
 
     footers_by_source: dict[int, set[str]] = {}
+    ukrainian_sources: set[int] = set()
     short, long_items = [], []
     stripped = 0
     for item in rows:
         source_id = item["source_id"]
         if source_id not in footers_by_source:
-            footers_by_source[source_id] = detect_footers(await get_recent_raw_texts(source_id))
+            recent = await get_recent_raw_texts(source_id)
+            footers = footers_by_source[source_id] = detect_footers(recent)
+            # Judged without the signature: a Ukrainian "subscribe" line alone would pass.
+            if _source_writes_ukrainian([strip_footers(t, footers) for t in recent]):
+                ukrainian_sources.add(source_id)
         full = (item["raw_text"] or "").strip()
         raw = strip_footers(full, footers_by_source[source_id]) or full
         stripped += raw != full
         text = _strip_media_prefix(raw)
+        reads_ukrainian = (_looks_ukrainian(text) if source_id in ukrainian_sources
+                           else _reads_ukrainian(text))
         trivial = len(text) < _TRIVIAL_MAX_LEN and (
-            _reads_ukrainian(text) or _wants_no_translate(row_get(item, "source_prompt_extra")))
+            reads_ukrainian or _wants_no_translate(row_get(item, "source_prompt_extra")))
         (short if trivial else long_items).append((item, raw))
     if stripped:
         log.info("%s: channel signature cut from %d of %d item(s) | %s", label, stripped, len(rows),
@@ -367,9 +458,17 @@ async def _classify_pending_items(limit: int) -> None:
     classified: list[tuple[int, str]] = []
 
     async def _classify_store(batch: list, label: str) -> int:
-        results = await classify_batch([{"id": item["id"], "text": raw} for item, raw in batch])
         done = 0
-        for item, raw in batch:
+        for i in range(0, len(batch), _SUMMARY_CHUNK):
+            done += await _store_chunk(batch[i:i + _SUMMARY_CHUNK], label)
+        return done
+
+    async def _store_chunk(chunk: list, label: str) -> int:
+        # Stored per call: a long pass that is cancelled or crashes keeps what it wrote,
+        # and the digest waiting on the classify lock finds it.
+        results = await classify_batch([{"id": item["id"], "text": raw} for item, raw in chunk], task="summary")
+        done = 0
+        for item, raw in chunk:
             result = results.get(item["id"])
             if result and result.summary:
                 await update_item_classification(item["id"], result.summary, result.key_phrase)
@@ -401,10 +500,8 @@ async def _classify_pending_items(limit: int) -> None:
             log.info("Background classify: batch model and fallback both quota dead, skipping %d long items", len(long_items))
     elif long_items:
         batch = long_items[:limit]
-        total_classified = 0
-        for i in range(0, len(batch), _CLASSIFY_CHUNK):
-            total_classified += await _classify_store(batch[i:i + _CLASSIFY_CHUNK], "Background classify")
-        log.info("Background classify done: %d/%d classified (%d chunk(s))", total_classified, len(batch), -(-len(batch) // _CLASSIFY_CHUNK))
+        total_classified = await _classify_store(batch, "Background classify")
+        log.info("Background classify done: %d/%d classified (%d chunk(s))", total_classified, len(batch), -(-len(batch) // _SUMMARY_CHUNK))
         # leave backfill for a run when the live queue is clear
     else:
         # Live queue empty + quota alive → backfill already-sent items still empty

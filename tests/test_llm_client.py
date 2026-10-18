@@ -47,8 +47,12 @@ def test_wrapped_array_survives_the_stray_quote_repair():
 
 
 def test_list_root_key_covers_every_list_returning_task():
-    assert llm_client._LIST_ROOT_KEY == {"batch": "items", "group": "groups",
-                                         "filter": "blocked", "war": "war", "pair": "pairs"}
+    assert llm_client._LIST_ROOT_KEY == {"batch": "items", "summary": "items", "recheck": "items",
+                                         "group": "groups", "filter": "blocked", "war": "war", "pair": "pairs"}
+
+
+def test_every_summary_writer_is_deterministic():
+    assert {"batch", "summary", "recheck"} <= llm_client._DETERMINISTIC_TASKS
 
 
 def test_repairs_real_unescaped_inner_quotes():
@@ -760,3 +764,49 @@ def test_a_slow_drip_of_429s_is_not_a_withdrawal(monkeypatch):
         clock[0] += 50 * 60          # under the staleness cut, over the max span
 
     assert verdicts == [False] * len(verdicts)
+
+
+def test_5xx_failover_to_a_live_model_is_not_admin_alerting(monkeypatch, caplog):
+    """flash-lite heads the summary chain at 50-70 calls a day; a Google 503 there is
+    answered by the next model, so it must not log at WARNING (forwarded to the admin)."""
+    import asyncio
+    import logging
+    llm_client._quota_dead_until.clear()
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_5xx", [("groq", "m1"), ("groq", "m2")])
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        return (None, 503, {}, "") if model == "m1" else ({"ok": 6}, 200, {}, "")
+    async def no_sleep(_):
+        pass
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    monkeypatch.setattr(llm_client.asyncio, "sleep", no_sleep)
+    with caplog.at_level(logging.INFO, logger="src.processor.llm.llm_client"):
+        out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_5xx"))
+    assert out == {"ok": 6}
+    assert [r.message for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert any("status=503" in r.message for r in caplog.records)
+
+
+def test_failover_level_warns_only_on_the_last_live_model(monkeypatch):
+    import logging
+    llm_client._quota_dead_until.clear()
+    chain = [("groq", "m1"), ("groq", "m2"), ("groq", "m3")]
+    assert llm_client._failover_level(chain, 0) == logging.INFO
+    assert llm_client._failover_level(chain, 2) == logging.WARNING
+    llm_client._quota_dead_until["groq/m3"] = llm_client.time.monotonic() + 600
+    assert llm_client._failover_level(chain, 1) == logging.WARNING  # only a dead model ahead
+    llm_client._quota_dead_until.clear()
+
+
+def test_call_error_on_the_last_model_still_warns(monkeypatch, caplog):
+    """When nothing is left to answer, the caller falls back — that degrades, so it warns."""
+    import asyncio
+    import logging
+    llm_client._quota_dead_until.clear()
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_err", [("groq", "m1")])
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        raise TimeoutError("read timed out")
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    with caplog.at_level(logging.INFO, logger="src.processor.llm.llm_client"):
+        out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_err"))
+    assert out == {}
+    assert any("LLM call error" in r.message for r in caplog.records if r.levelno == logging.WARNING)

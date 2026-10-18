@@ -60,8 +60,16 @@ TASK_ROUTING: dict[str, list[tuple[str, str]]] = {
     # gemini-3.5-flash (2x the latency of 3.1-flash-lite for the same recall),
     # groq gpt-oss-20b and qwen3.6-27b (5/5 bad calls, 400 + 429).
     "classify":  [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
-    # id-array batch summarise (no merge)
+    # id-array batch summarise (no merge) at digest time, under the digest's burst
     "batch":     [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    # The background summary pass: 1-3 posts per call, 50-70 calls a day, never a burst.
+    # gemini-3.1-flash-lite heads it (benched 2026-10-18 on 60 real posts: 0 invented facts
+    # with the strict prompt vs ministral's 7) — it answered 0 times in 8 of 11 digests where
+    # it was tried, but those were bursts; out of one it answered 80 of 80 bench calls.
+    # Any failure falls to ministral, i.e. to what every summary was before.
+    "summary":   [("gemini", "gemini-3.1-flash-lite"), ("mistral", "ministral-14b-latest"), ("groq", "openai/gpt-oss-120b")],
+    # Re-writes one summary the fact check flagged, on a model other than the usual writer.
+    "recheck":   [("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b"), ("mistral", "ministral-14b-latest")],
     # id-array grouping + within-source merge
     "group":     [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
     # content filter (rate 1-10)
@@ -109,7 +117,7 @@ _BILLING_DOWN_SECONDS = 86400.0
 # id-array / structured tasks must be deterministic: any sampling raises the chance
 # of a dropped or hallucinated id and broken JSON (the source of "N item(s) missing"
 # warnings). Free-text summary tasks (classify, translate) keep a little sampling.
-_DETERMINISTIC_TASKS = frozenset({"batch", "group", "filter", "translate", "war", "pair"})
+_DETERMINISTIC_TASKS = frozenset({"batch", "summary", "recheck", "group", "filter", "translate", "war", "pair"})
 
 
 # ---- JSON repair (provider-agnostic) ----
@@ -151,7 +159,8 @@ def _escape_stray_quotes(text: str) -> str:
 # The root key each list-returning task reads its rows from. A model that answers
 # with the bare array instead of the documented envelope is answering correctly,
 # just one level down, so the array is wrapped rather than thrown away.
-_LIST_ROOT_KEY: dict[str, str] = {"batch": "items", "group": "groups", "filter": "blocked", "war": "war", "pair": "pairs"}
+_LIST_ROOT_KEY: dict[str, str] = {"batch": "items", "summary": "items", "recheck": "items", "group": "groups",
+                                  "filter": "blocked", "war": "war", "pair": "pairs"}
 
 
 def _coerce_json(text: str, list_key: str | None = None) -> dict | None:
@@ -520,6 +529,13 @@ async def _call_once(provider: str, model: str, messages: list[dict], temperatur
     return None, status, hdrs, ""
 
 
+def _failover_level(chain: list[tuple[str, str]], idx: int) -> int:
+    """Log level for a transient failure of chain[idx]: INFO while a live model is still
+    ahead, since the call heals itself there and WARNING is forwarded to the admin;
+    WARNING on the last live model, whose failure makes the caller fall back."""
+    return logging.INFO if any(not _is_dead(_tag(p, m)) for p, m in chain[idx + 1:]) else logging.WARNING
+
+
 async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_retries: int,
                       temperature: float, list_key: str | None) -> dict | None:
     """One pass over the chain: each live entry is attempted up to `max_retries` with
@@ -527,7 +543,7 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
     to the next entry (a separate provider quota). None when no entry answered."""
     global _failover_count
     first = True
-    for provider, model in chain:
+    for idx, (provider, model) in enumerate(chain):
         tag = _tag(provider, model)
         if _is_dead(tag):
             continue
@@ -548,7 +564,7 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
                                                              call_temperature, list_key)
             except Exception as exc:
                 _bump(tag, "error")
-                log.warning("LLM call error on %s: %s", tag, str(exc)[:120])
+                log.log(_failover_level(chain, idx), "LLM call error on %s: %s, failing over", tag, str(exc)[:120])
                 break  # next chain entry
 
             if status == 200 and parsed is not None:
@@ -647,7 +663,7 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
             if attempt < max_retries - 1:
                 await asyncio.sleep(3)
                 continue
-            log.warning("LLM %s status=%d after %d attempts, failing over", tag, status, max_retries)
+            log.log(_failover_level(chain, idx), "LLM %s status=%d after %d attempts, failing over", tag, status, max_retries)
             break
     return None
 

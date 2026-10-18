@@ -9,14 +9,15 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.db.models import get_app_setting, get_blocked_words, get_categories, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
+from src.db.models import get_app_setting, get_blocked_words, get_categories, get_recent_raw_texts, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
 from src.processor.llm.classifier import acquire_classify_lock, background_classify_running, check_blocked_filters, classify_batch, pick_war_reports, release_classify_lock, split_for_summary, _wants_no_merge, _wants_no_filter
 from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings
 from src.processor.llm.llm_client import format_llm_stats, reset_llm_stats, is_task_dead
 from src.processor.dedup.merge import MERGE_MIN_ITEMS, merge_source_items
 from src.common.media import MEDIA_LABEL as _MEDIA_LABEL, is_media_placeholder
-from src.common.util import needs_summary, row_get, source_link
+from src.common.util import clean_invisible, detect_footers, needs_summary, row_get, source_link
+from src.processor.llm.prompts import UNSIGNED_AD_RULE, UNSIGNED_TAG
 
 log = logging.getLogger(__name__)
 
@@ -681,10 +682,69 @@ async def _defer_empty_items(items: list) -> tuple[list, int]:
     return kept, deferred
 
 
+def _is_unsigned_own_post(raw: str, footers: set[str]) -> bool:
+    """A post its channel did not sign: the channel has a signature, the post's last line does
+    not end with it (an album caption reads "[Photo] → Про Бізнес"), and it is neither a forward
+    (signed by its origin) nor a textless album part."""
+    raw = (raw or "").strip()
+    # A signature of padding alone would end every line, and sign every post.
+    signatures = [sig for sig in (clean_invisible(footer).strip() for footer in footers) if sig]
+    if not signatures or not raw or raw.startswith("[Forwarded from") or is_media_placeholder(raw):
+        return False
+    lines = [line for line in clean_invisible(raw).split("\n") if line.strip()]
+    last = lines[-1].strip() if lines else ""
+    return not any(last.endswith(sig) for sig in signatures)
+
+
+async def _filter_unsigned_ads(items: list) -> tuple[list, list]:
+    """A "No filter" source's unsigned own posts — the shape its paid posts take — are judged
+    by UNSIGNED_AD_RULE alone; everything else it posts stays unfiltered. Fail-open: a model or
+    DB error sends the digest out with them unfiltered."""
+    try:
+        return await _judge_unsigned_ads(items)
+    except Exception:
+        log.exception("Unsigned-ad check failed, keeping the unsigned posts")
+        return items, []
+
+
+async def _judge_unsigned_ads(items: list) -> tuple[list, list]:
+    footers_by_source: dict[int, set[str]] = {}
+    candidates = []
+    for item in items:
+        if not _wants_no_filter(row_get(item, "source_prompt_extra")) or is_media_placeholder(item["summary"]):
+            continue
+        source_id = item["source_id"]
+        if source_id not in footers_by_source:
+            footers_by_source[source_id] = detect_footers(await get_recent_raw_texts(source_id))
+        if _is_unsigned_own_post(item["raw_text"], footers_by_source[source_id]):
+            candidates.append(item)
+    if not candidates:
+        return items, []
+    blocked_map = await check_blocked_filters(
+        [{"id": item["id"], "text": UNSIGNED_TAG + (item["summary"] or "") + " " + (item["raw_text"] or ""),
+          "source": item["source_name"] or "unknown", "category": item["category"] or "other"}
+         for item in candidates],
+        [UNSIGNED_AD_RULE], [None])
+    blocked = [{**item, "blocked_by": UNSIGNED_AD_RULE} for item in candidates if item["id"] in blocked_map]
+    log.info("Unsigned-ad check: %d of %d unsigned post(s) from no-filter sources blocked | ids=%s",
+             len(blocked), len(candidates), [item["id"] for item in blocked])
+    if not blocked:
+        return items, []
+    await mark_blocked([(item["id"], UNSIGNED_AD_RULE) for item in blocked])
+    hidden = {item["id"] for item in blocked}
+    return [item for item in items if item["id"] not in hidden], blocked
+
+
 async def _apply_semantic_filter(items: list) -> tuple[list, list]:
     """Run the LLM content filter over items that some rule targets. Blocked
     items are marked sent and returned separately for the Filtered section.
     Fail-open: on error the digest goes out unfiltered. Returns (kept, blocked)."""
+    items, unsigned_blocked = await _filter_unsigned_ads(items)
+    kept, blocked = await _apply_rule_filter(items)
+    return kept, unsigned_blocked + blocked
+
+
+async def _apply_rule_filter(items: list) -> tuple[list, list]:
     filter_rules_rows = await get_blocked_words()
     blocked_items: list = []
     if not filter_rules_rows:

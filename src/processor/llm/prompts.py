@@ -116,6 +116,19 @@ Output JSON only: {"blocked": [{"id": <int>, "rule": <rule_index_0based>, "confi
 If nothing should be blocked: {"blocked": []}"""
 
 
+# A source the filter skips ("No filter") still has its UNSIGNED own posts judged by this one rule.
+# ПроБізнес signs every post it writes «→ Про Бізнес»; in 30 days its 7 own posts without it were all
+# paid ads, which the bypass let straight through. Benched 2026-10-18 (7 ads + 30 news with the
+# signature cut, 3 shuffles): rule 27 alone caught 4/7, with this tag and explanation 5/7, 0 of 90
+# news judgements hidden. The two it misses are written as news and say nothing salesy in 150 chars.
+UNSIGNED_TAG = "[без звичного підпису каналу] "
+UNSIGNED_AD_RULE = (
+    "реклама без звичного підпису каналу: пост, позначений [без звичного підпису каналу], канал опублікував "
+    "не як свою новину — так виходять оплачені пости. Блокуй його, якщо текст розхвалює продукт, послугу, "
+    "курс, захід, інвестицію чи інший канал або кличе підписатись, підключитись, інвестувати, "
+    "зареєструватись чи взяти участь. НЕ блокувати: новину в такому пості — події, рішення, цифри, заяви"
+)
+
 _WAR_SYSTEM_PROMPT = """You sort a stretch of a Ukrainian news feed (the night, or the hours since the previous digest). Each line is `<id>: <HH:MM> <summary>`, oldest first.
 
 1. Pick the items that are WAR REPORTS: attacks and strikes by either side (Russian strikes on Ukraine, Ukrainian drones hitting Russian refineries), drones or missiles in the air, shot down or hitting a place, air-raid alerts, casualties and damage caused by an attack, combat on the front line.

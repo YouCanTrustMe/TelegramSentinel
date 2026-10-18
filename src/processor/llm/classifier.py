@@ -14,7 +14,7 @@ from src.processor.llm.prompts import (
     _WAR_SYSTEM_PROMPT,
     _PAIR_JUDGE_PROMPT,
 )
-from src.common.util import detect_footers, needs_summary, row_get, strip_footers
+from src.common.util import clean_invisible, detect_footers, needs_summary, row_get, strip_footers
 from src.processor.llm.fact_check import unsupported_facts
 
 log = logging.getLogger(__name__)
@@ -560,7 +560,6 @@ _DASH_CHARS = ("-\u058a\u05be\u1400\u1806\u2010\u2011\u2012\u2013\u2014\u2015\u2
                "\u2e3b\u2e40\u2e5d\ufe31\ufe32\ufe58\ufe63\uff0d\u2212\u2043\u2796")
 _DASHES = re.escape(_DASH_CHARS)
 _APOSTROPHES = "'\u2018\u2019\u02bc\u02b9\u2032\uff07`"
-_INVISIBLE_RE = re.compile("[\u00ad\u200b-\u200d\u2060\ufeff\ufe0e\ufe0f]")
 _RULE_TOKEN_RE = re.compile(rf"(\s*[{_DASHES}][\s{_DASHES}]*|[{_APOSTROPHES}]|\s+)")
 # One run of dashes and spaces, possessive so a long separator line cannot make it backtrack.
 _DASH_RUN = rf"\s*+[{_DASHES}]++(?:\s*+[{_DASHES}]++)*+\s*+"
@@ -568,8 +567,8 @@ _DASH_RUN = rf"\s*+[{_DASHES}]++(?:\s*+[{_DASHES}]++)*+\s*+"
 
 def _normalize_for_match(text: str) -> str:
     """Case, runs of whitespace and invisible characters (zero-width space, emoji
-    variation selectors, soft hyphen) do not matter on either side of a literal rule."""
-    return " ".join(_INVISIBLE_RE.sub("", text or "").split()).casefold()
+    variation selectors, soft hyphen, blank fillers) do not matter on either side of a literal rule."""
+    return " ".join(clean_invisible(text).split()).casefold()
 
 
 def _literal_pattern(rule_text: str) -> "re.Pattern | None":

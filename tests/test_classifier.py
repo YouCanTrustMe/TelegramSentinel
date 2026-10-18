@@ -261,6 +261,19 @@ def test_literal_rule_normalizes_whitespace_and_case(monkeypatch):
     assert asyncio.run(classifier.check_blocked_filters(items, ["= ВІДБІЙ ТРИВОГИ"])) == {1: "= ВІДБІЙ ТРИВОГИ"}
 
 
+def test_literal_rule_reads_blank_fillers_as_spaces(monkeypatch):
+    import asyncio
+    items = [{"id": 1, "text": "Новина\n\n📣ㅤ-ㅤреклама\u200b", "source": "s", "category": "feed"},
+             {"id": 2, "text": "Новина\nвідбій⠀тривоги", "source": "s", "category": "feed"}]
+
+    async def fake_llm(messages, max_retries=3, task="filter"):
+        raise AssertionError("literal rules must not reach the model")
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    out = asyncio.run(classifier.check_blocked_filters(items, ["= 📣 - реклама", "= відбій тривоги"]))
+    assert out == {1: "= 📣 - реклама", 2: "= відбій тривоги"}
+
+
 def test_literal_rule_treats_every_dash_alike(monkeypatch):
     import asyncio
     texts = ["Підписуйся 📣 - реклама", "Квитки тут 📣- реклама", "Деталі 📣 – реклама", "Новина про рекламу",

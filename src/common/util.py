@@ -1,4 +1,15 @@
 """Small shared helpers with no project dependencies."""
+import re
+
+
+# Zero-width marks vanish; blank-looking fillers channels pad lines and words with
+# (ПроБізнес ends signatures with U+3164) read as a space.
+_ZERO_WIDTH_RE = re.compile("[\u00ad\u200b-\u200d\u2060\ufeff\ufe0e\ufe0f]")
+_FILLER_RE = re.compile("[\u2800\u3164]")
+
+
+def clean_invisible(text: str) -> str:
+    return _ZERO_WIDTH_RE.sub("", _FILLER_RE.sub(" ", text or ""))
 
 
 def row_get(row, key, default=None):

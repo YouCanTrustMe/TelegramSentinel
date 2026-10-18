@@ -120,6 +120,13 @@ async def test_war_block_lines_name_their_channel(monkeypatch):
     assert "<i>· Бабель</i>" in text and "<i>· Лачен</i>" in text
 
 
+def test_war_line_names_its_channel_and_muted_duplicates_in_one_tail():
+    item = {**_item(1, "Удар по Києву", "2026-09-24T03:00:00+00:00"), "_via": "Лачен"}
+    line = db._format_item(item, {1: [("Хмельницький LIVE", "https://t.me/k/9")]})
+    assert line.endswith('<i>· Лачен, <a href="https://t.me/k/9">Хмельницький LIVE</a></i>')
+    assert "(" not in line.split("</a>", 1)[1]
+
+
 async def test_too_few_war_reports_leave_the_feed_untouched(monkeypatch):
     monkeypatch.setattr(db.settings, "war_block_min_items", 3)
 

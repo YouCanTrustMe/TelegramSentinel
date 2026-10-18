@@ -373,7 +373,8 @@ async def _blocked_keyboard(words, page: int = 0) -> InlineKeyboardMarkup:
 
     buttons = []
     for w in page_words:
-        label = _filter_label(w["rule"], len(scopes.get(w["id"], ())), hits.get(w["rule"], 0))
+        name = row_get(w, "label") or w["rule"]
+        label = _filter_label(name, len(scopes.get(w["id"], ())), hits.get(w["rule"], 0))
         buttons.append([InlineKeyboardButton(label, callback_data=f"blocked_view:{w['id']}")])
 
     if total_pages > 1:

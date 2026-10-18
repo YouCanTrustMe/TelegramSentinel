@@ -104,6 +104,31 @@ def test_split_breaks_when_over_limit():
     assert messages[1][1] == [2]
 
 
+def test_split_never_ends_a_message_on_a_category_heading():
+    heading = "\n<b>━━━</b>\n<b>💸  C R Y P T O</b>"
+    segments = [
+        ("<blockquote>" + "a" * 3000 + "</blockquote>", [1]),
+        (heading, []),
+        ("<blockquote>" + "b" * 2000 + "</blockquote>", [2]),
+    ]
+    messages = _split_into_messages(segments)
+    assert len(messages) == 2
+    assert "C R Y P T O" not in messages[0][0]
+    assert messages[1][0].startswith("<b>━━━</b>") and "b" * 2000 in messages[1][0]
+    assert [ids for _, ids in messages] == [[1], [2]]
+
+
+async def test_quiet_sources_block_drops_the_source_type(monkeypatch):
+    async def _silent(_hours):
+        return [{"name": "Zagreb up to you", "type": "telegram", "url": "@zg", "hours_silent": 170},
+                {"name": "АФІША", "type": "telegram", "url": "@afisha", "hours_silent": None}]
+
+    monkeypatch.setattr(digest_builder, "get_silent_sources", _silent)
+    block = await digest_builder._build_silent_block()
+    assert "[telegram]" not in block
+    assert "Zagreb up to you</a> — 7d" in block and "АФІША</a> — never" in block
+
+
 def test_media_token_renders_as_emoji_chip():
     item = {"original_url": "https://t.me/x/1", "summary": "[Video note]",
             "raw_text": "[Video note]", "published_at": None, "key_phrase": ""}
@@ -443,7 +468,46 @@ def test_literal_rules_share_one_filtered_block():
 
     assert text.count("= exact phrases") == 1
     assert "рекламні та промо пости…" in text
-    assert "загроза застосування бпла" not in text.split("= exact phrases")[0]
+    # Literal hits are a count closing the section, never listed: on 18.10 their list
+    # was 32 lines of a morning digest.
+    assert segments[-1][0] == "<blockquote><b>= exact phrases · 3</b></blockquote>"
+    assert "тривога 1" not in text and "тривога 3" not in text
+
+
+def test_a_rule_with_a_short_name_titles_its_filtered_block_with_it():
+    def blocked(i, rule, label=None):
+        return {"id": i, "summary": f"пост {i}", "raw_text": f"пост {i}", "key_phrase": "",
+                "published_at": "2026-10-06T17:39:00+00:00", "original_url": f"https://t.me/c/1/{i}",
+                "blocked_by": rule, "blocked_label": label}
+
+    segments = _build_digest_text({}, blocked_items=[
+        blocked(1, "вузькопрофільні та малозначущі крипто-новини: огляди", "crypto noise"),
+        blocked(2, "рекламні та промо пости: заклики купити"),
+        blocked(3, "= повітряна тривога!", "alerts"),
+    ])
+    text = "\n".join(t for t, _ in segments)
+    assert "<b>crypto noise · 1</b>" in text and "вузькопрофільні" not in text
+    assert "<b>рекламні та промо пости… · 1</b>" in text
+    assert "<b>= exact phrases · 1</b>" in text and "alerts" not in text
+
+
+def test_filtered_header_is_marked_three_times():
+    segments = _build_digest_text({}, blocked_items=[
+        {"id": 1, "summary": "тривога", "raw_text": "тривога", "key_phrase": "",
+         "published_at": "2026-10-06T17:39:00+00:00", "original_url": "https://t.me/c/1/1",
+         "blocked_by": "= повітряна тривога!"}])
+    assert segments[0][0] == "\n<b>🚫 🚫 🚫 Filtered</b>"
+
+
+def test_a_source_name_that_looks_like_a_domain_is_not_auto_linked():
+    """Telegram linked "Index.hr" in "Index.hr ZAGREB" to the site by itself."""
+    from src.dispatcher.digest_builder import _plain_name, _source_blocks
+    assert _plain_name("Index.hr ZAGREB") == "Index.⁠hr ZAGREB"
+    assert _plain_name("A & B. Новини") == "A &amp; B. Новини"
+    item = {"id": 1, "summary": "новина", "raw_text": "новина", "key_phrase": "",
+            "published_at": "2026-10-06T17:39:00+00:00", "original_url": "https://t.me/c/1/1"}
+    (block, _), = _source_blocks("Index.hr ZAGREB", [item])
+    assert "<b>Index.⁠hr ZAGREB</b>" in block
 
 
 def test_filter_title_keeps_a_short_word_that_carries_meaning():
@@ -613,6 +677,7 @@ async def test_no_filter_source_has_only_its_unsigned_posts_judged_as_ads(monkey
     assert ids == [1] and rules == [UNSIGNED_AD_RULE] and texts[0].startswith(UNSIGNED_TAG)
     assert calls[1] == ("marked", [(1, UNSIGNED_AD_RULE)])
     assert [b["id"] for b in blocked] == [1] and blocked[0]["blocked_by"] == UNSIGNED_AD_RULE
+    assert blocked[0]["blocked_label"] == "unsigned ads"
     assert [k["id"] for k in kept] == [2, 3]
     assert digest_builder._filter_title(UNSIGNED_AD_RULE) == "реклама без звичного підпису каналу…"
 
@@ -652,3 +717,13 @@ async def test_unsigned_ad_check_fails_open_on_a_db_error(monkeypatch):
     monkeypatch.setattr(digest_builder, "check_blocked_filters", block_all)
     monkeypatch.setattr(digest_builder, "mark_blocked", busy)
     assert await digest_builder._filter_unsigned_ads(items) == (items, [])
+
+
+def test_a_carried_heading_never_pushes_a_message_past_the_limit():
+    from src.dispatcher.digest_builder import _TELEGRAM_LIMIT
+    heading = ("\n<b>━━ 📰 Feed ━━</b>", [])
+    first = ("<blockquote expandable>" + "a" * 2000 + "</blockquote>", [1])
+    big = ("<blockquote expandable>" + "b" * (_TELEGRAM_LIMIT - 40) + "</blockquote>", [2])
+    messages = _split_into_messages([first, heading, big])
+    assert all(len(text) <= _TELEGRAM_LIMIT for text, _ids in messages)
+    assert [ids for _text, ids in messages] == [[1], [2]]

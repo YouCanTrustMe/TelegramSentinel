@@ -1,5 +1,6 @@
 import asyncio
 import html
+import inspect
 import logging
 import os
 import time
@@ -240,6 +241,50 @@ def _forward_label(raw_text: str, message: Message, _parent_msg: "Message | None
     return f"[Forwarded from {fwd_title}] {raw_text}" if fwd_title else raw_text
 
 
+def _peer(chat_ref: str) -> "int | str":
+    # A chat id must go in as an int: pyrogram reads a digit string as a phone number.
+    peer = chat_ref.lstrip("@")
+    return int(peer) if peer.lstrip("-").isdigit() else peer
+
+
+def _parent_query(get_messages, message_id: int) -> dict:
+    """get_messages arguments asking for the post `message_id` replies to: kurigram takes
+    `reply=True`, pyrogram 2.0.106 `reply_to_message_ids`. Read off the signature, so an
+    error raised inside the call is never taken for the other library."""
+    if "reply" in inspect.signature(get_messages).parameters:
+        return {"message_ids": message_id, "reply": True, "replies": 0}
+    return {"reply_to_message_ids": message_id, "replies": 0}
+
+
+async def _fetch_parent(chat_ref: str, message: Message) -> "Message | None":
+    """The channel's own earlier post a reply answers, when it is not in this poll's batch:
+    most self-replies come 1-36h after the original (2026-10-18: ~7 a day across four feed
+    channels), so the batch held the parent for 6 of them in 14 days. A reply to another
+    chat's post, a deleted original or any error gives None: never a guess."""
+    try:
+        parent = await userbot.get_messages(_peer(chat_ref), **_parent_query(userbot.get_messages, message.id))
+    except Exception as exc:
+        log.info("Reply parent not fetched for %s/%s: %s", chat_ref, message.id, type(exc).__name__)
+        return None
+    if (parent is None or getattr(parent, "empty", False) or parent.id != message.reply_to_message_id
+            or (parent.chat and message.chat and parent.chat.id != message.chat.id)):
+        return None
+    return parent
+
+
+async def _reply_parent(chat_ref: str, message: Message, messages_by_id: dict) -> "Message | None":
+    """The post a reply answers: from this batch, else fetched — but not for a reply already
+    stored (the pre-digest collect and a re-read batch see it again), which would only spend
+    a userbot request on a post _process_message then drops."""
+    if not message.reply_to_message_id:
+        return None
+    if message.reply_to_message_id in messages_by_id:
+        return messages_by_id[message.reply_to_message_id]
+    if await is_duplicate(make_message_id("telegram", chat_ref, str(message.id))):
+        return None
+    return await _fetch_parent(chat_ref, message)
+
+
 def _context_label(raw_text: str, _message: Message, parent_msg: "Message | None") -> str:
     """For a reply, the first line of the post it answers."""
     parent_text = (parent_msg.text or parent_msg.caption or "").strip() if parent_msg is not None else ""
@@ -330,6 +375,7 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
                 await _report_unreadable(chat_ref, message, original_url, exc, kept=f"without its {name} label")
 
     published_at = message.date.replace(tzinfo=timezone.utc).isoformat() if message.date else None
+    parent_id = getattr(parent_msg, "id", None)
 
     if no_caption:
         # raw_text is just the media token here, e.g. "[Photo]" / "[Video note]".
@@ -363,8 +409,10 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
         category=source["category"],
         processed_at=datetime.now(timezone.utc).isoformat(),
         key_phrase=key_phrase,
+        reply_to=make_message_id("telegram", chat_ref, str(parent_id)) if parent_id else None,
     )
-    log.info("Saved item from %s | category=%s | %s", chat_ref, source["category"], original_url)
+    log.info("Saved item from %s | category=%s | %s%s", chat_ref, source["category"], original_url,
+             f" | reply to {parent_id}" if parent_id else "")
     return True
 
 
@@ -434,7 +482,7 @@ async def _poll_channel(chat_ref: str, source: dict, gaps: list | None = None) -
                 if not _is_service(message):
                     stale += 1
                 continue
-            parent_msg = messages_by_id.get(message.reply_to_message_id) if message.reply_to_message_id else None
+            parent_msg = await _reply_parent(chat_ref, message, messages_by_id)
             if await _process_message(chat_ref, source, message, parent_msg=parent_msg):
                 saved += 1
         if stale:

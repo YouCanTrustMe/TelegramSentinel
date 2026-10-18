@@ -25,6 +25,7 @@ async def save_item(
     processed_at: str,
     key_phrase: str | None = None,
     sent: bool = False,
+    reply_to: str | None = None,
 ) -> int:
     async with get_db() as db:
         # OR IGNORE: the regular poll loop and the pre-digest collect job can run
@@ -34,13 +35,25 @@ async def save_item(
         cur = await db.execute(
             """INSERT OR IGNORE INTO items
                (source_id, message_id, raw_text, original_url, published_at,
-                summary, category, processed_at, key_phrase, sent)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                summary, category, processed_at, key_phrase, sent, reply_to)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (source_id, message_id, raw_text, original_url, published_at,
-             summary, category, processed_at, key_phrase or None, int(sent)),
+             summary, category, processed_at, key_phrase or None, int(sent), reply_to),
         )
         await db.commit()
         return cur.lastrowid
+
+
+async def get_items_by_message_ids(message_ids: list[str]) -> dict[str, aiosqlite.Row]:
+    if not message_ids:
+        return {}
+    placeholders = ",".join("?" * len(message_ids))
+    async with get_db() as db:
+        async with db.execute(
+            f"SELECT id, message_id, summary, raw_text, original_url, published_at FROM items "
+            f"WHERE message_id IN ({placeholders})", list(message_ids),
+        ) as cur:
+            return {row["message_id"]: row for row in await cur.fetchall()}
 
 
 async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlite.Row]:

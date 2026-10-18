@@ -619,6 +619,18 @@ async def test_each_summary_call_is_stored_before_the_next_one(monkeypatch):
     assert sorted(stored) == [1, 2, 3]
 
 
+async def test_a_short_reply_is_shown_without_its_context_line(monkeypatch):
+    async def no_history(source_id, limit=100):
+        return []
+
+    monkeypatch.setattr(models, "get_recent_raw_texts", no_history)
+    rows = [{"id": 1, "source_id": 6, "raw_text": "[Context: Тривога [оновлено] у Хмельницькому]\nВідбій тривоги в області"},
+            {"id": 2, "source_id": 6, "raw_text": "[Context: Fed meeting]\nThe Fed held rates at 4.25% today"}]
+    short, long_items = await classifier.split_for_summary(rows)
+    assert [(item["id"], text) for item, text in short] == [(1, "Відбій тривоги в області")]
+    assert [text for _item, text in long_items] == [rows[1]["raw_text"]]   # the model keeps it
+
+
 async def test_a_ukrainian_source_shows_a_short_post_without_ukrainian_letters_as_written(monkeypatch):
     """2026-10-18: "🛸25 км до Староконстянтинова" has no і/ї/є/ґ, so it went to the model
     and came back as "Україна запустила ракету". A source whose posts read Ukrainian shows

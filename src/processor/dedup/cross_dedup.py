@@ -180,6 +180,7 @@ async def _confirm_mutes(
     sent_text: dict[int, str],
     vec: dict[int, np.ndarray],
     sent_vec: dict[int, np.ndarray],
+    judged: set[frozenset] | None = None,
 ) -> tuple[dict[int, int], dict[int, int]]:
     """B1 — confirm each candidate against the very post it would hide under.
 
@@ -241,7 +242,7 @@ async def _confirm_mutes(
                      mid, verdict, pid, score_of[mid])
         rejected.append((mid, pid))
 
-    confirmed.update(await _regroup_rejected(rejected, item_by_id, vec))
+    confirmed.update(await _regroup_rejected(rejected, item_by_id, vec, judged))
     return confirmed, updates
 
 
@@ -256,6 +257,7 @@ async def _regroup_rejected(
     rejected: list[tuple[int, int]],
     item_by_id: dict,
     vec: dict[int, np.ndarray],
+    judged: set[frozenset] | None = None,
 ) -> dict[int, int]:
     """Candidates rejected against ONE primary may still be one event between them.
 
@@ -307,6 +309,8 @@ async def _regroup_rejected(
 
     verdicts = await judge_pairs([(_post_text(item_by_id[sid]), _post_text(item_by_id[mid]))
                                   for mid, sid, _c in pairs])
+    if judged is not None:
+        judged.update(frozenset((mid, sid)) for mid, sid, _c in pairs)
     out: dict[int, int] = {}
     for (mid, sid, c), verdict in zip(pairs, verdicts):
         if verdict == "same" or (verdict == "update" and _hides_update(mid, sid, item_by_id)):
@@ -385,6 +389,74 @@ async def _confirm_follow_ups(follow: list[tuple[int, int, float]], item_by_id: 
             out[iid] = sid
             log.info("Follow-up: item id=%d moves on its source's shown id=%d | cosine=%.3f | verdict=%s",
                      iid, sid, c, verdict)
+    return out
+
+
+def _unit(m: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(m, axis=1, keepdims=True)
+    return m / np.where(n == 0, 1, n)
+
+
+async def _judge_direct_pairs(
+    item_by_id: dict, vec: dict[int, np.ndarray], hidden: dict[int, int], judged: set[frozenset],
+) -> dict[int, int]:
+    """Each surviving item against its closest cross-source twin IN THIS DIGEST, when the
+    two were never judged together. A closest twin already judged ends the search: the
+    next one down is a weaker match, and only the closest was replayed.
+
+    B1 judges a candidate against ONE post: the primary of its in-digest cluster, or its
+    single best match among shown posts. Its real twin can be neither — 10-08..10-18, 8 of
+    21 delivered duplicate pairs were never put to the judge together (three channels on
+    the Miami talks ending early, each judged against a different earlier post). The usual
+    hide rules apply: "same" hides, "update" only under a post at least as rich.
+
+    Only twins in this digest: the hidden post then stays one tap away beside its primary.
+    Replayed over 10-08..10-18, the same pass against already-shown posts hid 3 real
+    duplicates and 2 real stories (Trump's energy truce under his diesel deal), gone
+    without a trace."""
+    alive = [iid for iid in item_by_id if iid in vec and iid not in hidden]
+    if len(alive) < 2:
+        return {}
+    dim = Counter(vec[i].shape for i in alive).most_common(1)[0][0]
+    alive = [i for i in alive if vec[i].shape == dim]
+    sims = _unit(np.stack([vec[i] for i in alive]))
+    sims = sims @ sims.T
+
+    pairs: dict[frozenset, tuple[float, int, int]] = {}  # (cosine, candidate, primary)
+    for r, iid in enumerate(alive):
+        item = item_by_id[iid]
+        for k in np.argsort(-sims[r]):
+            pid, c = alive[k], float(sims[r, k])
+            if c < settings.dedup_direct_pair_floor:
+                break
+            other = item_by_id[pid]
+            if (pid == iid or _field(other, "source_id") == _field(item, "source_id")
+                    or c < _union_floor(_field(item, "category", "other") or "other",
+                                        _field(other, "category", "other") or "other")):
+                continue
+            key = frozenset((iid, pid))
+            if key not in judged:
+                mid, primary = sorted((iid, pid), key=lambda i: _sort_key(item_by_id[i]), reverse=True)
+                pairs.setdefault(key, (c, mid, primary))
+            break
+    if not pairs:
+        return {}
+
+    ordered = sorted(pairs.values(), reverse=True)
+    verdicts = await judge_pairs([(_post_text(item_by_id[pid]), _post_text(item_by_id[mid]))
+                                  for _c, mid, pid in ordered])
+    out: dict[int, int] = {}
+    for (c, mid, pid), verdict in zip(ordered, verdicts):
+        # One hide per post per pass, and never under a post this pass just hid: the pair
+        # the judge read must be the pair that ships. A post others were hidden under may
+        # go — _survivor re-points them to the twin it is hidden under.
+        if mid in out or pid in out or mid in out.values():
+            continue
+        if verdict == "same" or (verdict == "update" and _hides_update(mid, pid, item_by_id)):
+            out[mid] = pid
+            log.info("B1: hid item id=%d -> direct twin id=%d | cosine=%.3f | verdict=%s | never judged "
+                     "together before", mid, pid, c, verdict)
+    log.info("Direct twins: judged %d pair(s) never compared before, hid %d", len(ordered), len(out))
     return out
 
 
@@ -548,14 +620,19 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
         return items, {}
 
     candidates = len(muted)
-    confirmed, updates = await _confirm_mutes(muted, item_by_id, sent_text, vec, sent_vec) if muted else ({}, {})
+    # Every pair the judge has seen, so the direct-twin pass never asks about one again.
+    judged: set[frozenset] = set()
+    confirmed, updates = (await _confirm_mutes(muted, item_by_id, sent_text, vec, sent_vec, judged)
+                          if muted else ({}, {}))
     # A fallback whose own primary is being hidden would re-point through it to a shown
     # story the item was never compared with — skip those.
     retry = {mid: pid for mid, pid in fallback.items() if mid not in confirmed and pid not in confirmed}
     if retry:
         candidates += len(retry)
-        confirmed.update((await _confirm_mutes(retry, item_by_id, sent_text, vec, sent_vec))[0])
+        confirmed.update((await _confirm_mutes(retry, item_by_id, sent_text, vec, sent_vec, judged))[0])
     confirmed.update(near_muted)
+    judged.update(frozenset(p) for p in (*muted.items(), *retry.items(), *near_muted.items()))
+    confirmed.update(await _judge_direct_pairs(item_by_id, vec, confirmed, judged))
     updates.update(await _confirm_follow_ups(
         [f for f in follow if f[0] not in confirmed and f[0] not in updates], item_by_id, sent_text))
 

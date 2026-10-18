@@ -77,8 +77,11 @@ def _build_merged(cluster: list, summary: str, key_phrase: str) -> dict:
         "published_at": latest["published_at"] if latest else ordered[-1]["published_at"],
         "raw_text": None,
         "_item_ids": [it["id"] for it in cluster],
-        # A member's own ↻ link (an update to a story shown in an earlier digest) stays.
-        "_earlier": sorted({*((it["published_at"], it["original_url"]) for it in with_url[:-1]),
+        # A member's own ↻ link (an update to a story shown in an earlier digest) stays. A
+        # member published at the very moment of the latest is the same post republished
+        # under a second URL (Croatia Week, 2026-10-16), not an earlier one.
+        "_earlier": sorted({*((it["published_at"], it["original_url"]) for it in with_url[:-1]
+                              if it["published_at"] != latest["published_at"]),
                             *(e for it in cluster for e in (row_get(it, "_earlier") or []))},
                            key=lambda e: e[0] or ""),
     }

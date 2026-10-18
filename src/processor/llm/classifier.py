@@ -42,6 +42,10 @@ _SUMMARY_CHUNK = 3
 _RECHECK_TIMEOUT = 30.0
 
 
+# The collector's label for the post a reply answers: its first line, so no newline inside.
+_CONTEXT_LINE_RE = re.compile(r"^\[Context: [^\n]*\]\n")
+
+
 def _strip_media_prefix(text: str) -> str:
     return _MEDIA_PREFIX_RE.sub("", text).strip()
 
@@ -434,12 +438,17 @@ async def split_for_summary(rows: list, label: str = "Background classify") -> t
         full = (item["raw_text"] or "").strip()
         raw = strip_footers(full, footers_by_source[source_id]) or full
         stripped += raw != full
-        text = _strip_media_prefix(raw)
+        # A reply's "[Context: …]" line helps the model; shown as written it would be read out.
+        own = _CONTEXT_LINE_RE.sub("", raw, count=1)
+        text = _strip_media_prefix(own)
         reads_ukrainian = (_looks_ukrainian(text) if source_id in ukrainian_sources
                            else _reads_ukrainian(text))
         trivial = len(text) < _TRIVIAL_MAX_LEN and (
             reads_ukrainian or _wants_no_translate(row_get(item, "source_prompt_extra")))
-        (short if trivial else long_items).append((item, raw))
+        if trivial:
+            short.append((item, own))
+        else:
+            long_items.append((item, raw))
     if stripped:
         log.info("%s: channel signature cut from %d of %d item(s) | %s", label, stripped, len(rows),
                  {sid: sorted(f) for sid, f in footers_by_source.items() if f})

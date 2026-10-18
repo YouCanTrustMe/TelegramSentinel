@@ -9,7 +9,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.db.models import get_app_setting, get_blocked_words, get_categories, get_recent_raw_texts, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
+from src.db.models import get_app_setting, get_blocked_words, get_categories, get_items_by_message_ids, get_recent_raw_texts, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
 from src.processor.llm.classifier import acquire_classify_lock, background_classify_running, check_blocked_filters, classify_batch, pick_war_reports, release_classify_lock, split_for_summary, _wants_no_merge, _wants_no_filter
 from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings
@@ -234,6 +234,93 @@ def _earlier_line(item) -> str:
     return f"<i>↻ earlier: {more}{', '.join(links)}</i>"
 
 
+_REPLY_QUOTE_WORDS = 6
+_CONTEXT_PREFIX_RE = re.compile(r"^\[(?:Context|Forwarded from)[^\]]*\]\s*")
+
+
+def _reply_quote(parent) -> str:
+    """The opening words of the post a reply answers: its summary, else its first line."""
+    text = (row_get(parent, "summary") or "").strip()
+    if text in _MEDIA_LABEL:
+        return _MEDIA_LABEL[text]
+    if not text:
+        raw = row_get(parent, "raw_text") or ""
+        while _CONTEXT_PREFIX_RE.match(raw):
+            raw = _CONTEXT_PREFIX_RE.sub("", raw, count=1)
+        text = raw.strip().split("\n")[0]
+    tokens, kept, counted = text.split(), [], 0
+    for token in tokens:
+        if counted == _REPLY_QUOTE_WORDS:
+            break
+        kept.append(token)
+        counted += bool(_WORD_CHAR_RE.search(token))  # a dash is not a word
+    return " ".join(kept) + ("…" if len(kept) < len(tokens) else "")
+
+
+def _reply_line(item) -> str:
+    """Second line of a channel's reply to its own post that is not shown beside it: what it
+    answers and when, the time linking to it. Alone, such a reply is often a bare figure."""
+    parent = row_get(item, "_reply_parent")
+    if not parent:
+        return ""
+    label = _earlier_label(row_get(parent, "published_at"), row_get(item, "published_at"))
+    url = row_get(parent, "original_url")
+    link = f'<a href="{escape(url, quote=True)}">{label}</a>' if url else label
+    quote = escape(_reply_quote(parent))
+    return f"<i>↳ to {link} {quote}</i>" if quote else f"<i>↳ to {link}</i>"
+
+
+def _thread_lines(lines: list, parents: dict[int, dict]) -> list:
+    """Put each reply right under its own original when both are in this list, flagged
+    `_nested`; a reply whose original is elsewhere (an earlier digest, another block, the
+    filter) carries it as `_reply_parent` for _reply_line. A reply merged into its
+    original's line needs neither."""
+    owner = {iid: i for i, line in enumerate(lines) for iid in _ids_of(line)}
+    children: dict[int, list[int]] = defaultdict(list)
+    out_lines = list(lines)
+    for i, line in enumerate(lines):
+        parent = next((parents[iid] for iid in _ids_of(line) if iid in parents), None)
+        if parent is None:
+            continue
+        j = owner.get(parent["id"])
+        if j == i:
+            continue
+        if j is not None:
+            children[j].append(i)
+        else:
+            out_lines[i] = {**dict(line), "_reply_parent": parent}
+    if not children:
+        return out_lines
+    nested = {c for kids in children.values() for c in kids}
+    ordered: list = []
+    emitted: set[int] = set()
+
+    def _emit(i: int, is_child: bool) -> None:
+        emitted.add(i)
+        ordered.append({**dict(out_lines[i]), "_nested": True} if is_child else out_lines[i])
+        for c in children.get(i, []):
+            if c not in emitted:
+                _emit(c, True)
+
+    for i in range(len(out_lines)):
+        if i not in nested:
+            _emit(i, False)
+    # Merged lines that answer each other form a loop with no top; each still goes out.
+    for i in range(len(out_lines)):
+        if i not in emitted:
+            _emit(i, False)
+    return ordered
+
+
+async def _reply_parents(items: list) -> dict[int, dict]:
+    """item id -> the stored post it replies to, for every reply in this digest."""
+    wanted = {item["id"]: row_get(item, "reply_to") for item in items if row_get(item, "reply_to")}
+    if not wanted:
+        return {}
+    rows = await get_items_by_message_ids(sorted(set(wanted.values())))
+    return {iid: dict(rows[mid]) for iid, mid in wanted.items() if mid in rows}
+
+
 # Telegram turns a name like "Index.hr ZAGREB" into a link to index.hr by itself. A word
 # joiner after the dot breaks its domain detection (checked against the Bot API's own
 # entities on 2026-10-18) without showing anything or adding a line-break point.
@@ -268,8 +355,8 @@ def _format_item(item: dict, dup_links: dict[int, list[tuple[str, str]]] | None 
         # part of the headline, and the slant separates them at a glance from the link
         # the summary itself carries.
         line = f"{line} <i>({', '.join(links)})</i>"
-    earlier = _earlier_line(item)
-    return f"{line}\n{earlier}" if earlier else line
+    tail = [extra for extra in (_reply_line(item), _earlier_line(item)) if extra]
+    return "\n".join([line] + tail)
 
 
 def _format_item_base(item: dict) -> str:
@@ -288,11 +375,13 @@ def _format_item_base(item: dict) -> str:
     # Italic HH:MM, the same typeface the digest chrome uses for its service bits,
     # so the column reads as a timeline instead of a second kind of content.
     hhmm = _local_hhmm(item["published_at"])
-    stamp = f"<i>{hhmm}</i>" if hhmm else ""
+    # A reply shown under its own original: indented, its time marked.
+    nested = bool(row_get(item, "_nested"))
+    stamp = f"<i>{'↳ ' if nested else ''}{hhmm}</i>" if hhmm else ("<i>↳</i>" if nested else "")
 
     suffix = ""
 
-    prefix = f"{stamp}  " if stamp else ""
+    prefix = f"{'  ' if nested else ''}{stamp}  " if stamp else ""
     key_phrase = (row_get(item, "key_phrase", "") or "").strip()
     if url and summary_text.strip():
         rest_text = summary_text.strip()
@@ -1062,6 +1151,17 @@ async def _build_and_send_digest(
         await _fold_war_reports(cat_meta, now)
     except Exception:
         log.exception("War block failed, rendering the feed unfolded")
+    try:
+        parents = await _reply_parents(items)
+        for data in cat_meta.values():
+            for source_name, source_items in data["sources"].items():
+                data["sources"][source_name] = _thread_lines(source_items, parents)
+            if data.get("war_block"):
+                data["war_block"]["items"] = _thread_lines(data["war_block"]["items"], parents)
+        if parents:
+            log.info("Reply threads: %d repl(ies) to the channel's own earlier post", len(parents))
+    except Exception:
+        log.exception("Reply threads failed, rendering replies unthreaded")
     if _is_morning(now):
         cat_meta = _order_for_morning(cat_meta)
 

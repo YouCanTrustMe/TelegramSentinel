@@ -75,6 +75,14 @@ TASK_ROUTING: dict[str, list[tuple[str, str]]] = {
 }
 
 _QUOTA_DEAD_THRESHOLD = 300.0
+# A Retry-After longer than this is not slept: the model is skipped for that long and the
+# call moves on. Groq asked for 172.8s at 14:45 on 2026-10-08 and 10-12 while mistral was
+# out for only 60s, and the filter sat in that sleep — 198s and 296s builds.
+_MAX_RETRY_AFTER_WAIT = 30.0
+# When every model of a chain is out, but one returns within this long (the 60s
+# no-Retry-After cooldown, a skipped Retry-After), the call waits for it and walks the
+# chain once more instead of giving up.
+_CHAIN_REVIVE_WAIT = 65.0
 _ALERT_COOLDOWN = 1800.0
 # How long a 429-without-Retry-After model is skipped, so a digest's later calls route
 # past it instead of re-hitting (and re-warning about) the same throttle.
@@ -308,13 +316,25 @@ def _resolve_chain(task: str) -> list[tuple[str, str]]:
     return [(p, m) for (p, m) in chain if _key(p)]
 
 
+def _revival_wait(chain: list[tuple[str, str]]) -> float | None:
+    """Seconds until the first model of a fully-out chain is usable again, when that is
+    within _CHAIN_REVIVE_WAIT; None when some model is usable now or none returns soon."""
+    now = time.monotonic()
+    remaining = [_quota_dead_until.get(_tag(p, m), 0.0) - now for (p, m) in chain]
+    if not remaining or min(remaining) <= 0:
+        return None
+    soonest = min(remaining)
+    return soonest if soonest <= _CHAIN_REVIVE_WAIT else None
+
+
 def is_task_dead(task: str) -> bool:
-    """True when every usable model in the task's chain is quota-dead — the signal
-    to skip an LLM step entirely and fall back to raw text."""
+    """True when every usable model in the task's chain is quota-dead and none returns
+    within _CHAIN_REVIVE_WAIT — the signal to skip an LLM step entirely and fall back to
+    raw text. A chain out only for a short cooldown is not dead: llm_json waits for it."""
     chain = _resolve_chain(task)
     if not chain:
         return True
-    return all(_is_dead(_tag(p, m)) for (p, m) in chain)
+    return all(_is_dead(_tag(p, m)) for (p, m) in chain) and _revival_wait(chain) is None
 
 
 # ---- per-provider token-bucket rate limiter ----
@@ -500,20 +520,12 @@ async def _call_once(provider: str, model: str, messages: list[dict], temperatur
     return None, status, hdrs, ""
 
 
-async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "classify") -> dict:
-    """Route a JSON-mode chat call through the task's (provider, model) chain.
-    Each live entry is attempted up to `max_retries` with rate-limit backoff; on
-    quota death or persistent rate limiting the call fails over to the next entry
-    (a separate provider quota). Returns the parsed dict, or {} when nothing is
-    usable / on persistent failure (caller falls back to raw text)."""
+async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_retries: int,
+                      temperature: float, list_key: str | None) -> dict | None:
+    """One pass over the chain: each live entry is attempted up to `max_retries` with
+    rate-limit backoff; on quota death or persistent rate limiting the call fails over
+    to the next entry (a separate provider quota). None when no entry answered."""
     global _failover_count
-    chain = _resolve_chain(task)
-    if not chain:
-        log.warning("LLM: no usable provider for task=%s (no API keys), short-circuiting", task)
-        return {}
-
-    temperature = 0.0 if task in _DETERMINISTIC_TASKS else 0.1
-    list_key = _LIST_ROOT_KEY.get(task)
     first = True
     for provider, model in chain:
         tag = _tag(provider, model)
@@ -570,6 +582,11 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
                     _signal_quota_dead(tag, ra)
                     break  # whole model dead → next chain entry
                 _bump(tag, "rate_limited")
+                if ra is not None and ra > _MAX_RETRY_AFTER_WAIT:
+                    _quota_dead_until[tag] = time.monotonic() + ra
+                    log.info("LLM rate limit on %s asks for %gs, skipping it for that long instead "
+                             "of waiting", tag, ra)
+                    break  # next chain entry
                 if ra is None:
                     # No Retry-After (e.g. Cerebras' 5 RPM cap): fail over now rather than
                     # sleep a guessed wait, and skip this model for a cooldown. A real
@@ -632,7 +649,36 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
                 continue
             log.warning("LLM %s status=%d after %d attempts, failing over", tag, status, max_retries)
             break
+    return None
 
-    await _maybe_send_rate_limit_alert()
-    log.debug("LLM: all providers exhausted for task=%s", task)
+
+async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "classify") -> dict:
+    """Route a JSON-mode chat call through the task's (provider, model) chain. When the
+    whole chain is out but a model returns within _CHAIN_REVIVE_WAIT, wait for it and walk
+    the chain once more. Returns the parsed dict, or {} when nothing is usable / on
+    persistent failure (caller falls back to raw text)."""
+    chain = _resolve_chain(task)
+    if not chain:
+        log.warning("LLM: no usable provider for task=%s (no API keys), short-circuiting", task)
+        return {}
+
+    temperature = 0.0 if task in _DETERMINISTIC_TASKS else 0.1
+    list_key = _LIST_ROOT_KEY.get(task)
+    for chain_pass in range(2):
+        parsed = await _walk_chain(chain, messages, max_retries, temperature, list_key)
+        if parsed is not None:
+            return parsed
+        wait = _revival_wait(chain)
+        if chain_pass or wait is None:
+            break
+        log.info("LLM: every model for task=%s is rate limited, waiting %.0fs for the first to return",
+                 task, wait)
+        await asyncio.sleep(wait)
+
+    # Only a chain that stays out alerts: one that was merely busy (10-13: every model in
+    # a short cooldown, the digest built in 20.8s) told the admin summaries were falling
+    # back to raw text when none did.
+    if is_task_dead(task):
+        await _maybe_send_rate_limit_alert()
+    log.info("LLM: no model answered task=%s, caller falls back", task)
     return {}

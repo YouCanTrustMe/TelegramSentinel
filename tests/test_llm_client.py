@@ -392,6 +392,91 @@ def test_llm_json_returns_empty_when_all_dead(monkeypatch):
     assert llm_client.is_task_dead("t_dead") is True
 
 
+def _record_alerts(monkeypatch) -> list:
+    alerts = []
+
+    async def fake_alert():
+        alerts.append(1)
+    monkeypatch.setattr(llm_client, "_maybe_send_rate_limit_alert", fake_alert)
+    return alerts
+
+
+def test_a_long_retry_after_is_skipped_not_slept(monkeypatch):
+    """2026-10-12 14:45: groq asked for 172.8s and the filter slept it, twice (296s build)."""
+    import asyncio
+    llm_client._quota_dead_until.clear()
+    llm_client._backoff_until.clear()
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_long_ra", [("groq", "m1"), ("groq", "m2")])
+    calls = []
+
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        calls.append(model)
+        return (None, 429, {"retry-after": "172.8"}, "") if model == "m1" else ({"ok": 1}, 200, {}, "")
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_long_ra"))
+
+    assert out == {"ok": 1} and calls == ["m1", "m2"]
+    assert "groq/m1" not in llm_client._backoff_until
+    assert llm_client._is_dead("groq/m1")
+    llm_client._quota_dead_until.clear()
+
+
+def test_a_chain_out_for_a_short_cooldown_waits_for_it_and_alerts_nobody(monkeypatch):
+    """10-13 09:45: every model was in a short cooldown, the call gave up at once and the
+    admin was told summaries fall back to raw text — the digest built in 20.8s."""
+    import asyncio
+    llm_client._quota_dead_until.clear()
+    alerts = _record_alerts(monkeypatch)
+    monkeypatch.setattr(llm_client, "_RATE_LIMIT_COOLDOWN", 0.05)
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_revive", [("groq", "m1")])
+    calls = []
+
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        calls.append(model)
+        return (None, 429, {}, "") if len(calls) == 1 else ({"ok": 2}, 200, {}, "")
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_revive"))
+
+    assert out == {"ok": 2} and calls == ["m1", "m1"] and alerts == []
+    llm_client._quota_dead_until.clear()
+
+
+def test_a_briefly_busy_chain_gives_up_after_one_wait_without_alerting(monkeypatch):
+    import asyncio
+    llm_client._quota_dead_until.clear()
+    alerts = _record_alerts(monkeypatch)
+    monkeypatch.setattr(llm_client, "_RATE_LIMIT_COOLDOWN", 0.05)
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_busy", [("groq", "m1")])
+    calls = []
+
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        calls.append(model)
+        return None, 429, {}, ""
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_busy"))
+
+    assert out == {} and len(calls) == 2 and alerts == []
+    assert not llm_client.is_task_dead("t_busy")
+    llm_client._quota_dead_until.clear()
+
+
+def test_a_chain_that_stays_dead_alerts_without_waiting(monkeypatch):
+    import asyncio
+    llm_client._quota_dead_until.clear()
+    alerts = _record_alerts(monkeypatch)
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_gone", [("groq", "m1")])
+    calls = []
+
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        calls.append(model)
+        return None, 429, {"retry-after": "600"}, ""
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_gone"))
+
+    assert out == {} and calls == ["m1"] and alerts == [1]
+    llm_client._quota_dead_until.clear()
+
+
 def test_alert_provider_throttles_repeat(monkeypatch):
     import asyncio
     sent = []

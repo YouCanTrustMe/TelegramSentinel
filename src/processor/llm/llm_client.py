@@ -15,6 +15,7 @@ import time
 
 import aiohttp
 
+from src.common.util import describe_exc
 from src.config import settings
 
 log = logging.getLogger(__name__)
@@ -463,7 +464,9 @@ async def _ping(provider: str) -> int | None:
         async with session.post(PROVIDERS[provider]["base"], json=payload, headers=headers) as r:
             return r.status
     except Exception as exc:
-        log.warning("LLM verify: %s unreachable (%s)", provider, str(exc)[:80])
+        # INFO, not WARNING (which reaches the admin): a ping that times out says nothing about
+        # the key, and the calls themselves fail over and alert when a whole chain is out.
+        log.info("LLM verify: %s unreachable (%s) — skipped", provider, describe_exc(exc))
         return None
 
 
@@ -483,9 +486,7 @@ async def verify_llm_providers() -> None:
             await _alert_provider(provider, "billing/credit exhausted (HTTP 402) — provider dropped for 24h")
         elif status == 404:
             await _alert_provider(provider, f"model '{_sample_model(provider)}' not found (HTTP 404) — retired? routing entry needs updating")
-        elif status is None:
-            log.warning("LLM verify: %s unreachable (network) — skipped", provider)
-        else:
+        elif status is not None:
             log.info("LLM verify: %s key OK (HTTP %d)", provider, status)
 
 
@@ -564,7 +565,7 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
                                                              call_temperature, list_key)
             except Exception as exc:
                 _bump(tag, "error")
-                log.log(_failover_level(chain, idx), "LLM call error on %s: %s, failing over", tag, str(exc)[:120])
+                log.log(_failover_level(chain, idx), "LLM call error on %s: %s, failing over", tag, describe_exc(exc))
                 break  # next chain entry
 
             if status == 200 and parsed is not None:

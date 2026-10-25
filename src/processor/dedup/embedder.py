@@ -12,6 +12,7 @@ from array import array
 import aiohttp
 import numpy as np
 
+from src.common.util import describe_exc
 from src.config import settings
 
 log = logging.getLogger(__name__)
@@ -287,10 +288,10 @@ async def embed_texts(texts: list[str]) -> list[list[float] | None]:
             except Exception as exc:
                 # Fail-open and self-healing, so INFO: _note_pass decides when a
                 # run of these is an outage worth telling the admin about.
-                log.info("Embed retry failed on chunk %d: %s", i // _BATCH_LIMIT, exc)
+                log.info("Embed retry failed on chunk %d: %s", i // _BATCH_LIMIT, describe_exc(exc))
                 out.extend([None] * len(chunk))
         except Exception as exc:
-            log.info("Embed error on chunk %d: %s", i // _BATCH_LIMIT, exc)
+            log.info("Embed error on chunk %d: %s", i // _BATCH_LIMIT, describe_exc(exc))
             out.extend([None] * len(chunk))
     ok = sum(1 for v in out if v is not None)
     log.info("Embedded %d/%d text(s) via %s/%s", ok, len(texts), settings.embed_provider, active_model())

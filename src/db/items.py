@@ -27,6 +27,7 @@ async def save_item(
     sent: bool = False,
     reply_to: str | None = None,
     media_note: str | None = None,
+    votes: int | None = None,
 ) -> int:
     async with get_db() as db:
         # OR IGNORE: the regular poll loop and the pre-digest collect job can run
@@ -36,10 +37,10 @@ async def save_item(
         cur = await db.execute(
             """INSERT OR IGNORE INTO items
                (source_id, message_id, raw_text, original_url, published_at,
-                summary, category, processed_at, key_phrase, sent, reply_to, media_note)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                summary, category, processed_at, key_phrase, sent, reply_to, media_note, votes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (source_id, message_id, raw_text, original_url, published_at,
-             summary, category, processed_at, key_phrase or None, int(sent), reply_to, media_note),
+             summary, category, processed_at, key_phrase or None, int(sent), reply_to, media_note, votes),
         )
         await db.commit()
         return cur.lastrowid

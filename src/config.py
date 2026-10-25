@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     # Older posts are never shown: a new source's history (01portal: 82 of 100 entries
     # older than two days, WSJ back a month) or a catch-up after downtime.
     max_item_age_hours: int = 48
+    # Feeds that list an entry only once it is popular: hnrss.org shows a story when it
+    # reaches the points threshold, a day or two after it was posted. Judged by the posting
+    # time against max_item_age_hours, 2 such stories were dropped on 2026-10-25 alone, so
+    # these get a week; the cut still keeps a feed that was down for days from replaying.
+    rss_late_feed_hosts: list[str] = ["hnrss.org"]
+    rss_late_feed_max_age_hours: int = 168
     # Feeds whose entries carry a headline only: the collector reads the article's own
     # description or first paragraphs instead. hnrss.org gave "<title>. Article URL: …
     # Points: 506" — the summary had nothing to work from but the title.

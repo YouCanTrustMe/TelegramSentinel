@@ -134,3 +134,21 @@ async def test_confirming_spends_the_send_button(monkeypatch):
 
     await bot.handlers["cb_home_digest_go"](None, _Query())
     assert order == [("edit", None), "send"]
+
+
+def test_an_unchanged_screen_edit_is_not_logged_as_an_error():
+    import logging
+    import sys
+
+    from pyrogram.errors import MessageNotModified
+
+    from src.bot.commands import _DropUnchangedEdits
+
+    def record(exc):
+        try:
+            raise exc
+        except Exception:
+            return logging.LogRecord("pyrogram.dispatcher", logging.ERROR, "", 0, "Unexpected exception", None, sys.exc_info())
+
+    assert not _DropUnchangedEdits().filter(record(MessageNotModified()))
+    assert _DropUnchangedEdits().filter(record(ValueError("real bug")))

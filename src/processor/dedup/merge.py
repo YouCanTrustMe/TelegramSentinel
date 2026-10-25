@@ -32,6 +32,7 @@ def _items_as_plain(items: list) -> list[dict]:
             "published_at": item["published_at"],
             "raw_text": item["raw_text"],
             "media_note": row_get(item, "media_note"),
+            "votes": row_get(item, "votes"),
             "_item_ids": [item["id"]],
             "_earlier": list(row_get(item, "_earlier") or []),
         }
@@ -77,8 +78,9 @@ def _build_merged(cluster: list, summary: str, key_phrase: str) -> dict:
         "original_url": latest["original_url"] if latest else None,
         "published_at": latest["published_at"] if latest else ordered[-1]["published_at"],
         "raw_text": None,
-        # The line links the latest post, so it shows that post's video length or album size.
+        # The line links the latest post, so it shows that post's video length or votes.
         "media_note": row_get(latest, "media_note") if latest else None,
+        "votes": row_get(latest, "votes") if latest else None,
         "_item_ids": [it["id"] for it in cluster],
         # A member's own ↻ link (an update to a story shown in an earlier digest) stays. A
         # member published at the very moment of the latest is the same post republished

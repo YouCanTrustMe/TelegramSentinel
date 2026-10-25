@@ -759,3 +759,10 @@ def test_a_media_only_chip_carries_its_note():
     item = {"original_url": "https://t.me/x/1", "summary": "[Video]", "raw_text": "[Video]",
             "published_at": None, "key_phrase": "", "media_note": "1:05"}
     assert ">🎬 Video 1:05</a>" in digest_builder._format_item_base(item)
+
+
+def test_a_forum_story_shows_its_votes_after_the_line():
+    item = {"original_url": "https://x.hr/1", "summary": "Steal My Bitcoin пропонує знайти ключ", "raw_text": "",
+            "published_at": None, "key_phrase": "знайти ключ", "votes": 570}
+    assert digest_builder._format_item_base(item).endswith("</a> <i>· ▲ 570</i>")
+    assert "▲" not in digest_builder._format_item_base({**item, "votes": None})

@@ -223,6 +223,28 @@ async def test_an_entry_older_than_two_days_is_recorded_but_never_shown(tmp_path
     assert await _poll(monkeypatch, sid, feed) == 0
 
 
+@pytest.mark.asyncio
+async def test_a_late_feed_shows_an_old_story_when_it_arrives_with_its_votes(tmp_path, monkeypatch):
+    """hnrss lists a story once it has 500 points, often more than two days after it was
+    posted: 2 such stories were retired unshown on 2026-10-25."""
+    from src.config import settings
+    from src.db.base import init_db
+    from src.db.models import add_source, get_unsent_items, save_item
+
+    monkeypatch.setattr(settings, "database_path", str(tmp_path / "t.db"))
+    monkeypatch.setattr(settings, "rss_late_feed_hosts", ["x.hr"])
+    await init_db()
+    sid = await add_source("rss", "Hacker News", "https://x.hr/feed", "tech")
+    await save_item(source_id=sid, message_id="seed", raw_text="seed", original_url=None,
+                    published_at=None, summary="seed", category="tech", processed_at="2026-10-01", sent=True)
+    story = _entry("late", age_hours=60)
+    story["summary"] = "Article URL: https://x.hr/late Points: 590 # Comments: 284"
+    replayed = _entry("replayed", age_hours=24 * 9)  # still listed after the feed was down for days
+    assert await _poll(monkeypatch, sid, [story, replayed]) == 1
+    (row,) = await get_unsent_items()
+    assert row["votes"] == 590 and row["original_url"] == "https://x.hr/late"
+
+
 def test_the_wordpress_footer_is_cut_and_the_headline_kept():
     # Real Croatia Week / 01portal bodies, 2026-10.
     assert _compose_raw_text(
@@ -282,3 +304,22 @@ async def test_a_new_feed_listing_oldest_first_still_shows_its_fresh_entries(tmp
     feed = [_entry(n, age_hours=24 * 30) for n in range(12)] + [_entry(f"new{n}", age_hours=1) for n in range(3)]
     assert await _poll(monkeypatch, sid, feed) == 3
     assert len(await get_unsent_items()) == 3
+
+
+@pytest.mark.asyncio
+async def test_votes_are_read_only_from_a_late_feed(tmp_path, monkeypatch):
+    from src.config import settings
+    from src.db.base import init_db
+    from src.db.models import add_source, get_unsent_items, save_item
+
+    monkeypatch.setattr(settings, "database_path", str(tmp_path / "t.db"))
+    monkeypatch.setattr(settings, "rss_late_feed_hosts", ["news.ycombinator.example"])
+    await init_db()
+    sid = await add_source("rss", "League", "https://x.hr/feed", "feed")
+    await save_item(source_id=sid, message_id="seed", raw_text="seed", original_url=None,
+                    published_at=None, summary="seed", category="feed", processed_at="2026-10-01", sent=True)
+    match = _entry("match", age_hours=1)
+    match["summary"] = "Dinamo top of the table. Points: 12"
+    assert await _poll(monkeypatch, sid, [match]) == 1
+    (row,) = await get_unsent_items()
+    assert row["votes"] is None

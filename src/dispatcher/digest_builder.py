@@ -412,7 +412,9 @@ def _format_item_base(item: dict) -> str:
     nested = bool(row_get(item, "_nested"))
     stamp = f"<i>{'↳ ' if nested else ''}{hhmm}</i>" if hhmm else ("<i>↳</i>" if nested else "")
 
-    suffix = ""
+    votes = row_get(item, "votes")
+    # A forum story's votes say why it is here at all: it made the front page.
+    suffix = f" <i>· ▲ {votes}</i>" if votes else ""
 
     prefix = (f"{'  ' if nested else ''}{stamp}  " if stamp else "") + marker
     key_phrase = (row_get(item, "key_phrase", "") or "").strip()

@@ -222,3 +222,11 @@ def test_a_line_keeps_its_media_note_through_the_merge():
              "media_note": "×5"}
     assert mg._build_merged([single, newer], "s", "")["media_note"] == "×5"
 
+
+def test_a_line_keeps_its_votes_through_the_merge():
+    story = {"id": 1, "summary": "s", "key_phrase": "", "original_url": "https://x/1",
+             "published_at": "2026-10-25T09:00:00+00:00", "raw_text": "r", "votes": 510}
+    (plain,) = mg._items_as_plain([story])
+    assert plain["votes"] == 510
+    newer = {**story, "id": 2, "original_url": "https://x/2", "published_at": "2026-10-25T10:00:00+00:00", "votes": 590}
+    assert mg._build_merged([story, newer], "s", "")["votes"] == 590

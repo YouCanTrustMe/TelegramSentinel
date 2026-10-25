@@ -43,6 +43,15 @@ def _strip_wordpress_footer(title: str, body: str) -> str:
     return re.sub(_WORDPRESS_FOOTER.format(title=re.escape(title)), "", body)
 
 
+# hnrss puts a story's points in its body ("Points: 590 # Comments: 284").
+_VOTES_RE = re.compile(r"\bPoints:\s*(\d+)")
+
+
+def _votes(entry) -> int | None:
+    match = _VOTES_RE.search(entry.get("summary", "") or "")
+    return int(match.group(1)) if match else None
+
+
 def _compose_raw_text(title: str, body: str) -> str:
     """Combine a feed entry's headline (title) and description/standfirst (body).
     The headline is the most informative part; some feeds (e.g. FT) put the real
@@ -176,7 +185,8 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
     entries = feed.entries
     log.info("RSS '%s': %d feed entries (bootstrap=%s)", name, len(entries), is_new)
     now = datetime.now(timezone.utc)
-    max_age = timedelta(hours=settings.max_item_age_hours)
+    late = _host_listed(url, settings.rss_late_feed_hosts)
+    max_age = timedelta(hours=settings.rss_late_feed_max_age_hours if late else settings.max_item_age_hours)
     overflow = old = fresh = 0
 
     for entry in entries:
@@ -235,13 +245,14 @@ async def fetch_feed(source_id: int, name: str, url: str, category: str, prompt_
             category=category,
             processed_at=datetime.now(timezone.utc).isoformat(),
             key_phrase=key_phrase,
+            votes=_votes(entry) if late else None,
         )
         log.info("Saved item from '%s' | category=%s | %s", name, category, (entry_url or message_id)[:80])
         saved += 1
 
     if overflow or old:
         log.info("RSS '%s': %d new items, retired unshown: %d past the first %d of a new source, %d older than %dh",
-                 name, saved, overflow, _BOOTSTRAP_LIMIT, old, settings.max_item_age_hours)
+                 name, saved, overflow, _BOOTSTRAP_LIMIT, old, max_age // timedelta(hours=1))
     else:
         log.info("RSS '%s': %d new items", name, saved)
     return saved

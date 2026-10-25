@@ -8,6 +8,7 @@ no source gave, "Віктором Орбаном" for a post naming "Мадяр"
 fact moved inside the source's own words (a fire put in the wrong town), so it is a
 second line, not a judge."""
 import re
+from collections import Counter
 from datetime import datetime, timezone
 
 _CYRILLIC = re.compile(r"[а-яіїєґё]", re.IGNORECASE)
@@ -137,16 +138,56 @@ def _is_year(value: float) -> bool:
 # must not vouch for an invented "2024". At most this many source figures are combined.
 _SUM_OPERANDS = 12
 
+# Small counts a post writes as words take part in sums too: "two killed ... one killed"
+# adds up to three killed, "hit in 14 places, debris in nine more" to 23 hits (6 of 9 false
+# flags of 10-19..24). Whole words only: a prefix would read the Ukrainian for "alert" as
+# 3 and for "family" as 7.
+_COUNT_WORDS = {
+    1: ("один", "одна", "одне", "одну", "одного", "одної", "одній", "одному", "одним", "одною", "one",
+        "jedan", "jedna", "jedno"),
+    2: ("два", "дві", "двох", "двоє", "двом", "двома", "two", "dva", "dvije"),
+    3: ("три", "трьох", "троє", "трьом", "трьома", "three", "tri"),
+    4: ("чотири", "чотирьох", "четверо", "чотирьом", "чотирма", "four", "četiri"),
+    # Not the Croatian "pet": it is an English word too.
+    5: ("п'ять", "п'яти", "п'ятьох", "п'ятеро", "п'ятьма", "five"),
+    6: ("шість", "шести", "шістьох", "шестеро", "шістьма", "six", "šest"),
+    7: ("сім", "семи", "сімох", "семеро", "сімома", "seven", "sedam"),
+    8: ("вісім", "восьми", "вісьмох", "восьмеро", "вісьмома", "eight", "osam"),
+    9: ("дев'ять", "дев'яти", "дев'ятьох", "дев'ятеро", "дев'ятьма", "nine", "devet"),
+    10: ("десять", "десяти", "десятьох", "десятеро", "десятьма", "ten", "deset"),
+}
+_ONE_TOPS_UP_TO = 10
+_COUNT_WORD_VALUE = {word: value for value, words in _COUNT_WORDS.items() for word in words}
+# Wallet addresses and links are digits, not figures: "0x4A85…" filled the operand slots
+# ahead of 10,954 + 9,000 + 4,500 ETH. A shortened address keeps its tail ("0x4a85…9f3e").
+_NOT_FIGURES = re.compile(r"https?://\S+|\b0x[0-9a-f]+(?:(?:…|\.\.\.)[0-9a-f]+)?\b", re.IGNORECASE)
 
-def _is_sum(value: float, source_numbers: set[str]) -> bool:
+
+def _sum_operands(source: str) -> list[float]:
+    """The figures a model may add up, smallest first; one written twice is there twice ("two
+    killed in Kharkiv, two in Sumy" → 4). A digit 1 never takes part: it is in every date.
+    Count words come on top of the figures' slots, never in place of them."""
+    lowered = _NOT_FIGURES.sub(" ", source.lower())
+    figures = sorted({float(n) for n in _source_numbers(lowered) if not _is_year(float(n)) and float(n) > 1})
+    words = re.sub(r"[’ʼ]", "'", lowered)
+    counted = [float(_COUNT_WORD_VALUE[w]) for w in _WORD.findall(words) if w in _COUNT_WORD_VALUE]
+    seen = Counter(float(n) for n in _INTEGER.findall(lowered)) + Counter(counted)
+    operands = set(figures[:_SUM_OPERANDS]) | set(counted)
+    return sorted([*operands, *(n for n in operands if seen[n] > 1)])
+
+
+def _is_sum(value: float, operands: list[float]) -> bool:
     if _is_year(value):
         return False
-    operands = sorted({float(n) for n in source_numbers if not _is_year(float(n)) and float(n) > 1})[:_SUM_OPERANDS]
     close = lambda total: abs(total - value) <= max(1e-6, abs(value) * 1e-9)
+    # A worded 1 is in every other post ("one of"): it only tops up a small tally ("two
+    # killed ... one killed" → 3), never turns an invented 149 999 into 150 000 − 1.
+    if value > _ONE_TOPS_UP_TO:
+        operands = [n for n in operands if n != 1]
     for i, a in enumerate(operands):
         for j in range(i + 1, len(operands)):
             b = operands[j]
-            if close(a + b) or close(abs(a - b)):
+            if close(a + b) or (a != 1 and close(abs(a - b))):
                 return True
             if any(close(a + b + c) for c in operands[j + 1:]):
                 return True
@@ -178,6 +219,7 @@ def unsupported_facts(summary: str, source: str) -> list[str]:
     found: list[str] = []
 
     source_numbers = _source_numbers(source)
+    operands = _sum_operands(source)
     lowered = source.lower()
     year = datetime.now(timezone.utc).year
     # A year next to this one is how a model writes "last year" / "next year".
@@ -189,7 +231,7 @@ def unsupported_facts(summary: str, source: str) -> list[str]:
         words = _NUMBER_WORDS.get(int(value)) if value.is_integer() else None
         if words and any(_has_word(lowered, w) for w in words):
             continue
-        if _is_sum(value, source_numbers) or (scaled and _is_sum(float(scaled), source_numbers)):
+        if _is_sum(value, operands) or (scaled and _is_sum(float(scaled), operands)):
             continue
         if plain not in found:
             found.append(plain)

@@ -180,3 +180,59 @@ def test_a_wrong_sum_or_a_year_built_from_figures_stays_flagged():
     source = "Бікарац — до 130 000 тонн відходів на рік. Осієк — до 54 000 тонн на рік. До 2026 року — 2 заводи."
     assert unsupported_facts("Заводи перероблятимуть 234 000 тонн сміття", source) == ["234000"]
     assert unsupported_facts("Заводи запрацюють у 2024 році", source) == ["2024"]
+
+
+def test_a_sum_of_counts_written_as_words_is_supported():
+    # 10-21: "дві людини загинули … одна людина загинула" summarised as three killed.
+    source = ("Росіяни атакували Коротич, дві людини загинули, ще 11 поранені. На Рівненщині четверо людей "
+              "постраждали. У Кременчуці двоє людей отримали поранення. У Києві одна людина загинула.")
+    assert unsupported_facts("Атаки вбили 3 людей та поранили 17 осіб.", source) == []
+    # 10-25: "у 14 місцях, уламки ще на дев'яти локаціях" as 23 hits.
+    assert unsupported_facts("Зафіксовано 23 влучання.", "Дрони влучили у 14 місцях, а уламки впали ще на дев'яти локаціях.") == []
+
+
+def test_a_word_that_only_starts_like_a_count_adds_nothing():
+    # "тривога" opens like "три", "сім'я" like "сім".
+    assert unsupported_facts("Загинули 5 людей.", "У сім'ї двоє загиблих, тривога триває, ще 2 поранені.") == ["5"]
+
+
+def test_a_digit_one_never_vouches_for_an_off_by_one_figure():
+    # A prod summary wrote "майже 150 тисяч" as 149 999; the 1 of "1,29 млн" must not explain it.
+    source = "За рік з Польщі виїхало майже 150 тисяч українців. Найбільше біженців у Німеччині — 1,29 млн."
+    assert unsupported_facts("З Польщі виїхало 149 999 українців.", source) == ["149999"]
+
+
+def test_wallet_addresses_do_not_crowd_out_the_figures_being_added():
+    source = ("0x4A85 withdrew 10,954 $ETH ($26.97M) from Kraken. 0xdeA6 withdrew 9,000 $ETH ($22.42M). "
+              "0xD338 withdrew 4,500 $ETH ($11.29M). https://arkm.com/explorer/address/0x4A8517e26d934E89f4449e6717Ef2756512E7FD9")
+    assert "60.68" not in unsupported_facts("Кити вивели ETH на 60,68 млн доларів.", source)
+
+
+def test_a_worded_one_tops_up_a_small_tally_but_never_shifts_a_big_figure():
+    assert unsupported_facts("Загинули 151 людина.", "Загинули 150 людей, одна з них дитина.") == ["151"]
+    assert unsupported_facts("Killed 149.", "One of the deadliest: 150 killed.") == ["149"]
+
+
+def test_a_count_word_with_the_keyboard_apostrophe_still_counts():
+    assert unsupported_facts("25 постраждалих.", "Пʼять загиблих і 20 поранених.") == []
+
+
+def test_a_digit_one_never_tops_up_a_tally():
+    # A digit 1 is in every date: "1 October" must not vouch for an extra casualty.
+    assert unsupported_facts("Загинули 4 людини.", "3 загиблих, атака сталася 1 жовтня.") == ["4"]
+    assert unsupported_facts("Поранено 5 людей.", "Окупанти поранили одну жінку, ще четверо постраждали.") == []
+
+
+def test_a_count_written_twice_adds_up_with_itself():
+    assert unsupported_facts("Загинули 4 людини.", "У Харкові двоє загиблих, у Сумах двоє загиблих.") == []
+    assert unsupported_facts("Набрали 10 лікарів.", "Вісім лікарів загальної практики, один ветеринар, один стоматолог.") == []
+    assert unsupported_facts("Загинули 4 людини.", "У Харкові двоє загиблих.") == ["4"]
+
+
+def test_croatian_count_words_take_part_in_sums():
+    assert unsupported_facts("Постраждали 5 людей.", "Dvije osobe poginule, još 3 ozlijeđene.") == []
+
+
+def test_a_shortened_wallet_address_does_not_crowd_out_the_figures():
+    source = "0x4a85…9f3e " + " ".join(f"{n} ETH" for n in range(20, 31)) + " 500 ETH 700 ETH"
+    assert "1200" not in unsupported_facts("Разом 1200 ETH.", source.replace(" 20 ETH", ""))

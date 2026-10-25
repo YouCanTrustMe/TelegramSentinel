@@ -151,6 +151,26 @@ def test_verify_alerts_on_invalid_key(monkeypatch):
     assert "mistral" in calls and "gemini" in calls  # 401 → alerted
 
 
+def test_an_exception_without_text_is_named_by_its_type():
+    import asyncio
+    from src.common.util import describe_exc
+    assert describe_exc(asyncio.TimeoutError()) == "TimeoutError"
+    assert describe_exc(ValueError("bad json")) == "ValueError: bad json"
+
+
+def test_a_ping_that_times_out_logs_one_info_line_and_no_warning(monkeypatch, caplog):
+    import asyncio
+    import logging
+    async def timing_out_session():
+        raise asyncio.TimeoutError()
+    monkeypatch.setattr(llm_client, "_get_session", timing_out_session)
+    monkeypatch.setattr(llm_client.settings, "gemini_api_key", "x", raising=False)
+    with caplog.at_level(logging.INFO, logger=llm_client.log.name):
+        assert asyncio.run(llm_client._ping("gemini")) is None
+    lines = [r for r in caplog.records if "unreachable" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].levelno == logging.INFO and "TimeoutError" in lines[0].getMessage()
+
+
 def _noop_alert(monkeypatch):
     async def _noop():
         return None

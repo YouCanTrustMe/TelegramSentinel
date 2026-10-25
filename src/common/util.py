@@ -92,3 +92,9 @@ def ago(hours: float | None) -> str:
     if hours < 48:
         return f"{int(hours)}h ago"
     return f"{int(hours // 24)}d ago"
+
+
+def describe_exc(exc: BaseException) -> str:
+    """An exception for a log line: a timeout's text is empty, which logged as "error: ," (2026-10-25)."""
+    text = str(exc)[:120]
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__

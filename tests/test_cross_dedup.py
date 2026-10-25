@@ -722,3 +722,18 @@ async def test_direct_twins_leave_an_already_hidden_post_alone(monkeypatch):
 
     assert await cd._judge_direct_pairs(item_by_id, {1: _vec(1, 0), 2: _at(0.91)}, {2: 99}, set()) == {}
     assert calls["n"] == 0
+
+
+async def test_a_loose_direct_twin_called_an_update_stays(monkeypatch):
+    """10-22: a feature on Kyiv mothers sheltering in the metro (0.883 to a strike report)
+    was hidden as its "update"; the Omsk warehouse pair that was right scored 0.94."""
+    judge, calls = _judge(lambda a, b: "update")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    monkeypatch.setattr(cd.settings, "dedup_direct_pair_floor", 0.88)
+    monkeypatch.setattr(cd.settings, "dedup_log_floor", 0.86)
+    monkeypatch.setattr(cd.settings, "dedup_auto_hide_in_digest_threshold", 0.90)
+    item_by_id = {1: _row(1, 1, raw_text="strike on Kyiv, 15 injured, metro bridge damaged " * 5),
+                  2: _row(2, 2, raw_text="mothers torn on whether to stay")}
+
+    assert await cd._judge_direct_pairs(item_by_id, {1: _vec(1, 0), 2: _at(0.885)}, {}, set()) == {}
+    assert await cd._judge_direct_pairs(item_by_id, {1: _vec(1, 0), 2: _at(0.94)}, {}, set()) == {2: 1}

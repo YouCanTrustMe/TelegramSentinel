@@ -127,6 +127,14 @@ def test_war_line_names_its_channel_and_muted_duplicates_in_one_tail():
     assert "(" not in line.split("</a>", 1)[1]
 
 
+def test_a_source_is_named_once_however_many_of_its_posts_were_muted():
+    item = {**_item(1, "Су-30 розбився", "2026-10-21T18:00:00+00:00"), "_via": "Бабель"}
+    links = {1: [("Бавовна", "https://t.me/b/1"), ("Бавовна", "https://t.me/b/2"),
+                 ("Лачен", "https://t.me/l/1"), ("Бабель", "https://t.me/bb/2"), ("Бавовна", "https://t.me/b/3")]}
+    tail = db._format_item(item, links).split("<i>· ", 1)[1]
+    assert tail == 'Бабель, <a href="https://t.me/b/1">Бавовна</a>, <a href="https://t.me/l/1">Лачен</a></i>'
+
+
 async def test_too_few_war_reports_leave_the_feed_untouched(monkeypatch):
     monkeypatch.setattr(db.settings, "war_block_min_items", 3)
 

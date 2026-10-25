@@ -54,8 +54,43 @@ def test_a_reply_to_a_post_shown_earlier_says_what_it_answers():
 def test_an_original_older_than_a_digest_gap_carries_its_date():
     parent = {"id": 9, "summary": "Трамп підписав указ", "raw_text": "",
               "original_url": "https://t.me/l/69040", "published_at": "2026-10-16T03:44:00+00:00"}
-    item = {**_line(5, "Трамп не скасував санкції", "2026-10-17T16:02:00+00:00"), "_reply_parent": parent}
+    item = {**_line(5, "Трамп не скасував санкції", "2026-10-18T16:02:00+00:00"), "_reply_parent": parent}
     assert ">16/10 " in db._reply_line(item)
+
+
+def test_an_original_from_the_day_before_reads_yday():
+    parent = {"id": 9, "summary": "Трамп підписав указ", "raw_text": "",
+              "original_url": "https://t.me/l/69040", "published_at": "2026-10-16T09:44:00+00:00"}
+    item = {**_line(5, "Трамп не скасував санкції", "2026-10-17T16:02:00+00:00"), "_reply_parent": parent}
+    assert ">yday 11:44</a>" in db._reply_line(item)
+
+
+def test_an_unnamed_media_original_is_linked_without_a_quote():
+    parent = {"id": 9, "summary": "no text", "raw_text": "[Media]",
+              "original_url": "https://t.me/l/39447", "published_at": "2026-10-19T12:15:00+00:00"}
+    line = db._reply_line({**_line(5, "Схеми перекриття руху", "2026-10-19T14:17:00+00:00"), "_reply_parent": parent})
+    assert line.endswith("</a></i>") and "📦" not in line
+
+
+def test_an_unsummarised_media_original_is_linked_without_a_quote():
+    parent = {"id": 9, "summary": None, "raw_text": "[Media]",
+              "original_url": "https://t.me/l/39447", "published_at": "2026-10-19T12:15:00+00:00"}
+    line = db._reply_line({**_line(5, "Схеми перекриття руху", "2026-10-19T14:17:00+00:00"), "_reply_parent": parent})
+    assert line.endswith("</a></i>") and "[Media]" not in line
+
+
+def test_an_unsummarised_photo_original_is_quoted_from_its_caption():
+    parent = {"id": 9, "summary": "", "raw_text": "[Photo] Схема перекриття руху на Хрещатику",
+              "original_url": "https://t.me/l/39447", "published_at": "2026-10-19T12:15:00+00:00"}
+    line = db._reply_line({**_line(5, "Рух відновили", "2026-10-19T14:17:00+00:00"), "_reply_parent": parent})
+    assert "Схема перекриття" in line and "[Photo]" not in line
+
+
+def test_a_photo_caption_kept_as_its_summary_is_quoted_without_the_token():
+    parent = {"id": 9, "summary": "[Photo] Тривога у Києві", "raw_text": "[Photo] Тривога у Києві",
+              "original_url": "https://t.me/l/39447", "published_at": "2026-10-19T12:15:00+00:00"}
+    line = db._reply_line({**_line(5, "Відбій", "2026-10-19T14:17:00+00:00"), "_reply_parent": parent})
+    assert "Тривога у Києві" in line and "[Photo]" not in line
 
 
 def test_an_original_with_no_summary_is_quoted_from_its_text():

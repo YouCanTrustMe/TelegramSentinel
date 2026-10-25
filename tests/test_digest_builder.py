@@ -371,10 +371,12 @@ def test_published_time_prefix_is_italic_hh_mm(monkeypatch):
     # The stamp carries minutes and rides in the italic the chrome uses, so an
     # item line never reads as "13⏰" — a bare hour with the clock trailing it.
     monkeypatch.setattr(digest_builder.settings, "digest_timezone", "UTC")
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    monkeypatch.setattr(digest_builder, "_today", lambda tz: now.date())
     item = {"original_url": "https://t.me/x/1", "summary": "Fed holds rates",
-            "raw_text": "", "published_at": "2026-08-31T13:40:00+00:00", "key_phrase": "Fed"}
+            "raw_text": "", "published_at": now.isoformat(), "key_phrase": "Fed"}
     line = digest_builder._format_item_base(item)
-    assert line.startswith("<i>13:40</i>  ")
+    assert line.startswith(f"<i>{now:%H:%M}</i>  ")
     assert "⏰" not in line
 
 
@@ -727,3 +729,33 @@ def test_a_carried_heading_never_pushes_a_message_past_the_limit():
     messages = _split_into_messages([first, heading, big])
     assert all(len(text) <= _TELEGRAM_LIMIT for text, _ids in messages)
     assert [ids for _text, ids in messages] == [[1], [2]]
+
+
+def test_a_line_from_an_earlier_day_carries_its_day(monkeypatch):
+    # A Hacker News story reaches the feed a day or two after it was posted.
+    monkeypatch.setattr(digest_builder.settings, "digest_timezone", "UTC")
+    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(digest_builder, "_today", lambda tz: now.date())
+    yday = {"original_url": "https://t.me/x/1", "summary": "Fed holds rates", "raw_text": "",
+            "published_at": (now - timedelta(days=1)).replace(hour=21, minute=9).isoformat(), "key_phrase": "Fed"}
+    older = {**yday, "published_at": (now - timedelta(days=2)).replace(hour=21, minute=9).isoformat()}
+    assert digest_builder._format_item_base(yday).startswith("<i>yday 21:09</i>  ")
+    assert digest_builder._format_item_base(older).startswith(f"<i>{now - timedelta(days=2):%d/%m} 21:09</i>  ")
+
+
+def test_a_short_media_post_shows_an_emoji_and_its_note_in_place_of_the_token():
+    item = {"original_url": "https://t.me/x/1", "summary": "[Video] Хмельницький сьогодні у заторах",
+            "raw_text": "[Video] Хмельницький сьогодні у заторах", "published_at": None, "key_phrase": "",
+            "media_note": "0:42"}
+    line = digest_builder._format_item_base(item)
+    assert "[Video]" not in line and line.startswith("🎬 0:42 ") and "0:42</a>" not in line
+    album = {**item, "summary": "[Photo] Наслідки удару", "media_note": "×5"}
+    assert digest_builder._format_item_base(album).startswith("📷 ×5 ")
+    bare = {**item, "summary": "[Photo] Наслідки удару", "media_note": None}
+    assert digest_builder._format_item_base(bare).startswith("📷 ")
+
+
+def test_a_media_only_chip_carries_its_note():
+    item = {"original_url": "https://t.me/x/1", "summary": "[Video]", "raw_text": "[Video]",
+            "published_at": None, "key_phrase": "", "media_note": "1:05"}
+    assert ">🎬 Video 1:05</a>" in digest_builder._format_item_base(item)

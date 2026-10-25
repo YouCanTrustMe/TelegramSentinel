@@ -1,6 +1,6 @@
 """A channel's reply to its own earlier post: stored with its parent, shown under it in
 one digest, or with "↳ to <time> <opening words>" when the original is elsewhere."""
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -51,14 +51,16 @@ def test_a_reply_to_a_post_shown_earlier_says_what_it_answers():
     assert second.endswith("У росіян — мінус 6 винищувачів Су-34М…</i>")
 
 
-def test_an_original_older_than_a_digest_gap_carries_its_date():
+def test_an_original_older_than_a_digest_gap_carries_its_date(monkeypatch):
+    monkeypatch.setattr(db, "_today", lambda tz: date(2026, 10, 18))
     parent = {"id": 9, "summary": "Трамп підписав указ", "raw_text": "",
               "original_url": "https://t.me/l/69040", "published_at": "2026-10-16T03:44:00+00:00"}
     item = {**_line(5, "Трамп не скасував санкції", "2026-10-18T16:02:00+00:00"), "_reply_parent": parent}
     assert ">16/10 " in db._reply_line(item)
 
 
-def test_an_original_from_the_day_before_reads_yday():
+def test_an_original_from_the_day_before_reads_yday(monkeypatch):
+    monkeypatch.setattr(db, "_today", lambda tz: date(2026, 10, 17))
     parent = {"id": 9, "summary": "Трамп підписав указ", "raw_text": "",
               "original_url": "https://t.me/l/69040", "published_at": "2026-10-16T09:44:00+00:00"}
     item = {**_line(5, "Трамп не скасував санкції", "2026-10-17T16:02:00+00:00"), "_reply_parent": parent}

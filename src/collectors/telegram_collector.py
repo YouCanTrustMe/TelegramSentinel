@@ -5,7 +5,7 @@ import logging
 import os
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from pyrogram import Client, raw as tg_raw
 from pyrogram.errors import ChannelBanned, ChannelInvalid, ChannelPrivate, ChatForbidden, FloodWait, InternalServerError, ServiceUnavailable, UserBannedInChannel, UserKicked, UsernameInvalid, UsernameNotOccupied
@@ -195,6 +195,25 @@ def _is_service(message: Message) -> bool:
     return bool(getattr(message, "service", None) or getattr(message, "empty", None))
 
 
+def _media_note(message: Message, album: int) -> str | None:
+    """What the digest's media marker adds: an album's size, else how long a video, voice
+    or audio runs. Library objects only, never raises: a post without it just has none."""
+    if album > 1:
+        return f"×{album}"
+    try:
+        media = next((m for m in (getattr(message, attr, None) for attr, _, _ in MEDIA_TYPES) if m is not None), None)
+        seconds = getattr(media, "duration", None)
+    except Exception:
+        # The post that raises while being read (see _salvage_text) may raise here too.
+        return None
+    if isinstance(seconds, timedelta):
+        seconds = seconds.total_seconds()
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return None
+    hours, rest = divmod(int(seconds), 3600)
+    return f"{hours}:{rest // 60:02d}:{rest % 60:02d}" if hours else f"{rest // 60}:{rest % 60:02d}"
+
+
 def _read_message(message: Message) -> tuple[str, bool] | None:
     """The text a post is stored with, and whether it is only a media token; None for a
     service or empty message, which is not stored."""
@@ -339,7 +358,8 @@ async def _report_unreadable(chat_ref: str, message: Message, url: str, exc: Exc
         log.warning("Could not report an unreadable post from %s (%s): %r", chat_ref, url, report_exc)
 
 
-async def _process_message(chat_ref: str, source: dict, message: Message, parent_msg: "Message | None" = None) -> bool:
+async def _process_message(chat_ref: str, source: dict, message: Message, parent_msg: "Message | None" = None,
+                           album: int = 1) -> bool:
     # One unreadable post used to raise out of the poll and stall its whole channel on it
     # every 5 minutes until the rest aged out. Database errors are not caught here.
     unreadable = None
@@ -410,6 +430,7 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
         processed_at=datetime.now(timezone.utc).isoformat(),
         key_phrase=key_phrase,
         reply_to=make_message_id("telegram", chat_ref, str(parent_id)) if parent_id else None,
+        media_note=_media_note(message, album),
     )
     log.info("Saved item from %s | category=%s | %s%s", chat_ref, source["category"], original_url,
              f" | reply to {parent_id}" if parent_id else "")
@@ -470,12 +491,14 @@ async def _poll_channel(chat_ref: str, source: dict, gaps: list | None = None) -
             if message.id > max_seen_id:
                 max_seen_id = message.id
             group_id = message.media_group_id
+            album = 1
             if group_id is not None:
                 if group_id in seen_group_ids:
                     continue
                 seen_group_ids.add(group_id)
                 group_msgs = [m for m in messages if m.media_group_id == group_id]
                 message = next((m for m in group_msgs if (m.text or m.caption)), group_msgs[0])
+                album = len(group_msgs)
             # The bookmark still moves past it, so it is never fetched again. Service and
             # empty messages are dropped anyway, so they are not counted as lost posts.
             if _too_old(message):
@@ -483,7 +506,7 @@ async def _poll_channel(chat_ref: str, source: dict, gaps: list | None = None) -
                     stale += 1
                 continue
             parent_msg = await _reply_parent(chat_ref, message, messages_by_id)
-            if await _process_message(chat_ref, source, message, parent_msg=parent_msg):
+            if await _process_message(chat_ref, source, message, parent_msg=parent_msg, album=album):
                 saved += 1
         if stale:
             log.info("Source '%s': skipped %d post(s) older than %dh", source["name"], stale, settings.max_item_age_hours)

@@ -1,12 +1,27 @@
 """The morning digest reads differently from the rest of the day: the heavy feed goes
 last, its overnight war reports fold into one block led by the night's tally, and a story that was
 reported several times shows its newest post with the earlier ones as time links."""
+import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+
+import pytest
 
 import src.dispatcher.digest_builder as db
 import src.processor.llm.classifier as cl
 from src.processor.dedup.merge import _build_merged
+
+
+_STAMP = re.compile(r"(?:yday |\d\d/\d\d )?\d\d:\d\d")
+
+
+def _summary_of(text: str) -> str:
+    return text[_STAMP.match(text).end():].strip()
+
+
+@pytest.fixture(autouse=True)
+def _morning_of_the_fixtures(monkeypatch):
+    monkeypatch.setattr(db, "_today", lambda tz: date(2026, 9, 24))
 
 
 def _item(i, summary, pub="2026-09-24T05:00:00+00:00", url=None):
@@ -58,7 +73,7 @@ async def test_war_reports_fold_into_one_block_led_by_the_overview(monkeypatch):
 
     async def fake_pick(items):
         seen.extend(items)
-        by_text = {it["text"].split(" ", 1)[1]: it["id"] for it in items}
+        by_text = {_summary_of(it["text"]): it["id"] for it in items}
         tally = by_text["РФ атакувала Україну 282 дронами"]
         return {by_text["Росія вночі обстріляла Київ"], by_text["Уламки пошкодили пологовий"], tally}, tally
 
@@ -80,7 +95,7 @@ async def test_without_an_overview_the_block_is_plain_time_order(monkeypatch):
     monkeypatch.setattr(db.settings, "war_block_min_items", 3)
 
     async def fake_pick(items):
-        by_text = {it["text"].split(" ", 1)[1]: it["id"] for it in items}
+        by_text = {_summary_of(it["text"]): it["id"] for it in items}
         return {by_text["РФ атакувала Україну 282 дронами"], by_text["Уламки пошкодили пологовий"],
                 by_text["Росія вночі обстріляла Київ"]}, None
 
@@ -103,7 +118,8 @@ async def test_the_model_sees_the_feed_oldest_first_and_without_stale_items(monk
     meta = _night_feed()
     meta["feed"]["sources"]["Бабель"].append(_item(6, "Удар по Харкову два дні тому", "2026-09-22T03:10:00+00:00"))
     await db._fold_war_reports(meta, NOW)
-    assert [t.split(" ", 1)[0] for t in seen] == ["23:45", "04:45", "05:00", "05:00", "05:34"]
+    # The day travels with the time, so a previous evening's report reads as one.
+    assert [_STAMP.match(t).group(0) for t in seen] == ["yday 23:45", "04:45", "05:00", "05:00", "05:34"]
     assert not any("два дні тому" in t for t in seen)
 
 
@@ -153,7 +169,7 @@ async def test_media_placeholders_are_never_sent_to_the_war_pick(monkeypatch):
     seen = []
 
     async def fake_pick(items):
-        seen.extend(it["text"].split(" ", 1)[1] for it in items)
+        seen.extend(_summary_of(it["text"]) for it in items)
         return set(), None
 
     monkeypatch.setattr(db, "pick_war_reports", fake_pick)

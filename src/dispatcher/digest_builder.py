@@ -4,7 +4,7 @@ import re
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 from zoneinfo import ZoneInfo
 
@@ -15,7 +15,7 @@ from src.processor.llm.classifier import acquire_classify_lock, background_class
 from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings
 from src.processor.llm.llm_client import format_llm_stats, reset_llm_stats, is_task_dead
 from src.processor.dedup.merge import MERGE_MIN_ITEMS, merge_source_items
-from src.common.media import MEDIA_LABEL as _MEDIA_LABEL, is_media_placeholder
+from src.common.media import MEDIA_EMOJI as _MEDIA_EMOJI, MEDIA_LABEL as _MEDIA_LABEL, is_media_placeholder
 from src.common.util import clean_invisible, detect_footers, needs_summary, row_get, source_link
 from src.processor.llm.prompts import UNSIGNED_AD_RULE, UNSIGNED_TAG
 
@@ -189,9 +189,11 @@ def _parse_published(published_at) -> datetime | None:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
-def _local_hhmm(published_at) -> str:
-    dt = _parse_published(published_at)
-    return f"{dt.astimezone(_get_tz()):%H:%M}" if dt else ""
+def _line_time(published_at) -> str:
+    """A line's own time, dated like an earlier post's when it is not from today: a Hacker
+    News story reaches the feed a day or two after it was posted, and yesterday's evening
+    posts after the last digest read as this morning's under a bare HH:MM (2026-10-25)."""
+    return _earlier_label(published_at) if _parse_published(published_at) else ""
 
 
 # A line cannot be split across blocks, so a story reposted all night links only
@@ -210,16 +212,20 @@ def _is_dated(published_at, line_published_at) -> bool:
     return dt is not None and own is not None and own - dt >= _EARLIER_DATED_AFTER
 
 
-def _earlier_label(published_at, line_published_at) -> str:
-    """The time of an earlier post as the reader places it next to the line's own undated
-    time: bare on the same day, "yday" the day before, its date before that."""
+def _today(tz) -> date:
+    return datetime.now(tz).date()
+
+
+def _earlier_label(published_at) -> str:
+    """A post's time as the reader places it: bare today, "yday" the day before, its date
+    before that. Counted from today for every label of a line alike, its own time and its
+    ↻/↳ links, so "yday" means one day wherever it stands."""
     dt = _parse_published(published_at)
     if dt is None:
         return "→"
     tz = _get_tz()
     local = dt.astimezone(tz)
-    own = _parse_published(line_published_at)
-    days = (own.astimezone(tz).date() - local.date()).days if own is not None else 0
+    days = (_today(tz) - local.date()).days
     if days <= 0:
         return f"{local:%H:%M}"
     if days == 1:
@@ -238,7 +244,7 @@ def _earlier_line(item) -> str:
     # The oldest link may be the story shown in an earlier digest: it outranks a repost.
     if len(earlier) > len(shown) and _is_dated(earlier[0][0], own):
         shown = [earlier[0]] + earlier[-(_EARLIER_MAX_LINKS - 1):]
-    links = [f'<a href="{escape(url, quote=True)}">{_earlier_label(pub, own)}</a>' for pub, url in shown]
+    links = [f'<a href="{escape(url, quote=True)}">{_earlier_label(pub)}</a>' for pub, url in shown]
     more = f"+{len(earlier) - len(shown)} · " if len(earlier) > len(shown) else ""
     return f"<i>↻ earlier: {more}{', '.join(links)}</i>"
 
@@ -276,7 +282,7 @@ def _reply_line(item) -> str:
     parent = row_get(item, "_reply_parent")
     if not parent:
         return ""
-    label = _earlier_label(row_get(parent, "published_at"), row_get(item, "published_at"))
+    label = _earlier_label(row_get(parent, "published_at"))
     url = row_get(parent, "original_url")
     link = f'<a href="{escape(url, quote=True)}">{label}</a>' if url else label
     quote = escape(_reply_quote(parent))
@@ -386,19 +392,29 @@ def _format_item_base(item: dict) -> str:
     # A media chip ("📷 Photo") is a label, not a sentence: the whole chip is the
     # link, so it stays tappable instead of leaving the emoji outside it.
     is_media_label = summary_text in _MEDIA_LABEL
-    summary_text = _MEDIA_LABEL.get(summary_text, summary_text)
+    note = (row_get(item, "media_note") or "").strip()
+    marker = ""
+    if is_media_label:
+        summary_text = " ".join(filter(None, (_MEDIA_LABEL[summary_text], note)))
+    else:
+        # A short post shown as written keeps the collector's "[Photo] " in front; the
+        # marker goes before the link, so the link still lands on the post's words.
+        token = next((t for t in _MEDIA_EMOJI if t.startswith("[") and summary_text.startswith(t + " ")), "")
+        if token:
+            marker = escape(" ".join(filter(None, (_MEDIA_EMOJI[token], note)))) + " "
+            summary_text = summary_text[len(token):].strip()
 
     summary = escape(summary_text)
     # Italic HH:MM, the same typeface the digest chrome uses for its service bits,
     # so the column reads as a timeline instead of a second kind of content.
-    hhmm = _local_hhmm(item["published_at"])
+    hhmm = _line_time(item["published_at"])
     # A reply shown under its own original: indented, its time marked.
     nested = bool(row_get(item, "_nested"))
     stamp = f"<i>{'↳ ' if nested else ''}{hhmm}</i>" if hhmm else ("<i>↳</i>" if nested else "")
 
     suffix = ""
 
-    prefix = f"{'  ' if nested else ''}{stamp}  " if stamp else ""
+    prefix = (f"{'  ' if nested else ''}{stamp}  " if stamp else "") + marker
     key_phrase = (row_get(item, "key_phrase", "") or "").strip()
     if url and summary_text.strip():
         rest_text = summary_text.strip()
@@ -618,9 +634,10 @@ async def _fold_war_reports(cat_meta: dict, now: datetime) -> None:
     )
     if len(candidates) < settings.war_block_min_items:
         return
-    # The time lets the model keep a previous evening's attack out of the night's figures.
+    # The time, with its day when not today, lets the model keep a previous evening's attack
+    # out of the night's figures.
     picked, overview = await pick_war_reports([
-        {"id": i, "text": f"{_local_hhmm(item['published_at'])} {item['summary']}".strip()}
+        {"id": i, "text": f"{_line_time(item['published_at'])} {item['summary']}".strip()}
         for i, (_, item) in enumerate(candidates)
     ])
     if len(picked) < settings.war_block_min_items:

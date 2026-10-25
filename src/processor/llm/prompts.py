@@ -89,7 +89,11 @@ Respond ONLY with JSON: {{"items": [{{"id": 0, "summary": "...", "key_phrase": "
 # ministral the same rules moved its errors around rather than removing them.
 _FIDELITY_RULE = """FIDELITY RULE — OUTRANKS EVERYTHING ELSE: use ONLY facts written in the item itself. Every name, number, date, place, nationality and organisation in your summary must be stated in the item (translated is fine). Never add a first name, title, office or list the item does not give («усі три ТЕЦ» stays «усі три ТЕЦ», never «ТЕЦ-1, ТЕЦ-2, ТЕЦ-5»; «Мадяр» stays «Мадяр», never another politician). Never resolve «he/him/без нього» to a guess — name the person only if the item names them. Never change a nationality or country (Croatian drivers stay Croatian). If the item explains, comments on or recalls a past event, say it is an explanation or a reminder — never present it as fresh news. If the item is only a headline or teaser, summarise just what it says, adding nothing."""
 
-_NAMES_RULE = """NAMES RULE: write people, countries, cities and places in Ukrainian Cyrillic (Трамп, Хорватія, Боснія і Герцеговина, Загреб, Вараждин, Ван Ї, Таїланд, Огайо). Keep Latin only for brands, products, companies, tickers and code names (Bitcoin, Pepco, Metaplanet, Python, 401(k))."""
+# Without the transliteration clause the model read the fidelity rule as forbidding a
+# Cyrillic "Trump" for an item that says "Trump": 39 summaries in 10-19..24 kept Latin
+# person names. Benched 2026-10-25 on 55 such posts: Latin in 42 → 1; full-name examples made it
+# add first names and leave them undeclined, hence surname-only examples and the case clause.
+_NAMES_RULE = """NAMES RULE: write people, countries, cities and places in Ukrainian Cyrillic, also when the item itself is in English or spells a name in Latin — writing a name in Cyrillic is translation, not an added fact (Trump → Трамп, Zelensky → Зеленський, Witkoff → Віткофф, Rubio → Рубіо, Хорватія, Боснія і Герцеговина, Загреб, Вараждин, Ван Ї, Таїланд, Огайо). Give a first name only where the item gives it, and decline a Cyrillic name like any Ukrainian noun («за участю Трампа», «слова Віткоффа»). Keep Latin only for brands, products, companies, tickers and code names (Bitcoin, Pepco, Metaplanet, Python, 401(k))."""
 
 _STRICT_SYSTEM_PROMPT = _MULTI_SYSTEM_PROMPT.replace(
     _ACCURACY_RULE, f"{_ACCURACY_RULE}\n\n{_FIDELITY_RULE}\n\n{_NAMES_RULE}")

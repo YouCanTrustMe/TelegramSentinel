@@ -201,7 +201,7 @@ _EARLIER_MAX_LINKS = 4
 
 # An earlier post at least this much older than the line's own predates the previous
 # digest (slots are under 12h apart; dedup links an update back up to
-# dedup_window_hours), so it carries its date and is never cut from the line.
+# dedup_window_hours), so it is never cut from the line. Its label goes by calendar day.
 _EARLIER_DATED_AFTER = timedelta(hours=12)
 
 
@@ -211,11 +211,20 @@ def _is_dated(published_at, line_published_at) -> bool:
 
 
 def _earlier_label(published_at, line_published_at) -> str:
+    """The time of an earlier post as the reader places it next to the line's own undated
+    time: bare on the same day, "yday" the day before, its date before that."""
     dt = _parse_published(published_at)
     if dt is None:
         return "→"
-    local = dt.astimezone(_get_tz())
-    return f"{local:%d/%m %H:%M}" if _is_dated(published_at, line_published_at) else f"{local:%H:%M}"
+    tz = _get_tz()
+    local = dt.astimezone(tz)
+    own = _parse_published(line_published_at)
+    days = (own.astimezone(tz).date() - local.date()).days if own is not None else 0
+    if days <= 0:
+        return f"{local:%H:%M}"
+    if days == 1:
+        return f"yday {local:%H:%M}"
+    return f"{local:%d/%m %H:%M}"
 
 
 def _earlier_line(item) -> str:
@@ -241,13 +250,17 @@ _CONTEXT_PREFIX_RE = re.compile(r"^\[(?:Context|Forwarded from)[^\]]*\]\s*")
 def _reply_quote(parent) -> str:
     """The opening words of the post a reply answers: its summary, else its first line."""
     text = (row_get(parent, "summary") or "").strip()
-    if text in _MEDIA_LABEL:
-        return _MEDIA_LABEL[text]
     if not text:
-        raw = row_get(parent, "raw_text") or ""
-        while _CONTEXT_PREFIX_RE.match(raw):
-            raw = _CONTEXT_PREFIX_RE.sub("", raw, count=1)
-        text = raw.strip().split("\n")[0]
+        text = row_get(parent, "raw_text") or ""
+        while _CONTEXT_PREFIX_RE.match(text):
+            text = _CONTEXT_PREFIX_RE.sub("", text, count=1)
+    # "[Photo] <caption>" (a short caption is its own summary, token included): the caption
+    # says what the reply answers, the token only that it is a photo.
+    token = next((t for t in _MEDIA_LABEL if t.startswith("[") and text.startswith(t)), "")
+    text = text[len(token):].strip().split("\n")[0] or token or text
+    if text in _MEDIA_LABEL:
+        # "📦 Media" tells the reader nothing about the original; the time link alone does.
+        return "" if _MEDIA_LABEL[text].startswith("📦") else _MEDIA_LABEL[text]
     tokens, kept, counted = text.split(), [], 0
     for token in tokens:
         if counted == _REPLY_QUOTE_WORDS:
@@ -339,12 +352,16 @@ def _format_item(item: dict, dup_links: dict[int, list[tuple[str, str]]] | None 
     if not line:
         return line
     links = []
+    via = row_get(item, "_via")
+    # One name per source: a line folding several posts of one channel muted each of
+    # them, and "A, A, B, A" read as three more sources.
+    named = {via} if via else set()
     if dup_links:
         for iid in _ids_of(item):
             for name, url in dup_links.get(iid, []):
-                if url:
+                if url and name not in named:
+                    named.add(name)
                     links.append(f'<a href="{escape(url, quote=True)}">{escape(name)}</a>')
-    via = row_get(item, "_via")
     if via:
         # A block mixing sources (the war block) names each line's channel, and its
         # muted duplicates follow that name in the same tail: "(A) · B" read as two

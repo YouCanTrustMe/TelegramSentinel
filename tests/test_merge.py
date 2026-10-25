@@ -98,7 +98,7 @@ def test_merged_story_renders_its_earlier_updates_as_time_links(monkeypatch):
     line = digest_builder._format_item(merged)
     first, second = line.split("\n")
     assert 'href="https://t.me/l/3"' in first
-    assert second == '<i>↻ earlier: <a href="https://t.me/l/1">23:07</a></i>'
+    assert second == '<i>↻ earlier: <a href="https://t.me/l/1">yday 23:07</a></i>'
 
 
 def test_an_ordinary_item_has_no_earlier_line():
@@ -171,13 +171,16 @@ def test_an_unmerged_item_keeps_its_link_to_a_story_shown_earlier():
     assert mg._items_as_plain([item])[0]["_earlier"] == [("2026-10-06T08:00", "u0")]
 
 
-def test_a_link_back_to_another_days_post_carries_its_date(monkeypatch):
+def test_a_link_back_to_another_days_post_carries_its_day(monkeypatch):
     monkeypatch.setattr(digest_builder.settings, "digest_timezone", "UTC")
     item = {"summary": "s", "original_url": "u", "published_at": "2026-10-07T12:00:00+00:00",
-            "_earlier": [("2026-10-06T21:30:00+00:00", "https://t.me/l/0"), ("2026-10-07T04:00:00+00:00", "https://t.me/l/1")]}
+            "_earlier": [("2026-10-05T21:30:00+00:00", "https://t.me/l/0"),
+                         ("2026-10-06T21:30:00+00:00", "https://t.me/l/1"),
+                         ("2026-10-07T04:00:00+00:00", "https://t.me/l/2")]}
 
     assert digest_builder._earlier_line(item) == (
-        '<i>↻ earlier: <a href="https://t.me/l/0">06/10 21:30</a>, <a href="https://t.me/l/1">04:00</a></i>')
+        '<i>↻ earlier: <a href="https://t.me/l/0">05/10 21:30</a>, <a href="https://t.me/l/1">yday 21:30</a>, '
+        '<a href="https://t.me/l/2">04:00</a></i>')
 
 
 def test_a_long_line_never_cuts_its_link_to_another_digest(monkeypatch):
@@ -191,7 +194,7 @@ def test_a_long_line_never_cuts_its_link_to_another_digest(monkeypatch):
     line = digest_builder._earlier_line(item)
 
     assert line.startswith("<i>↻ earlier: +3 · ")
-    assert ">06/10 08:00</a>" in line and ">06:00</a>" in line and ">03:00</a>" not in line
+    assert ">yday 08:00</a>" in line and ">06:00</a>" in line and ">03:00</a>" not in line
 
 
 def test_a_post_republished_under_a_second_url_is_not_an_earlier_post():

@@ -2,6 +2,8 @@
 out-of-range `ids`) must never crash the digest. Regression for the
 `max() iterable argument is empty` ValueError that killed two prod digests
 on 2026-06-29 when the LLM returned a group with empty ids."""
+from datetime import date
+
 import numpy as np
 
 import src.processor.dedup.merge as mg
@@ -91,6 +93,7 @@ def test_merged_story_links_the_newest_post_and_keeps_the_earlier_ones():
 
 def test_merged_story_renders_its_earlier_updates_as_time_links(monkeypatch):
     monkeypatch.setattr(digest_builder.settings, "digest_timezone", "UTC")
+    monkeypatch.setattr(digest_builder, "_today", lambda tz: date(2026, 9, 24))
     merged = mg._build_merged(
         [_timed(1, "2026-09-23T23:07:00+00:00", "https://t.me/l/1"),
          _timed(3, "2026-09-24T04:45:00+00:00", "https://t.me/l/3")],
@@ -123,6 +126,7 @@ def test_merged_line_is_stamped_with_the_post_it_links():
 
 def test_a_story_reposted_all_night_links_only_its_latest_earlier_posts(monkeypatch):
     monkeypatch.setattr(digest_builder.settings, "digest_timezone", "UTC")
+    monkeypatch.setattr(digest_builder, "_today", lambda tz: date(2026, 9, 24))
     cluster = [_timed(i, f"2026-09-24T0{i}:00:00+00:00", f"https://t.me/l/{i}") for i in range(8)]
     line = digest_builder._earlier_line(mg._build_merged(cluster, "s", ""))
     assert line.startswith("<i>↻ earlier: +3 · ")
@@ -173,6 +177,7 @@ def test_an_unmerged_item_keeps_its_link_to_a_story_shown_earlier():
 
 def test_a_link_back_to_another_days_post_carries_its_day(monkeypatch):
     monkeypatch.setattr(digest_builder.settings, "digest_timezone", "UTC")
+    monkeypatch.setattr(digest_builder, "_today", lambda tz: date(2026, 10, 7))
     item = {"summary": "s", "original_url": "u", "published_at": "2026-10-07T12:00:00+00:00",
             "_earlier": [("2026-10-05T21:30:00+00:00", "https://t.me/l/0"),
                          ("2026-10-06T21:30:00+00:00", "https://t.me/l/1"),
@@ -187,6 +192,7 @@ def test_a_long_line_never_cuts_its_link_to_another_digest(monkeypatch):
     """Six overnight reposts plus a link back to yesterday's shown story: the reposts
     give way first."""
     monkeypatch.setattr(digest_builder.settings, "digest_timezone", "UTC")
+    monkeypatch.setattr(digest_builder, "_today", lambda tz: date(2026, 10, 7))
     item = {"summary": "s", "original_url": "u", "published_at": "2026-10-07T09:00:00+00:00",
             "_earlier": [("2026-10-06T08:00:00+00:00", "https://t.me/l/old")]
                         + [(f"2026-10-07T0{h}:00:00+00:00", f"https://t.me/l/{h}") for h in range(1, 7)]}
@@ -205,3 +211,14 @@ def test_a_post_republished_under_a_second_url_is_not_an_earlier_post():
     older = {**_item(3), "published_at": "2026-10-16T08:00:00+00:00"}
     assert mg._build_merged([a, b], "s", "")["_earlier"] == []
     assert [url for _p, url in mg._build_merged([a, b, older], "s", "")["_earlier"]] == ["https://example.com/3"]
+
+
+def test_a_line_keeps_its_media_note_through_the_merge():
+    single = {"id": 1, "summary": "s", "key_phrase": "", "original_url": "https://t.me/l/1",
+              "published_at": "2026-10-25T10:00:00+00:00", "raw_text": "r", "media_note": "0:42"}
+    (plain,) = mg._items_as_plain([single])
+    assert plain["media_note"] == "0:42"
+    newer = {**single, "id": 3, "original_url": "https://t.me/l/3", "published_at": "2026-10-25T11:00:00+00:00",
+             "media_note": "×5"}
+    assert mg._build_merged([single, newer], "s", "")["media_note"] == "×5"
+

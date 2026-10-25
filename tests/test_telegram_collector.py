@@ -52,6 +52,27 @@ def captured(monkeypatch):
     return saved
 
 
+async def test_a_video_is_stored_with_its_length(captured):
+    await tc._process_message(CHAT, SOURCE, _msg(video=SimpleNamespace(duration=42), caption="Затори в центрі міста зранку"))
+    assert captured["media_note"] == "0:42"
+
+
+async def test_an_album_is_stored_with_its_size(captured):
+    await tc._process_message(CHAT, SOURCE, _msg(photo=SimpleNamespace(), caption="Наслідки удару по місту"), album=5)
+    assert captured["media_note"] == "×5"
+
+
+def test_a_media_note_is_none_without_a_length_and_never_raises():
+    assert tc._media_note(_msg(photo=SimpleNamespace()), 1) is None
+    assert tc._media_note(_msg(voice=SimpleNamespace(duration=3725)), 1) == "1:02:05"
+    assert tc._media_note(_msg(audio=SimpleNamespace(duration=42.6)), 1) == "0:42"
+
+    class Broken:
+        def __getattr__(self, name):
+            raise ValueError("undecodable")
+    assert tc._media_note(Broken(), 1) is None
+
+
 async def test_giveaway_post_is_stored_under_its_own_token(captured):
     # Лачен's giveaways (2026-10-12/17) reached the digest as a bare "📦 Media" while
     # the library named the type all along.
@@ -321,7 +342,7 @@ async def test_old_posts_are_skipped_and_a_catch_up_gap_is_reported(monkeypatch)
                 _msg(id=10, date=now - timedelta(days=20), text="older", chat=None)]
     processed, bookmark = [], {}
 
-    async def fake_process(chat_ref, source, message, parent_msg=None):
+    async def fake_process(chat_ref, source, message, parent_msg=None, album=1):
         processed.append(message.id)
         return True
 

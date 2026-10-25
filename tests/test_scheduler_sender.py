@@ -3,6 +3,8 @@ the Bot API retry_after parser, message-id construction and SQL statement split.
 from src.db.base import _split_sql_statements
 from src.dispatcher.sender import _retry_after
 from src.processor.dedup.deduplicator import make_message_id
+from datetime import datetime, timedelta, timezone
+
 import src.scheduler as scheduler
 from src.scheduler import _pre_classify_time, _pre_collect_time, _summarize_digest_health
 
@@ -146,3 +148,22 @@ def test_silent_alert_carries_one_mute_button_per_source():
     assert "How To Onchain? (telegram, last item 2026-09-20, silent 14d)" in text
     assert "&lt;b&gt;Odd&lt;/b&gt;" in text
     assert [b[0]["callback_data"] for b in markup["inline_keyboard"]] == ["silent_mute:7", "silent_mute:8"]
+
+
+async def test_background_classify_outpaces_the_peak_inflow(monkeypatch):
+    jobs = {}
+
+    class _Recorder:
+        def add_job(self, func, trigger, id, **kw):
+            jobs[id] = (trigger, kw)
+
+    monkeypatch.setattr(scheduler, "_scheduler", _Recorder())
+    await scheduler._add_maintenance_jobs()
+    trigger, kw = jobs["classify_pending"]
+    start = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    fires, t = 0, trigger.get_next_fire_time(None, start)
+    while t < start + timedelta(hours=1):
+        fires += 1
+        t = trigger.get_next_fire_time(t, t + timedelta(seconds=1))
+    # 10-19..24 peaked at ~24 posts/h needing a summary; 9/h let the queue reach 74.
+    assert fires * kw["kwargs"]["limit"] >= 48

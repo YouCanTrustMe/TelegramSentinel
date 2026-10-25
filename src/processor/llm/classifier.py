@@ -384,7 +384,9 @@ async def group_by_topic(items: list[dict], prompt_extra: str | None = None) -> 
     return result
 
 
-_CLASSIFY_MAX_ATTEMPTS = 3
+# Background passes an item may come back empty from before it falls back to its raw text:
+# an hour of 5-minute passes, so a provider outage of a quarter hour costs no summary.
+_CLASSIFY_MAX_ATTEMPTS = 12
 
 # Held while a background pass runs. The pre-digest pass starts a minute before the
 # digest and on a big queue was still running when the digest's own re-classify began

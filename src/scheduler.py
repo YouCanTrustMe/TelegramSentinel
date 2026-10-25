@@ -18,6 +18,13 @@ _scheduler: AsyncIOScheduler | None = None
 # Nightly prune horizon for sent items; see prune_old_items for the RSS-dedup trade-off.
 _RETENTION_DAYS = 30
 
+# Background summaries must outpace the inflow (peak ~24 posts/h needing the model,
+# 10-19..24), or the queue waits for the pre-digest pass. At every 20 min × 3 (9/h) it
+# reached 48-74 posts, flash-lite's 503 retries made that pass run 4-23 min, and the
+# digest left up to 52 of them for the next one. 6 per pass is 2 calls, ~1 min at worst.
+_CLASSIFY_EVERY_MINUTES = 5
+_CLASSIFY_PER_PASS = 6
+
 
 async def _prune_items_job() -> None:
     from src.db.models import prune_old_items
@@ -288,7 +295,8 @@ async def _add_maintenance_jobs() -> None:
     from src.processor.llm.classifier import classify_pending_items
     _scheduler.add_job(
         classify_pending_items,
-        CronTrigger(minute="*/20"),
+        CronTrigger(minute=f"*/{_CLASSIFY_EVERY_MINUTES}"),
+        kwargs={"limit": _CLASSIFY_PER_PASS},
         id="classify_pending",
         replace_existing=True,
         max_instances=1,

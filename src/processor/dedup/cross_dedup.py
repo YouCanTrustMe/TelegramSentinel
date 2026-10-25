@@ -192,7 +192,8 @@ async def _confirm_mutes(
     story, new fact) hides only inside this digest and only when the candidate says no
     more than its primary (_hides_update); against a story already SHOWN it is news, so
     the item stays and is returned in `updates` (candidate -> shown id) for a ↻ link
-    back. Fail-open: no verdict keeps the item shown.
+    back — unless the two score dedup_repeat_hide_threshold, where the line would only
+    repeat what was shown. Fail-open: no verdict keeps the item shown.
 
     Returns (confirmed mutes, updates)."""
     confirmed: dict[int, int] = {}
@@ -233,6 +234,13 @@ async def _confirm_mutes(
         if verdict == "same" or (verdict == "update" and _hides_update(mid, pid, item_by_id)):
             confirmed[mid] = pid
             log.info("B1: hid item id=%d -> primary id=%d | cosine=%.3f | verdict=%s", mid, pid, score_of[mid], verdict)
+            continue
+        # At this cosine only a candidate richer than the shown post reaches the judge (the
+        # rest auto-hid above), so this is the one place a richer post hides: by eye, all six
+        # such were the shown line again, a detail at most added.
+        if verdict == "update" and pid not in item_by_id and score_of[mid] >= settings.dedup_repeat_hide_threshold:
+            confirmed[mid] = pid
+            log.info("B1: hid item id=%d — a repeat of shown id=%d | cosine=%.3f | verdict=update", mid, pid, score_of[mid])
             continue
         if verdict == "update" and pid not in item_by_id:
             updates[mid] = pid

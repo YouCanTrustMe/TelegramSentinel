@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     # real duplicates hidden and 5 real stories, 4 of those at 0.862-0.869 (a Rivne
     # mall strike hidden under a "drone heading to Rivne" alert).
     dedup_direct_pair_floor: float = 0.88
+    # An "update" verdict against an already SHOWN story still hides from here up: these
+    # summaries say the same line again. 29 such kept items 10-07..10-24, by eye: the 6 at
+    # ≥0.95 were all repeats (two with one extra detail), 0.94-0.95 held real updates (the
+    # NBU governor confirming the searches), and 0.936 "journalist released" after
+    # "journalist detained". Every such hide logs "a repeat of shown" for the next audit.
+    dedup_repeat_hide_threshold: float = 0.95
     # Texts per rolling minute. Mistral's free tier absorbed 20 back-to-back calls in
     # 13s (median 0.35s), so this ceiling is politeness, not a measured limit.
     embed_rpm: int = 300

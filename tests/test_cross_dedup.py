@@ -671,17 +671,32 @@ async def test_even_a_close_pair_never_buries_a_richer_post_without_a_verdict(mo
 
 
 async def test_a_close_pair_never_buries_a_richer_post_under_a_shown_one_without_a_verdict(monkeypatch):
-    """The 09:45 one-liner was shown; the 14:45 article with the new toll scores 0.95
+    """The 09:45 one-liner was shown; the 14:45 article with the new toll scores 0.945
     against it and must reach the judge, whose "update" keeps it with a link back."""
     _wire(monkeypatch)
     judge, calls = _judge(lambda a, b: "update")
     monkeypatch.setattr(cd, "judge_pairs", judge)
     item_by_id = {2: {"id": 2, "raw_text": "detail " * 60}}
 
-    confirmed, updates = await cd._confirm_mutes({2: 99}, item_by_id, {99: "one line"}, {2: _at(0.95)}, {99: _vec(1, 0)})
+    confirmed, updates = await cd._confirm_mutes({2: 99}, item_by_id, {99: "one line"}, {2: _at(0.945)}, {99: _vec(1, 0)})
 
     assert confirmed == {}
     assert updates == {2: 99}
+
+
+async def test_an_update_that_repeats_a_shown_line_is_hidden(monkeypatch):
+    """10-22: Kyiv Independent's "Su-30 crashed in Kaliningrad during training" (0.996 to
+    another channel's line shown that morning) came back as an "update" and shipped twice."""
+    _wire(monkeypatch)
+    monkeypatch.setattr(cd.settings, "dedup_repeat_hide_threshold", 0.95)
+    judge, calls = _judge(lambda a, b: "update")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    item_by_id = {2: {"id": 2, "raw_text": "detail " * 60}}
+
+    confirmed, updates = await cd._confirm_mutes({2: 99}, item_by_id, {99: "one line"}, {2: _at(0.96)}, {99: _vec(1, 0)})
+
+    assert confirmed == {2: 99}
+    assert updates == {}
 
 
 async def test_direct_twins_never_judged_together_get_their_own_verdict(monkeypatch):

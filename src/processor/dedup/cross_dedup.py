@@ -407,8 +407,11 @@ async def _judge_direct_pairs(
     B1 judges a candidate against ONE post: the primary of its in-digest cluster, or its
     single best match among shown posts. Its real twin can be neither — 10-08..10-18, 8 of
     21 delivered duplicate pairs were never put to the judge together (three channels on
-    the Miami talks ending early, each judged against a different earlier post). The usual
-    hide rules apply: "same" hides, "update" only under a post at least as rich.
+    the Miami talks ending early, each judged against a different earlier post). "same"
+    hides; "update" only under a post at least as rich AND from the in-digest auto-hide
+    cosine up: 10-19..24 its two "update" hides at 0.88-0.89 buried a Kyiv Independent
+    feature on mothers sheltering in the metro under a strike report and the country-wide
+    death toll under one city's, while the right one (the Omsk warehouse) scored 0.94.
 
     Only twins in this digest: the hidden post then stays one tap away beside its primary.
     Replayed over 10-08..10-18, the same pass against already-shown posts hid 3 real
@@ -452,7 +455,8 @@ async def _judge_direct_pairs(
         # go — _survivor re-points them to the twin it is hidden under.
         if mid in out or pid in out or mid in out.values():
             continue
-        if verdict == "same" or (verdict == "update" and _hides_update(mid, pid, item_by_id)):
+        if verdict == "same" or (verdict == "update" and c >= settings.dedup_auto_hide_in_digest_threshold
+                                  and _hides_update(mid, pid, item_by_id)):
             out[mid] = pid
             log.info("B1: hid item id=%d -> direct twin id=%d | cosine=%.3f | verdict=%s | never judged "
                      "together before", mid, pid, c, verdict)

@@ -707,3 +707,11 @@ async def test_background_summaries_go_three_posts_per_call(monkeypatch):
     await classify_pending_items(limit=999)
 
     assert sizes == [3, 3, 1]
+
+
+def test_strict_prompt_lets_the_model_write_an_english_name_in_cyrillic():
+    from src.processor.llm.prompts import _STRICT_SYSTEM_PROMPT
+
+    # Without it the fidelity rule kept "Donald Trump заявив" in 39 summaries a week.
+    assert "not an added fact" in _STRICT_SYSTEM_PROMPT and "Trump → Трамп" in _STRICT_SYSTEM_PROMPT
+    assert "Give a first name only where the item gives it" in _STRICT_SYSTEM_PROMPT

@@ -1,5 +1,6 @@
 """Small shared helpers with no project dependencies."""
 import re
+from urllib.parse import urlparse
 
 
 # Zero-width marks vanish; blank-looking fillers channels pad lines and words with
@@ -68,6 +69,11 @@ def strip_footers(text: str, footers: set[str]) -> str:
     while sum(1 for line in lines if line.strip()) > 1 and (not lines[-1].strip() or lines[-1].strip() in footers):
         lines.pop()
     return "\n".join(lines).rstrip()
+
+
+def host_listed(url: str, hosts: list[str]) -> bool:
+    host = urlparse(url).netloc.lower()
+    return any(host == h or host.endswith("." + h) for h in hosts)
 
 
 def source_link(type_: str, url: str) -> str | None:

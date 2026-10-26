@@ -48,3 +48,14 @@ async def test_the_backfill_rows_carry_their_sources_prompt_extra(db):
 
     (row,) = await get_sent_empty_items(5)
     assert row["source_prompt_extra"] == "no translate"
+
+
+async def test_the_queue_rows_carry_their_sources_url(db):
+    """Topic routing picks Hacker News stories by the feed's host."""
+    from src.db.items import get_unsent_items
+
+    sid = await add_source("rss", "HN", "https://hnrss.org/newest?points=300", "tech")
+    now = datetime.now(timezone.utc).isoformat()
+    await save_item(sid, "hn1", "Story", None, now, "", "tech", now)
+    (row,) = await get_unsent_items()
+    assert row["source_url"] == "https://hnrss.org/newest?points=300"

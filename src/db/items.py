@@ -63,7 +63,8 @@ async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlit
         if categories:
             placeholders = ",".join("?" * len(categories))
             query = f"""SELECT items.*, sources.name AS source_name, sources.prompt_extra AS source_prompt_extra,
-                      sources.sort_order AS source_sort_order, sources.type AS source_type
+                      sources.sort_order AS source_sort_order, sources.type AS source_type,
+                  sources.url AS source_url
                FROM items
                LEFT JOIN sources ON items.source_id = sources.id
                WHERE items.sent = 0 AND COALESCE(sources.status, '') != 'paused'
@@ -73,7 +74,8 @@ async def get_unsent_items(categories: list[str] | None = None) -> list[aiosqlit
                 return await cur.fetchall()
         async with db.execute(
             """SELECT items.*, sources.name AS source_name, sources.prompt_extra AS source_prompt_extra,
-                  sources.sort_order AS source_sort_order, sources.type AS source_type
+                  sources.sort_order AS source_sort_order, sources.type AS source_type,
+                  sources.url AS source_url
                FROM items
                LEFT JOIN sources ON items.source_id = sources.id
                WHERE items.sent = 0 AND COALESCE(sources.status, '') != 'paused'
@@ -188,6 +190,13 @@ async def update_item_classification(item_id: int, summary: str, key_phrase: str
             "UPDATE items SET summary = ?, key_phrase = ? WHERE id = ?",
             (summary, key_phrase, item_id),
         )
+        await db.commit()
+
+
+@retry_on_locked
+async def set_item_category(item_id: int, category: str) -> None:
+    async with get_db() as db:
+        await db.execute("UPDATE items SET category = ? WHERE id = ? AND sent = 0", (category, item_id))
         await db.commit()
 
 

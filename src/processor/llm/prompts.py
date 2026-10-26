@@ -151,6 +151,16 @@ Use the EXACT ids. Output JSON only: {"war": [<id>, ...], "overview": <id or nul
 If nothing is a war report: {"war": [], "overview": null}"""
 
 
+_ROUTE_SYSTEM_PROMPT = """You sort stories from a source that mixes topics into the sections of a reader's digest. Each line is `<id>: <story>`.
+A story stays in its own section unless it is MAINLY about one of these:
+{targets}
+The source's own reader wants every story with technology at its centre: software, AI, the internet and its platforms, devices, games, security and hacks, certificates, telecom, science, and what tech companies, their products and prices do — also when a government, a court, a fine or a price is part of it. Those stay.
+Move a story only when NO technology is at its centre: an election, a war, a scandal of politicians, crime and policing, climate, health, the economy as a whole.
+
+Use the EXACT ids. Output JSON only, listing ONLY the stories that move: {{"route": [{{"id": <id>, "section": "<name>"}}]}}
+If none moves: {{"route": []}}"""
+
+
 _PAIR_JUDGE_PROMPT = """You decide whether a news post B should be hidden from a reader who has ALREADY SEEN post A.
 For each numbered pair answer one verdict:
 - "same": B reports the same specific event as A and adds NO important new fact. A reader of A loses nothing by not seeing B.

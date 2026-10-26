@@ -78,6 +78,19 @@ class Settings(BaseSettings):
     # nothing — WSJ 401, CoinTelegraph's page leads with a price ticker, Index.hr/The
     # Block/CNBC/Ars build theirs in scripts (checked 2026-10-18).
     rss_article_body_hosts: list[str] = ["croatiaweek.com"]
+    # Sources whose stories span several categories: of 114 Hacker News stories at 300+
+    # points in the week to 2026-10-26, ~20% were politics, economy or science, all shown
+    # under tech because the category belongs to the source. The model picks one of the
+    # target categories per story; anything else stays where the source put it. While
+    # route_by_topic_shadow is on the pick is only logged ("Topic route (shadow)").
+    route_by_topic_hosts: list[str] = ["hnrss.org"]
+    route_by_topic_targets: dict[str, str] = {
+        "feed": "Ukraine, the war, world politics, elections, governments, courts, society",
+        "finance": "the economy, markets, banks, interest rates, prices, company earnings and fines",
+        "crypto": "cryptocurrencies, blockchains, crypto exchanges and wallets",
+        "hrvatska": "Croatia",
+    }
+    route_by_topic_shadow: bool = True
     # Union floor: any cross-source pair at/above this cosine becomes an LLM-confirmed
     # candidate. Below it pairs are never even considered. On mistral-embed 0.86 catches
     # 88% of true duplicates at ~41 candidate pairs per digest — the same candidate

@@ -331,6 +331,97 @@ def test_null_content_is_unparseable_not_a_crash(monkeypatch):
     assert parsed is None and status == 200 and raw == "None"
 
 
+def test_a_safety_refusal_is_told_apart_from_unparseable_json(monkeypatch):
+    """gemini's own filter answers 200 with no message, only a content_filter finish
+    reason (prod 10-25 20:45, a Trump story); that was logged as unparseable JSON."""
+    import asyncio
+
+    class _Resp:
+        status = 200
+        headers = {}
+        async def text(self):
+            return ('{"choices":[{"finish_reason":"content_filter: PROHIBITED_CONTENT","index":0}],'
+                    '"model":"gemini-3.1-flash-lite","object":"chat.completion"}')
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def post(self, *a, **kw):
+            return _Resp()
+
+    async def fake_session():
+        return _Session()
+
+    async def no_gate(provider):
+        return None
+
+    monkeypatch.setattr(llm_client, "_get_session", fake_session)
+    monkeypatch.setattr(llm_client, "_rate_gate", no_gate)
+    monkeypatch.setattr(llm_client, "_key", lambda provider: "k")
+    with pytest.raises(llm_client._ContentRefused, match="PROHIBITED_CONTENT"):
+        asyncio.run(llm_client._call_once("gemini", "m1", [{"role": "user", "content": "x"}]))
+
+
+@pytest.mark.parametrize("body", [
+    '{"choices":[{"message":{"role":"assistant","content":null},"finish_reason":"content_filter"}]}',
+    '{"choices":[{"message":{"role":"assistant","content":"{\\"items\\": ["},"finish_reason":"content_filter"}]}',
+])
+def test_the_openai_refusal_shape_is_a_refusal_too(monkeypatch, body):
+    """OpenAI-compatible providers keep the message, with content null or cut short."""
+    import asyncio
+
+    class _Resp:
+        status = 200
+        headers = {}
+        async def text(self):
+            return body
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def post(self, *a, **kw):
+            return _Resp()
+
+    async def fake_session():
+        return _Session()
+
+    async def no_gate(provider):
+        return None
+
+    monkeypatch.setattr(llm_client, "_get_session", fake_session)
+    monkeypatch.setattr(llm_client, "_rate_gate", no_gate)
+    monkeypatch.setattr(llm_client, "_key", lambda provider: "k")
+    with pytest.raises(llm_client._ContentRefused):
+        asyncio.run(llm_client._call_once("groq", "m1", [{"role": "user", "content": "x"}]))
+
+
+def test_a_safety_refusal_fails_over_at_once_without_a_warning(monkeypatch, caplog):
+    """The same-model retry was refused the same way and its WARNING reached the admin,
+    while the next model summarised the post a second later."""
+    import asyncio
+    import logging
+    llm_client._quota_dead_until.clear()
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_refused", [("groq", "m1"), ("groq", "m2")])
+    calls = []
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        calls.append(model)
+        if model == "m1":
+            raise llm_client._ContentRefused("content_filter: PROHIBITED_CONTENT")
+        return {"ok": 6}, 200, {}, ""
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    with caplog.at_level(logging.INFO, logger="src.processor.llm.llm_client"):
+        out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_refused"))
+
+    assert out == {"ok": 6}
+    assert calls == ["m1", "m2"]
+    assert [r.message for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert any("refused the content" in r.message for r in caplog.records)
+
+
 def test_unparseable_retry_does_not_re_send_at_temperature_zero(monkeypatch):
     """batch/group/filter/translate call at temperature 0, where an identical re-ask
     breaks identically; the retry is nudged off zero so it is worth making."""

@@ -490,6 +490,20 @@ async def verify_llm_providers() -> None:
             log.info("LLM verify: %s key OK (HTTP %d)", provider, status)
 
 
+class _ContentRefused(Exception):
+    """The provider's own safety filter declined the text (gemini: a 200 with
+    finish_reason "content_filter: PROHIBITED_CONTENT" and no message). A re-ask of the
+    same model is refused the same way; the next provider in the chain answers it."""
+
+
+def _refusal(data) -> str | None:
+    try:
+        reason = data["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
+    return reason if isinstance(reason, str) and reason.startswith("content_filter") else None
+
+
 async def _call_once(provider: str, model: str, messages: list[dict], temperature: float = 0.1,
                      list_key: str | None = None) -> tuple[dict | None, int, object, str]:
     """Single HTTP call. Returns (parsed_or_None, status, headers, raw_snippet).
@@ -512,13 +526,25 @@ async def _call_once(provider: str, model: str, messages: list[dict], temperatur
     if status == 200:
         try:
             data = json.loads(text)
+        except json.JSONDecodeError:
+            return None, status, hdrs, text[:_UNPARSEABLE_SNIPPET_CHARS]
+        # gemini drops the message entirely; the OpenAI shape keeps it with content null.
+        reason = _refusal(data)
+        try:
             content = data["choices"][0]["message"]["content"]
-        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        except (KeyError, IndexError, TypeError):
+            if reason:
+                raise _ContentRefused(reason)
             return None, status, hdrs, text[:_UNPARSEABLE_SNIPPET_CHARS]
         if not isinstance(content, str):
+            if reason:
+                raise _ContentRefused(reason)
             # 200 with content null or a non-string: nothing to parse, but the shape
             # itself is the evidence.
             return None, status, hdrs, repr(content)[:_UNPARSEABLE_SNIPPET_CHARS]
+        if reason:
+            # Cut off by the filter: whatever JSON is there is missing the rest of the rows.
+            raise _ContentRefused(reason)
         parsed = _coerce_json(content, list_key)
         return parsed, status, hdrs, "" if parsed is not None else content[:_UNPARSEABLE_SNIPPET_CHARS]
     if status == 400:
@@ -563,6 +589,10 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
                                     else temperature)
                 parsed, status, hdrs, raw = await _call_once(provider, model, messages,
                                                              call_temperature, list_key)
+            except _ContentRefused as exc:
+                _bump(tag, "error")
+                log.log(_failover_level(chain, idx), "LLM %s refused the content (%s), failing over", tag, exc)
+                break  # next chain entry
             except Exception as exc:
                 _bump(tag, "error")
                 log.log(_failover_level(chain, idx), "LLM call error on %s: %s, failing over", tag, describe_exc(exc))

@@ -50,6 +50,36 @@ async def test_the_backfill_rows_carry_their_sources_prompt_extra(db):
     assert row["source_prompt_extra"] == "no translate"
 
 
+async def test_engagement_refreshes_only_queued_items(db):
+    """A sent post keeps the views it had when it went out; the shadow comparison is
+    of what the reader would have seen at digest time."""
+    from src.db.base import get_db
+    from src.db.items import get_views_baseline, set_item_engagement
+
+    sid = await add_source("telegram", "A", "@a", "feed")
+    now = datetime.now(timezone.utc).isoformat()
+    queued = await save_item(sid, "tg_a_1", "queued", None, now, "", "feed", now)
+    sent = await save_item(sid, "tg_a_2", "sent", None, now, "", "feed", now)
+    await mark_sent([sent])
+    await set_item_engagement(sid, [(900, 12, 30, "tg_a_1"), (5000, 1, 2, "tg_a_2"), (1, 1, 1, "tg_a_missing")])
+
+    async with get_db() as conn:
+        async with conn.execute("SELECT id, views, forwards, reactions, engagement_at FROM items ORDER BY id") as cur:
+            rows = {r["id"]: r for r in await cur.fetchall()}
+    assert (rows[queued]["views"], rows[queued]["forwards"], rows[queued]["reactions"]) == (900, 12, 30)
+    assert rows[queued]["engagement_at"] is not None
+    assert rows[sent]["views"] is None
+    # The queued post is what gets scored, so it is not part of its own baseline.
+    assert await get_views_baseline([sid]) == {}
+    await mark_sent([queued])
+    assert await get_views_baseline([sid]) == {sid: [900]}
+    # A muted duplicate or a filtered post never went out.
+    muted = await save_item(sid, "tg_a_3", "dup", None, now, "", "feed", now)
+    await set_item_engagement(sid, [(3, 0, 0, "tg_a_3")])
+    await mark_blocked([(muted, "ads")])
+    assert await get_views_baseline([sid]) == {sid: [900]}
+
+
 async def test_the_queue_rows_carry_their_sources_url(db):
     """Topic routing picks Hacker News stories by the feed's host."""
     from src.db.items import get_unsent_items

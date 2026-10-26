@@ -12,11 +12,11 @@ from pyrogram.errors import ChannelBanned, ChannelInvalid, ChannelPrivate, ChatF
 from pyrogram.types import Message
 
 from src.config import settings
-from src.db.models import find_sources_by_chat_id, get_active_sources, increment_source_fail_count, reset_source_fail_count, save_item, set_source_chat_id, set_source_last_message_id, update_source_status, update_source_url
+from src.db.models import find_sources_by_chat_id, get_active_sources, increment_source_fail_count, reset_source_fail_count, save_item, set_item_engagement, set_source_chat_id, set_source_last_message_id, update_source_status, update_source_url
 from src.dispatcher.admin_alert import admin_alert
 from src.common.media import GENERIC_MEDIA_TOKEN, MEDIA_KIND_TOKEN, MEDIA_TOKENS, MEDIA_TYPES, NO_TEXT
 from src.processor.dedup.deduplicator import is_duplicate, make_message_id
-from src.common.util import plain_text, row_get
+from src.common.util import describe_exc, plain_text, row_get
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +27,10 @@ _INVITE_FAIL_THRESHOLD = 20  # mark source as 'error' after this many consecutiv
 # pull a channel's whole history; a burst beyond it is reported, not silently lost.
 _BOOTSTRAP_LIMIT = 20
 _CATCHUP_LIMIT = 200
+# One history request returns up to this many posts (pyrogram and kurigram alike). A poll
+# needs only the new ones and stops at the bookmark, but the rest of that page is already
+# in hand: its views, forwards and reactions refresh the queued posts for free.
+_HISTORY_PAGE = 100
 # A Telegram 5xx is Telegram's own outage (kurigram reports ten of them, or ten dropped
 # connections, as a bare TimeoutError): the library has already retried it ten
 # times, and the next poll almost always goes through — three in eight days, each
@@ -451,6 +455,56 @@ def _too_old(message: Message) -> bool:
     return date is not None and time.time() - date.timestamp() > settings.max_item_age_hours * 3600
 
 
+async def _rest_of_page(history, budget: int) -> list:
+    """Already-seen posts left on the page the poll fetched, down to max_item_age_hours.
+    Stops within `budget`, the rest of a 100-post page, so the iterator does not ask
+    Telegram for another one (a page that came back short can still cost one)."""
+    rest: list = []
+    if budget <= 0:
+        return rest
+    async for message in history:
+        if _too_old(message):
+            break
+        rest.append(message)
+        if len(rest) >= budget:
+            break
+    return rest
+
+
+def _reaction_count(message) -> int | None:
+    """Total reactions on a post. Both libraries hand back an object holding a list of
+    reactions; pyrogram 2.0.106's docstring still describes a bare list."""
+    reactions = getattr(message, "reactions", None)
+    if reactions is None:
+        return None
+    entries = getattr(reactions, "reactions", reactions)
+    try:
+        return sum(int(getattr(entry, "count", 0) or 0) for entry in entries or [])
+    except (TypeError, ValueError):
+        return None
+
+
+async def _store_engagement(chat_ref: str, source: dict, messages: list, history=None, page_left: int = 0) -> None:
+    """Shadow data: views, forwards and reactions of every post on the fetched page,
+    written to the queued items they belong to. Runs once the poll's own work is saved,
+    and never raises: reading the rest of the page or writing it only costs the numbers."""
+    try:
+        if history is not None:
+            messages = messages + await _rest_of_page(history, page_left)
+        rows = []
+        for message in messages:
+            views = getattr(message, "views", None)
+            if views is None:
+                continue
+            rows.append((views, getattr(message, "forwards", None), _reaction_count(message),
+                         make_message_id("telegram", chat_ref, str(message.id))))
+        if rows:
+            await set_item_engagement(source["id"], rows)
+            log.debug("Source '%s': engagement of %d post(s) read", source["name"], len(rows))
+    except Exception as exc:
+        log.info("Source '%s': engagement not stored: %s", source["name"], describe_exc(exc))
+
+
 async def _poll_channel(chat_ref: str, source: dict, gaps: list | None = None) -> int:
     if chat_ref.lstrip("-").isdigit():
         chat_id: int | str = int(chat_ref)
@@ -464,8 +518,14 @@ async def _poll_channel(chat_ref: str, source: dict, gaps: list | None = None) -
     server_error = False
     try:
         messages = []
-        async for message in userbot.get_chat_history(chat_id, limit=limit):
+        seen = []
+        page_left = 0
+        history = userbot.get_chat_history(chat_id, limit=limit)
+        async for message in history:
             if last_msg_id is not None and message.id <= last_msg_id:
+                seen = [message]
+                # The bookmark can sit on a later page when a channel posted 100+ since.
+                page_left = -(len(messages) + 1) % _HISTORY_PAGE
                 break
             messages.append(message)
         else:
@@ -517,6 +577,7 @@ async def _poll_channel(chat_ref: str, source: dict, gaps: list | None = None) -
 
         if max_seen_id:
             await set_source_last_message_id(source["id"], max_seen_id)
+        await _store_engagement(chat_ref, source, messages + seen, history, page_left)
     except (UsernameNotOccupied, UsernameInvalid) as exc:
         log.error("Source '%s' username gone: %s | marking error", source["name"], exc)
         await update_source_status(source["id"], "error")

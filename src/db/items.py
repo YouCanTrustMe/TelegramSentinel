@@ -200,6 +200,47 @@ async def set_item_category(item_id: int, category: str) -> None:
         await db.commit()
 
 
+@retry_on_locked
+async def set_item_engagement(source_id: int, rows: list[tuple[int | None, int | None, int | None, str]]) -> None:
+    """rows: (views, forwards, reactions, message_id). Only the source's queued items are
+    written — a poll reads ~100 posts and most are long sent — so a sent item keeps the
+    numbers it had when it went out, and a poll with nothing queued takes no write lock."""
+    if not rows:
+        return
+    async with get_db() as db:
+        async with db.execute("SELECT message_id FROM items WHERE source_id = ? AND sent = 0", (source_id,)) as cur:
+            queued = {row["message_id"] for row in await cur.fetchall()}
+        rows = [row for row in rows if row[3] in queued]
+        if not rows:
+            return
+        await db.executemany(
+            "UPDATE items SET views = ?, forwards = ?, reactions = ?, engagement_at = datetime('now') "
+            "WHERE message_id = ? AND sent = 0",
+            rows,
+        )
+        await db.commit()
+
+
+async def get_views_baseline(source_ids: list[int], days: int = 7) -> dict[int, list[int]]:
+    """The views each source's recent posts had when they went out, for a median. Queued
+    posts are what gets compared against it, and muted or filtered ones never went out."""
+    if not source_ids:
+        return {}
+    placeholders = ",".join("?" * len(source_ids))
+    async with get_db() as db:
+        async with db.execute(
+            f"SELECT source_id, views FROM items WHERE source_id IN ({placeholders}) AND views IS NOT NULL AND sent = 1 "
+            f"AND duplicate_of IS NULL AND blocked_reason IS NULL "
+            f"AND julianday(published_at) > julianday('now', ?)",
+            [*source_ids, f"-{days} days"],
+        ) as cur:
+            rows = await cur.fetchall()
+    baseline: dict[int, list[int]] = {}
+    for row in rows:
+        baseline.setdefault(row["source_id"], []).append(row["views"])
+    return baseline
+
+
 async def increment_classify_attempts(item_id: int) -> int:
     async with get_db() as db:
         await db.execute(

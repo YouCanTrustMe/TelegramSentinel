@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import statistics
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
@@ -9,14 +10,14 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.db.models import get_app_setting, get_blocked_words, get_categories, get_items_by_message_ids, get_recent_raw_texts, get_silent_sources, get_unsent_items, get_word_category_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
+from src.db.models import get_app_setting, get_blocked_words, get_categories, get_items_by_message_ids, get_recent_raw_texts, get_silent_sources, get_unsent_items, get_views_baseline, get_word_category_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
 from src.processor.llm.classifier import acquire_classify_lock, background_classify_running, check_blocked_filters, classify_batch, pick_war_reports, release_classify_lock, split_for_summary, _wants_no_merge, _wants_no_filter
 from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings
 from src.processor.llm.llm_client import format_llm_stats, reset_llm_stats, is_task_dead
 from src.processor.dedup.merge import MERGE_MIN_ITEMS, merge_source_items
 from src.common.media import MEDIA_EMOJI as _MEDIA_EMOJI, MEDIA_LABEL as _MEDIA_LABEL, is_media_placeholder
-from src.common.util import clean_invisible, detect_footers, needs_summary, row_get, source_link
+from src.common.util import clean_invisible, describe_exc, detect_footers, needs_summary, row_get, source_link
 from src.processor.llm.prompts import UNSIGNED_AD_RULE, UNSIGNED_TAG
 
 log = logging.getLogger(__name__)
@@ -1035,6 +1036,48 @@ async def _deliver(messages: list[tuple[str, list[int]]]) -> tuple[int, int, int
     return sent_count, total_messages, len(confirmed_ids), failed
 
 
+_ENGAGEMENT_TOP = 5
+# Fewer measured posts than this and a channel's median says little.
+_ENGAGEMENT_MIN_BASELINE = 10
+
+
+def _measured_age(item) -> str:
+    """How old the post was when its views were read, e.g. "3.5h"; "?" when unknown."""
+    published = _parse_published(item["published_at"])
+    measured = _parse_published(row_get(item, "engagement_at"))  # sqlite datetime('now'): UTC, no zone
+    if published is None or measured is None:
+        return "?"
+    return f"{(measured - published).total_seconds() / 3600:.1f}h"
+
+
+async def _log_engagement(items: list) -> None:
+    """Shadow: the queued Telegram posts with the most views against their own channel's
+    median of the last 7 days, logged for review. Nothing in the digest changes, and a
+    failure only costs the log line."""
+    try:
+        measured = [item for item in items
+                    if row_get(item, "views") is not None and item["source_id"] is not None]
+        if not measured:
+            return
+        baseline = await get_views_baseline(sorted({item["source_id"] for item in measured}))
+        scored = []
+        for item in measured:
+            views = baseline.get(item["source_id"], [])
+            if len(views) < _ENGAGEMENT_MIN_BASELINE:
+                continue
+            median = statistics.median(views)
+            if median > 0:
+                scored.append((item["views"] / median, item))
+        scored.sort(key=lambda pair: -pair[0])
+        for ratio, item in scored[:_ENGAGEMENT_TOP]:
+            # The baseline is views at send time; a post queued for hours has had longer to gather them.
+            log.info("Engagement (shadow): item id=%d %s views=%d ×%.1f of median, fwd=%s react=%s, age %s | %s",
+                     item["id"], row_get(item, "source_name"), item["views"], ratio, row_get(item, "forwards"),
+                     row_get(item, "reactions"), _measured_age(item), (item["raw_text"] or "").split("\n")[0][:70])
+    except Exception as exc:
+        log.info("Engagement (shadow) not logged: %s", describe_exc(exc))
+
+
 async def send_digest(
     categories: list[str] | None = None,
     include_quiet: bool = False,
@@ -1107,6 +1150,7 @@ async def _build_and_send_digest(
     if not items:
         log.info("Digest triggered: no unsent items | filter=%s", categories)
         return False
+    await _log_engagement(items)
 
     building_msg_id: int | None = None
     if not status_fn:

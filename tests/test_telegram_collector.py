@@ -594,3 +594,136 @@ async def test_a_database_error_is_not_mistaken_for_an_unreadable_post(captured,
     with pytest.raises(RuntimeError):
         await tc._process_message(CHAT, SOURCE, _msg(text="Body text"))
 
+
+
+class _Msg:
+    def __init__(self, id_, views=None, forwards=None, reactions=None, age_h=1):
+        self.id = id_
+        self.views = views
+        self.forwards = forwards
+        self.reactions = reactions
+        self.date = tc.datetime.now() - tc.timedelta(hours=age_h)
+        self.chat = None
+        self.media_group_id = None
+
+
+class _Reaction:
+    def __init__(self, count):
+        self.count = count
+
+
+class _Reactions:
+    def __init__(self, *counts):
+        self.reactions = [_Reaction(c) for c in counts]
+
+
+def test_reactions_are_summed_in_either_library_shape():
+    assert tc._reaction_count(_Msg(1, reactions=_Reactions(3, 4))) == 7
+    assert tc._reaction_count(_Msg(1, reactions=[_Reaction(2)])) == 2
+    assert tc._reaction_count(_Msg(1)) is None
+
+
+def _counting(messages):
+    pulled = []
+
+    async def gen():
+        for m in messages:
+            pulled.append(m.id)
+            yield m
+    return gen(), pulled
+
+
+async def test_the_rest_of_the_page_never_asks_for_another_one():
+    history, pulled = _counting([_Msg(i) for i in range(10, 0, -1)])
+    rest = await tc._rest_of_page(history, 3)
+    assert [m.id for m in rest] == [10, 9, 8]
+    assert pulled == [10, 9, 8]  # the 4th would be past the page
+
+
+async def test_the_rest_of_the_page_stops_at_old_posts():
+    history, _ = _counting([_Msg(9), _Msg(8), _Msg(7, age_h=tc.settings.max_item_age_hours + 1), _Msg(6)])
+    assert [m.id for m in await tc._rest_of_page(history, 50)] == [9, 8]
+
+
+async def test_a_poll_stores_engagement_of_new_and_already_seen_posts(monkeypatch):
+    page = [_Msg(7, views=70), _Msg(6, views=60, forwards=2, reactions=_Reactions(5)), _Msg(5, views=50), _Msg(4)]
+
+    class _History:
+        def get_chat_history(self, _chat_id, limit):
+            history, _ = _counting(page)
+            return history
+    stored = []
+
+    async def fake_store(source_id, rows):
+        assert source_id == 77
+        stored.extend(rows)
+
+    async def nothing(*a, **kw):
+        return None
+    monkeypatch.setattr(tc, "userbot", _History())
+    monkeypatch.setattr(tc, "set_item_engagement", fake_store)
+    monkeypatch.setattr(tc, "_process_message", nothing)
+    monkeypatch.setattr(tc, "_reply_parent", nothing)
+    monkeypatch.setattr(tc, "set_source_last_message_id", nothing)
+    await tc._poll_channel(CHAT, {"id": 77, "name": "Chan", "last_message_id": 6, "chat_id": 1})
+
+    key = lambda i: tc.make_message_id("telegram", CHAT, str(i))
+    assert stored == [(70, None, None, key(7)), (60, 2, 5, key(6)), (50, None, None, key(5))]
+
+
+async def test_a_failure_reading_the_rest_of_the_page_never_fails_the_poll(monkeypatch):
+    page = [_Msg(7, views=70), _Msg(6, views=60)]
+
+    class _History:
+        def get_chat_history(self, _chat_id, limit):
+            async def gen():
+                for m in page:
+                    yield m
+                raise tc.InternalServerError("RPC_CALL_FAIL")
+            return gen()
+    saved, bookmarks = [], []
+
+    async def fake_process(chat_ref, source, message, **kw):
+        saved.append(message.id)
+        return True
+
+    async def fake_bookmark(source_id, msg_id):
+        bookmarks.append(msg_id)
+
+    async def nothing(*a, **kw):
+        return None
+    monkeypatch.setattr(tc, "_server_error_streak", {})
+    monkeypatch.setattr(tc, "userbot", _History())
+    monkeypatch.setattr(tc, "set_item_engagement", nothing)
+    monkeypatch.setattr(tc, "_process_message", fake_process)
+    monkeypatch.setattr(tc, "_reply_parent", nothing)
+    monkeypatch.setattr(tc, "set_source_last_message_id", fake_bookmark)
+    assert await tc._poll_channel(CHAT, {"id": 77, "name": "Chan", "last_message_id": 6, "chat_id": 1}) == 1
+
+    assert saved == [7] and bookmarks == [7]
+    assert tc._server_error_streak == {}
+
+
+@pytest.mark.parametrize("new_posts, left", [(0, 99), (98, 1), (99, 0), (119, 80)])
+async def test_the_rest_of_the_page_is_counted_from_where_the_bookmark_landed(monkeypatch, new_posts, left):
+    page = [_Msg(1000 - i) for i in range(new_posts)] + [_Msg(5)]
+    budgets = []
+
+    class _History:
+        def get_chat_history(self, _chat_id, limit):
+            history, _ = _counting(page)
+            return history
+
+    async def fake_rest(history, budget):
+        budgets.append(budget)
+        return []
+
+    async def nothing(*a, **kw):
+        return None
+    monkeypatch.setattr(tc, "userbot", _History())
+    monkeypatch.setattr(tc, "_rest_of_page", fake_rest)
+    monkeypatch.setattr(tc, "_process_message", nothing)
+    monkeypatch.setattr(tc, "_reply_parent", nothing)
+    monkeypatch.setattr(tc, "set_source_last_message_id", nothing)
+    await tc._poll_channel(CHAT, {"id": 77, "name": "Chan", "last_message_id": 5, "chat_id": 1})
+    assert budgets == [left]

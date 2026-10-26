@@ -13,9 +13,10 @@ from src.processor.llm.prompts import (
     _FILTER_SYSTEM_PROMPT,
     _WAR_SYSTEM_PROMPT,
     _PAIR_JUDGE_PROMPT,
+    _ROUTE_SYSTEM_PROMPT,
 )
 from src.common.media import MEDIA_KINDS
-from src.common.util import clean_invisible, detect_footers, needs_summary, row_get, strip_footers
+from src.common.util import clean_invisible, describe_exc, detect_footers, host_listed, needs_summary, row_get, strip_footers
 from src.processor.llm.fact_check import unsupported_facts
 
 log = logging.getLogger(__name__)
@@ -415,7 +416,13 @@ def release_classify_lock() -> None:
 
 async def classify_pending_items(limit: int = 3) -> None:
     async with _pending_lock:
-        await _classify_pending_items(limit)
+        summarised = await _classify_pending_items(limit)
+        # A real move must land before a digest waiting on the lock reads the queue.
+        if summarised and not settings.route_by_topic_shadow:
+            await _route_classified(*summarised)
+    # A shadow pick only logs, so a digest never waits for it.
+    if summarised and settings.route_by_topic_shadow:
+        await _route_classified(*summarised)
 
 
 async def split_for_summary(rows: list, label: str = "Background classify") -> tuple[list, list]:
@@ -457,7 +464,7 @@ async def split_for_summary(rows: list, label: str = "Background classify") -> t
     return short, long_items
 
 
-async def _classify_pending_items(limit: int) -> None:
+async def _classify_pending_items(limit: int) -> tuple[list, set[int]]:
     from src.db.models import (
         get_sent_empty_items,
         get_unsent_items,
@@ -535,6 +542,35 @@ async def _classify_pending_items(limit: int) -> None:
                 log.info("Background backfill: %d short sent-empty items filled", len(bshort))
 
     await _embed_classified(classified)
+    return pending, {iid for iid, _ in classified}
+
+
+async def _route_classified(rows: list, done: set[int]) -> None:
+    """Picks a category for each freshly summarised story of a mixed-topic source.
+    Shadow (the default) only logs the pick; nothing about the item changes. Never
+    raises: the pass it follows is already done."""
+    from src.db.models import category_exists, set_item_category
+
+    rows = [r for r in rows if r["id"] in done
+            and host_listed(row_get(r, "source_url") or "", settings.route_by_topic_hosts)]
+    if not rows:
+        return
+    try:
+        picks = await route_by_topic([{"id": r["id"], "text": r["raw_text"] or ""} for r in rows])
+        for row in rows:
+            target = picks.get(row["id"])
+            title = (row["raw_text"] or "").split("\n")[0][:80]
+            if target is None or target == row["category"]:
+                log.info("Topic route: item id=%d stays in %s | %s", row["id"], row["category"], title)
+            elif settings.route_by_topic_shadow:
+                log.info("Topic route (shadow): item id=%d %s → %s | %s", row["id"], row["category"], target, title)
+            elif not await category_exists(target):
+                log.info("Topic route: item id=%d stays in %s, no category %s | %s", row["id"], row["category"], target, title)
+            else:
+                await set_item_category(row["id"], target)
+                log.info("Topic route: item id=%d moved %s → %s | %s", row["id"], row["category"], target, title)
+    except Exception as exc:
+        log.info("Topic route stopped, the rest stay in their category: %s", describe_exc(exc))
 
 
 async def _embed_classified(pairs: list[tuple[int, str]]) -> None:
@@ -810,6 +846,40 @@ async def pick_war_reports(items: list[dict]) -> tuple[set[int], int | None]:
             overview = chunk_overview
     log.info("War reports: %d of %d item(s) picked | overview id=%s", len(picked), len(items), overview)
     return picked, overview
+
+
+_ROUTE_CHUNK = 10
+
+
+async def route_by_topic(items: list[dict]) -> dict[int, str]:
+    """items: [{"id": int, "text": str}]. Returns {id: category} for the stories the
+    model moves to one of settings.route_by_topic_targets; an id left out stays where
+    its source put it. The model only CHOOSES from that list. Fail-open: {} (or the
+    picks of the chunks that answered) on any failure."""
+    targets = settings.route_by_topic_targets
+    if not items or not targets or is_task_dead("route"):
+        return {}
+    prompt = _ROUTE_SYSTEM_PROMPT.format(targets="\n".join(f'- "{name}": {about}' for name, about in targets.items()))
+    picks: dict[int, str] = {}
+    for start in range(0, len(items), _ROUTE_CHUNK):
+        chunk = items[start:start + _ROUTE_CHUNK]
+        numbered = "\n".join(f"{item['id']}: {item['text'][:_BATCH_INPUT_CAP]}" for item in chunk)
+        try:
+            data = await llm_json(
+                messages=[{"role": "system", "content": prompt}, {"role": "user", "content": numbered}],
+                max_retries=2,
+                task="route",
+            )
+        except Exception as exc:
+            log.info("Topic route chunk failed, its items stay in their category: %s", describe_exc(exc))
+            continue
+        known = {item["id"] for item in chunk}
+        for row in _rows(data, "route"):
+            item_id = _as_id(row.get("id"), known)
+            section = _as_text(row.get("section")).strip().lower()
+            if item_id is not None and section in targets:
+                picks[item_id] = section
+    return picks
 
 
 # Pairs per call, as benched; the content filter lost recall past 10 items per call.

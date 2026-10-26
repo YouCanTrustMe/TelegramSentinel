@@ -79,6 +79,11 @@ TASK_ROUTING: dict[str, list[tuple[str, str]]] = {
     "pair":      [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
     # picks the war reports out of the morning feed and the one tally that leads them
     "war":       [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    # Picks another category for a story from a mixed-topic source (Hacker News), in the
+    # background pass. Benched 2026-10-26 on 114 HN titles: flash-lite moved the same 12
+    # in 3 of 3 runs (Kushner, AfD leak, Paris 1.5°C…), ministral 18-27 with half of them
+    # tech (Cerebras, GrapheneOS, Tor exit nodes) and a different half each run.
+    "route":     [("gemini", "gemini-3.1-flash-lite"), ("mistral", "ministral-14b-latest"), ("groq", "openai/gpt-oss-120b")],
     # Ukrainian translate-guard retry
     "translate": [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
 }
@@ -118,7 +123,13 @@ _BILLING_DOWN_SECONDS = 86400.0
 # id-array / structured tasks must be deterministic: any sampling raises the chance
 # of a dropped or hallucinated id and broken JSON (the source of "N item(s) missing"
 # warnings). Free-text summary tasks (classify, translate) keep a little sampling.
-_DETERMINISTIC_TASKS = frozenset({"batch", "summary", "recheck", "group", "filter", "translate", "war", "pair"})
+_DETERMINISTIC_TASKS = frozenset({"batch", "summary", "recheck", "group", "filter", "translate", "war", "pair", "route"})
+
+
+# Shadow tasks whose answer only feeds a log line: a failure of theirs is logged at INFO
+# and never sends the "rate limit exhausted" alert. A model's own health (parked,
+# quota dead, bad key) still warns whichever task found it.
+_QUIET_TASKS = frozenset({"route"})
 
 
 # ---- JSON repair (provider-agnostic) ----
@@ -161,7 +172,7 @@ def _escape_stray_quotes(text: str) -> str:
 # with the bare array instead of the documented envelope is answering correctly,
 # just one level down, so the array is wrapped rather than thrown away.
 _LIST_ROOT_KEY: dict[str, str] = {"batch": "items", "summary": "items", "recheck": "items", "group": "groups",
-                                  "filter": "blocked", "war": "war", "pair": "pairs"}
+                                  "filter": "blocked", "war": "war", "pair": "pairs", "route": "route"}
 
 
 def _coerce_json(text: str, list_key: str | None = None) -> dict | None:
@@ -564,10 +575,15 @@ def _failover_level(chain: list[tuple[str, str]], idx: int) -> int:
 
 
 async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_retries: int,
-                      temperature: float, list_key: str | None) -> dict | None:
+                      temperature: float, list_key: str | None, quiet: bool = False) -> dict | None:
     """One pass over the chain: each live entry is attempted up to `max_retries` with
     rate-limit backoff; on quota death or persistent rate limiting the call fails over
     to the next entry (a separate provider quota). None when no entry answered."""
+    warn = logging.INFO if quiet else logging.WARNING
+
+    def fail_level(idx: int) -> int:
+        return logging.INFO if quiet else _failover_level(chain, idx)
+
     global _failover_count
     first = True
     for idx, (provider, model) in enumerate(chain):
@@ -591,11 +607,11 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
                                                              call_temperature, list_key)
             except _ContentRefused as exc:
                 _bump(tag, "error")
-                log.log(_failover_level(chain, idx), "LLM %s refused the content (%s), failing over", tag, exc)
+                log.log(fail_level(idx), "LLM %s refused the content (%s), failing over", tag, exc)
                 break  # next chain entry
             except Exception as exc:
                 _bump(tag, "error")
-                log.log(_failover_level(chain, idx), "LLM call error on %s: %s, failing over", tag, describe_exc(exc))
+                log.log(fail_level(idx), "LLM call error on %s: %s, failing over", tag, describe_exc(exc))
                 break  # next chain entry
 
             if status == 200 and parsed is not None:
@@ -611,7 +627,7 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
                     # failover (and before waking the admin).
                     log.info("LLM %s returned unparseable JSON, retrying same model | raw=%r", tag, raw)
                     continue
-                log.warning("LLM %s returned unparseable JSON %d times, failing over | raw=%r",
+                log.log(warn, "LLM %s returned unparseable JSON %d times, failing over | raw=%r",
                             tag, unparseable_retries + 1, raw)
                 break  # next chain entry
             if status == 400:
@@ -620,7 +636,7 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
                     log.info("LLM json_validate_failed on %s, repaired malformed JSON", tag)
                     return parsed
                 _bump(tag, "error")
-                log.warning("LLM 400 on %s (json/schema), failing over", tag)
+                log.log(warn, "LLM 400 on %s (json/schema), failing over", tag)
                 break  # next chain entry
             if status == 429:
                 ra = _retry_after(hdrs)
@@ -662,7 +678,7 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
                 if attempt < max_retries - 1:
                     log.info("LLM rate limit on %s, retry %d/%d after %gs backoff (retry-after)", tag, attempt + 1, max_retries, ra)
                     continue
-                log.warning("LLM rate limit persistent on %s after %d attempts (%gs retry-after), failing over", tag, max_retries, ra)
+                log.log(warn, "LLM rate limit persistent on %s after %d attempts (%gs retry-after), failing over", tag, max_retries, ra)
                 break  # next chain entry
             if status in (401, 403):
                 # bad/expired key — retrying is pointless. Take the whole provider
@@ -694,7 +710,7 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
             if attempt < max_retries - 1:
                 await asyncio.sleep(3)
                 continue
-            log.log(_failover_level(chain, idx), "LLM %s status=%d after %d attempts, failing over", tag, status, max_retries)
+            log.log(fail_level(idx), "LLM %s status=%d after %d attempts, failing over", tag, status, max_retries)
             break
     return None
 
@@ -712,7 +728,7 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
     temperature = 0.0 if task in _DETERMINISTIC_TASKS else 0.1
     list_key = _LIST_ROOT_KEY.get(task)
     for chain_pass in range(2):
-        parsed = await _walk_chain(chain, messages, max_retries, temperature, list_key)
+        parsed = await _walk_chain(chain, messages, max_retries, temperature, list_key, task in _QUIET_TASKS)
         if parsed is not None:
             return parsed
         wait = _revival_wait(chain)
@@ -725,7 +741,7 @@ async def llm_json(messages: list[dict], max_retries: int = 3, task: str = "clas
     # Only a chain that stays out alerts: one that was merely busy (10-13: every model in
     # a short cooldown, the digest built in 20.8s) told the admin summaries were falling
     # back to raw text when none did.
-    if is_task_dead(task):
+    if is_task_dead(task) and task not in _QUIET_TASKS:
         await _maybe_send_rate_limit_alert()
     log.info("LLM: no model answered task=%s, caller falls back", task)
     return {}

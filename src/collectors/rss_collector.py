@@ -3,11 +3,11 @@ import html
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
 
 import feedparser
 
 from src.collectors.article_lead import fetch_article_body, fetch_article_lead
+from src.common.util import host_listed as _host_listed
 from src.config import settings
 from src.db.models import (
     get_active_sources,
@@ -69,11 +69,6 @@ def _compose_raw_text(title: str, body: str) -> str:
     if body.lower() in title.lower():
         return title  # title already contains the body → it is the superset
     return f"{title}. {body}"
-
-def _host_listed(feed_url: str, hosts: list[str]) -> bool:
-    host = urlparse(feed_url).netloc.lower()
-    return any(host == h or host.endswith("." + h) for h in hosts)
-
 
 POLL_INTERVAL = 900
 _BOOTSTRAP_LIMIT = 10

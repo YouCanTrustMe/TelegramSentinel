@@ -48,7 +48,8 @@ def test_wrapped_array_survives_the_stray_quote_repair():
 
 def test_list_root_key_covers_every_list_returning_task():
     assert llm_client._LIST_ROOT_KEY == {"batch": "items", "summary": "items", "recheck": "items",
-                                         "group": "groups", "filter": "blocked", "war": "war", "pair": "pairs"}
+                                         "group": "groups", "filter": "blocked", "war": "war", "pair": "pairs",
+                                         "route": "route"}
 
 
 def test_every_summary_writer_is_deterministic():
@@ -921,3 +922,26 @@ def test_call_error_on_the_last_model_still_warns(monkeypatch, caplog):
         out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_err"))
     assert out == {}
     assert any("LLM call error" in r.message for r in caplog.records if r.levelno == logging.WARNING)
+
+
+def test_a_shadow_task_never_pages_the_admin(monkeypatch, caplog):
+    """The topic route only feeds a log line; its last model failing must not warn,
+    nor send "rate limit exhausted"."""
+    import asyncio
+    import logging
+    llm_client._quota_dead_until.clear()
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "route", [("groq", "m1")])
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        return None, 200, {}, "not json"
+    alerts = []
+    async def fake_alert():
+        alerts.append(1)
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    monkeypatch.setattr(llm_client, "_maybe_send_rate_limit_alert", fake_alert)
+    monkeypatch.setattr(llm_client, "is_task_dead", lambda task: True)
+    with caplog.at_level(logging.INFO, logger="src.processor.llm.llm_client"):
+        out = asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="route"))
+    assert out == {}
+    assert [r.message for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert alerts == []
+    llm_client._quota_dead_until.clear()

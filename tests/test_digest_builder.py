@@ -63,7 +63,7 @@ def test_split_keeps_small_segments_in_one_message():
 
 def test_digest_chrome_marks_start_parts_and_end():
     now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
-    messages = _decorate_messages([("a", [1]), ("b", [2]), ("c", [3])], now, "🌍 world", 34)
+    messages = _decorate_messages([("a", [1]), ("b", [2]), ("c", [3])], now, 34)
     assert [ids for _, ids in messages] == [[1], [2], [3]]
     # 28 July 2026 is day 209; every message carries the number, so a continuation
     # can never be read as the start of the next digest.
@@ -80,7 +80,7 @@ def test_digest_chrome_marks_start_parts_and_end():
 
 def test_digest_chrome_on_a_single_message_has_both_ends():
     now = datetime(2026, 1, 1, 21, 30, tzinfo=timezone.utc)
-    (text, _), = _decorate_messages([("body", [1])], now, "", 1)
+    (text, _), = _decorate_messages([("body", [1])], now, 1)
     assert "#1" in text and "21:30" in text
     assert "end #1" in text and "1 item" in text
     assert "1/1" not in text  # a lone message needs no part marker
@@ -88,10 +88,9 @@ def test_digest_chrome_on_a_single_message_has_both_ends():
 
 def test_split_reserves_room_for_the_chrome():
     now = datetime(2026, 7, 28, 9, 0, tzinfo=timezone.utc)
-    tags = "🌍 world · 🪙 crypto"
-    reserve = _chrome_reserve(now, tags, 34)
+    reserve = _chrome_reserve(now, 34)
     segments = [("x" * 1900, [1]), ("y" * 1900, [2]), ("z" * 1900, [3])]
-    messages = _decorate_messages(_split_into_messages(segments, reserve=reserve), now, tags, 34)
+    messages = _decorate_messages(_split_into_messages(segments, reserve=reserve), now, 34)
     # Decorating must not push any message past what send_message can deliver.
     assert all(len(text) <= 4096 for text, _ in messages)
 

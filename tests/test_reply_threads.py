@@ -217,3 +217,36 @@ async def test_reply_to_round_trips_through_the_database(tmp_path, monkeypatch):
     parents = await db._reply_parents([reply])
     assert parents[reply["id"]]["raw_text"] == "parent"
     assert await get_items_by_message_ids([]) == {}
+
+
+def test_a_reply_whose_original_hides_under_another_source_points_at_that_line(monkeypatch):
+    """Лачен's "Кремль поступок не озвучив" answered its own post hidden as a dup of Бабель's,
+    shown a few lines up: quoting the story again repeated what the reader had just read."""
+    monkeypatch.setattr(db, "_today", lambda tz: date(2026, 10, 27))
+    shown = {"published_at": "2026-10-27T10:03:00+00:00", "original_url": "https://t.me/babel/1",
+             "source_name": "Бабель"}
+    parent = {**_line(1, "Лідери Фінляндії та Норвегії провели розмови", "2026-10-27T09:42:00+00:00"),
+              "_shown_as": shown}
+    line = db._reply_line({**_line(2, "Кремль поступок не озвучив", "2026-10-27T13:00:00+00:00"),
+                           "_reply_parent": parent})
+    assert 'href="https://t.me/babel/1"' in line and line.endswith("Бабель</i>")
+    assert "Фінляндії" not in line
+
+
+async def test_a_parent_hidden_under_a_post_of_this_digest_carries_that_post(monkeypatch):
+    async def fake_rows(_ids):
+        return {"tg_l_40": {"id": 40, "message_id": "tg_l_40", "summary": "s", "raw_text": "p",
+                            "original_url": "u40", "published_at": "p40", "duplicate_of": 7, "source_id": 1}}
+
+    monkeypatch.setattr(db, "get_items_by_message_ids", fake_rows)
+    survivor = {"id": 7, "published_at": "p7", "original_url": "u7", "source_name": "Бабель", "source_id": 2}
+    reply = {"id": 9, "reply_to": "tg_l_40"}
+    parents = await db._reply_parents([survivor, reply])
+    assert parents[9]["_shown_as"] == {"published_at": "p7", "original_url": "u7", "source_name": "Бабель"}
+
+    # Hidden under the channel's own copy: that is the same block, no pointer to it.
+    parents = await db._reply_parents([{**survivor, "source_id": 1}, reply])
+    assert "_shown_as" not in parents[9]
+
+    parents = await db._reply_parents([reply])
+    assert "_shown_as" not in parents[9]

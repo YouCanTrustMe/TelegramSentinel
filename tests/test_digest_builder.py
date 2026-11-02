@@ -342,7 +342,7 @@ async def test_media_placeholder_skips_semantic_filter(monkeypatch):
     async def fake_scope_map():
         return {}  # rule 1 has no scope -> applies to every category
 
-    async def fake_check(check_input, rules, rule_scopes):
+    async def fake_check(check_input, rules, rule_scopes, rule_sources=None):
         seen["ids"] = [c["id"] for c in check_input]
         return {c["id"]: rules[0] for c in check_input}  # block everything it is shown
 
@@ -351,6 +351,7 @@ async def test_media_placeholder_skips_semantic_filter(monkeypatch):
 
     monkeypatch.setattr(digest_builder, "get_blocked_words", fake_get_blocked_words)
     monkeypatch.setattr(digest_builder, "get_word_category_map", fake_scope_map)
+    monkeypatch.setattr(digest_builder, "get_word_source_map", fake_scope_map)
     monkeypatch.setattr(digest_builder, "check_blocked_filters", fake_check)
     monkeypatch.setattr(digest_builder, "mark_blocked", fake_mark_blocked)
 
@@ -649,7 +650,7 @@ async def test_no_filter_source_has_only_its_unsigned_posts_judged_as_ads(monkey
     async def fake_recent(source_id, limit=100):
         return [f"Новина {i}\n\n→ Про Бізнес" for i in range(10)]
 
-    async def fake_check(check_input, rules, rule_scopes):
+    async def fake_check(check_input, rules, rule_scopes, rule_sources=None):
         calls.append(([c["id"] for c in check_input], rules, [c["text"] for c in check_input]))
         return {c["id"]: rules[0] for c in check_input}
 
@@ -766,3 +767,35 @@ def test_a_forum_story_shows_its_votes_after_the_line():
             "published_at": None, "key_phrase": "знайти ключ", "votes": 570}
     assert digest_builder._format_item_base(item).endswith("</a> <i>· ▲ 570</i>")
     assert "▲" not in digest_builder._format_item_base({**item, "votes": None})
+
+
+async def test_a_rule_limited_to_one_source_sends_only_that_sources_posts_to_the_filter(monkeypatch):
+    seen: dict = {}
+
+    async def rules():
+        return [{"id": 1, "rule": "tweets with no event"}]
+
+    async def no_scope():
+        return {}
+
+    async def kiwi_only():
+        return {1: {5}}
+
+    async def fake_check(check_input, rules_, rule_scopes, rule_sources=None):
+        seen["ids"] = [c["id"] for c in check_input]
+        return {}
+
+    async def fake_unsigned(items):
+        return items, []
+
+    monkeypatch.setattr(digest_builder, "get_blocked_words", rules)
+    monkeypatch.setattr(digest_builder, "get_word_category_map", no_scope)
+    monkeypatch.setattr(digest_builder, "get_word_source_map", kiwi_only)
+    monkeypatch.setattr(digest_builder, "check_blocked_filters", fake_check)
+    monkeypatch.setattr(digest_builder, "_filter_unsigned_ads", fake_unsigned)
+    items = [{"id": i, "summary": "post", "raw_text": "post", "category": "crypto", "source_id": src,
+              "source_name": name, "source_prompt_extra": None}
+             for i, src, name in ((1, 5, "Kiwi News"), (2, 6, "The Block"))]
+    kept, _ = await digest_builder._apply_semantic_filter(items)
+    assert seen["ids"] == [1]
+    assert sorted(k["id"] for k in kept) == [1, 2]

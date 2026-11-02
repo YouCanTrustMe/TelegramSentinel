@@ -28,6 +28,7 @@ from src.db.sources import (
     revive_error_rss_sources,
     remove_source,
     get_source,
+    get_all_sources,
     get_active_sources,
     get_sources_by_category,
     reassign_source_category,
@@ -90,6 +91,9 @@ from src.db.blocked import (
     link_word_category,
     unlink_word_category,
     get_word_category_map,
+    get_sources_for_word,
+    toggle_word_source,
+    get_word_source_map,
     get_blocked_hit_counts,
 )
 __all__ = [
@@ -98,7 +102,7 @@ __all__ = [
     "set_source_last_message_id", "rename_source", "activate_source", "update_source_url",
     "set_source_chat_id", "find_sources_by_chat_id", "increment_source_fail_count",
     "reset_source_fail_count", "update_source_status", "revive_error_rss_sources", "remove_source", "get_source",
-    "get_active_sources", "get_sources_by_category", "reassign_source_category",
+    "get_all_sources", "get_active_sources", "get_sources_by_category", "reassign_source_category",
     "place_source_at_bottom", "set_source_prompt_extra", "get_silent_sources", "set_source_silent_alert_muted", "get_sources_of_type", "get_paused_sources", "reorder_source",
     "get_source_health",
     "is_seen", "save_item", "get_items_by_message_ids", "get_unsent_items", "set_item_category", "set_item_engagement", "get_views_baseline", "get_sent_empty_items", "get_recent_raw_texts",
@@ -112,5 +116,6 @@ __all__ = [
     "add_category_time", "remove_category_time", "remove_time_everywhere", "get_schedule_slots",
     "get_blocked_words", "add_blocked_word", "remove_blocked_word", "set_blocked_label",
     "get_categories_for_word", "link_word_category", "unlink_word_category", "get_word_category_map",
+    "get_sources_for_word", "toggle_word_source", "get_word_source_map",
     "get_blocked_hit_counts",
 ]

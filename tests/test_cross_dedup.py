@@ -306,6 +306,7 @@ async def test_sent_pool_ignores_placeholder_vectors(monkeypatch):
         return {}
 
     monkeypatch.setattr(cd, "get_recent_embedded_items", fake_recent)
+    monkeypatch.setattr(cd, "get_recent_sent_texts", fake_recent)
     monkeypatch.setattr(cd, "mark_duplicate", fake_mark)
     monkeypatch.setattr(cd, "get_duplicate_links", fake_links)
     monkeypatch.setattr(cd.settings, "dedup_shadow", False)
@@ -358,6 +359,7 @@ def _wire(monkeypatch, sent=(), same_event=True):
     judge, _ = _judge(lambda a, b: "same" if same_event else "different")
 
     monkeypatch.setattr(cd, "get_recent_embedded_items", fake_recent)
+    monkeypatch.setattr(cd, "get_recent_sent_texts", fake_recent)
     monkeypatch.setattr(cd, "mark_duplicate", fake_mark)
     monkeypatch.setattr(cd, "get_duplicate_links", fake_links)
     monkeypatch.setattr(cd, "judge_pairs", judge)
@@ -500,6 +502,7 @@ async def test_no_fallback_through_a_primary_that_is_itself_hidden(monkeypatch):
         return sent
 
     monkeypatch.setattr(cd, "get_recent_embedded_items", fake_recent)
+    monkeypatch.setattr(cd, "get_recent_sent_texts", fake_recent)
 
     survivors, _ = await cd.deduplicate(items, {1: v1, 2: v2})
 
@@ -752,3 +755,113 @@ async def test_a_loose_direct_twin_called_an_update_stays(monkeypatch):
 
     assert await cd._judge_direct_pairs(item_by_id, {1: _vec(1, 0), 2: _at(0.885)}, {}, set()) == {}
     assert await cd._judge_direct_pairs(item_by_id, {1: _vec(1, 0), 2: _at(0.94)}, {}, set()) == {2: 1}
+
+
+_LONG = "Mimara reopens to the public after one of the hardest post-earthquake renovations the city has seen in decades of work, with new halls and a restored roof"
+
+
+async def test_a_sources_exact_repost_of_a_shown_post_hides_at_any_cosine(monkeypatch):
+    shown = {**_sent(99, 1, _vec(1, 0)), "raw_text": f"[Context: earlier line]\n{_LONG}"}
+    marked = _wire(monkeypatch, sent=[shown])
+    items = [_row(1, 1, raw_text=_LONG), _row(2, 2)]
+
+    survivors, _ = await cd.deduplicate(items, {1: _vec(0, 1), 2: _vec(-1, 0)})
+
+    assert [it["id"] for it in survivors] == [2]
+    assert marked == [(1, 99)]
+
+
+async def test_two_exact_copies_in_one_digest_keep_the_older(monkeypatch):
+    marked = _wire(monkeypatch)
+    items = [_row(1, 1, raw_text=_LONG, published_at="2026-10-02"),
+             _row(2, 1, raw_text=_LONG, published_at="2026-10-01")]
+
+    survivors, _ = await cd.deduplicate(items, {1: _vec(1, 0), 2: _vec(0, 1)})
+
+    assert [it["id"] for it in survivors] == [2]
+    assert marked == [(1, 2)]
+
+
+async def test_a_short_alert_repeated_word_for_word_stays(monkeypatch):
+    """Хмельницький posts the same alert line at every alert: each one is a new event."""
+    alert = "🛸 Загроза застосування БпЛА у Камʼянець-Подільському районі ➕ Підписатись на LIVE 📸 Надіслати новину"
+    shown = {**_sent(99, 1, _vec(1, 0)), "raw_text": alert}
+    marked = _wire(monkeypatch, sent=[shown])
+    items = [_row(1, 1, raw_text=alert)]
+
+    survivors, _ = await cd.deduplicate(items, {1: _vec(0, 1)})
+
+    assert [it["id"] for it in survivors] == [1]
+    assert marked == []
+
+
+async def test_the_same_text_from_another_source_is_not_an_exact_repost(monkeypatch):
+    assert cd._exact_reposts([_row(1, 2, raw_text=_LONG)], {99: _LONG}, {99: 1}) == {}
+
+
+def test_a_short_alert_under_a_long_signature_is_not_a_repost():
+    """A one-line alert clears the length bar only with its signature, which every post
+    of the channel shares: cut it, and the repeated alert stays a new event."""
+    sign = "\n➕ Підписатись на наш канал новин Хмельниччини, де все найважливіше щодня\n📸 Надіслати новину редакції"
+    posts = {i: f"Пост номер {i} про різні події міста{sign}" for i in range(90, 96)}
+    alert = f"🛸 Загроза застосування БпЛА у районі{sign}"
+    posts[99] = alert
+    items = [_row(1, 1, raw_text=alert)]
+    assert len(cd._repost_key(alert)) >= cd._REPOST_MIN_LETTERS
+    assert cd._exact_reposts(items, posts, {i: 1 for i in posts}) == {}
+
+
+async def test_exact_reposts_hide_even_while_embeddings_are_down(monkeypatch):
+    shown = {**_sent(99, 1, _vec(1, 0)), "raw_text": _LONG}
+    marked = _wire(monkeypatch, sent=[shown])
+    survivors, _ = await cd.deduplicate([_row(1, 1, raw_text=_LONG)], {})
+    assert survivors == [] and marked == [(1, 99)]
+
+
+def test_two_nights_tallies_are_not_linked_but_one_nights_are():
+    today = "РФ атакувала Україну 168 дронами, ППО збила 122 безпілотники."
+    yesterday = "РФ атакувала Україну 113 дронами, ППО збила 96 безпілотників."
+    assert cd._other_night_tally(today, yesterday, "2026-10-31T19:56:00+00:00", "2026-10-30T05:47:00+00:00")
+    assert not cd._other_night_tally(today, yesterday, "2026-10-27T07:32:00+00:00", "2026-10-27T07:15:00+00:00")
+
+
+def test_a_story_following_a_tally_keeps_its_link():
+    tally = "РФ атакувала Україну 113 дронами, ППО збила 96 безпілотників."
+    story = "Удар по вокзалу в Дніпрі: Укрзалізниця повідомила про загиблих на пероні."
+    assert not cd._other_night_tally(story, tally, "2026-10-31T19:56:00+00:00", "2026-10-30T05:47:00+00:00")
+
+
+async def test_tonights_tally_never_hides_under_last_nights(monkeypatch):
+    """Template wording puts two nights' tallies at 0.95+: auto-hide would bury tonight's."""
+    judge, _ = _judge(lambda a, b: "same")
+    monkeypatch.setattr(cd, "judge_pairs", judge)
+    tonight = {**_row(2, 2), "raw_text": "РФ атакувала Україну 90 дронами, ППО збила 72 безпілотники.",
+               "published_at": "2026-10-31T05:00:00+00:00"}
+    confirmed, updates = await cd._confirm_mutes(
+        {2: 99}, {2: tonight}, {99: "РФ атакувала Україну 113 дронами, ППО збила 96 безпілотників."},
+        {2: _at(0.97)}, {99: _vec(1, 0)}, None, {99: "2026-10-30T05:00:00+00:00"})
+    assert confirmed == {} and updates == {}
+
+
+def test_a_long_template_a_channel_posts_at_every_alert_is_no_repost():
+    template = ("Увага! Загроза застосування балістичного озброєння по всій області. Пройдіть в укриття "
+                "та залишайтеся там до відбою тривоги, стежте за повідомленнями")
+    sent = {90: template, 91: template}
+    assert cd._exact_reposts([_row(1, 1, raw_text=template)], sent, {90: 1, 91: 1}) == {}
+    assert cd._exact_reposts([_row(1, 1, raw_text=template)], {90: template}, {90: 1}) == {1: 90}
+
+
+def test_a_template_hidden_once_still_counts_as_recurring():
+    """Day 2's copy was hidden as a repost; day 3 must see day 1, day 2 and itself, not 2 copies again."""
+    template = ("Увага! Загроза застосування балістичного озброєння по всій області. Пройдіть в укриття "
+                "та залишайтеся там до відбою тривоги, стежте за повідомленнями")
+    sent = {90: template, 91: template}
+    assert cd._exact_reposts([_row(1, 1, raw_text=template)], sent, {90: 1, 91: 1}, {91}) == {}
+    assert cd._exact_reposts([_row(1, 1, raw_text=_LONG)], {91: _LONG}, {91: 1}, {91}) == {}
+
+
+def test_a_reply_context_holding_a_bracket_is_cut_whole():
+    body = _LONG
+    one = f"[Context: [Photo] Ракетний удар по Києву вночі, є загиблі та поранені серед мешканців]\n{body}"
+    two = f"[Context: Інший пост каналу]\n{body}"
+    assert cd._repost_key(one) == cd._repost_key(two) == cd._repost_key(body)

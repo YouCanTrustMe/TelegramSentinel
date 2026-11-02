@@ -134,6 +134,20 @@ async def get_recent_embedded_items(window_hours: int) -> list[aiosqlite.Row]:
             return await cur.fetchall()
 
 
+async def get_recent_sent_texts(window_hours: int) -> list[aiosqlite.Row]:
+    """Posts shown within the window, with or without a vector: the exact-repost check reads
+    text only, and posts delivered while embeddings were down carry none. Hidden duplicates
+    come too (duplicate_of set): they count towards how often a text recurs."""
+    async with get_db() as db:
+        async with db.execute(
+            """SELECT id, source_id, raw_text, summary, duplicate_of FROM items
+               WHERE sent = 1 AND blocked_reason IS NULL
+                 AND julianday(processed_at) >= julianday('now', ?)""",
+            (f"-{window_hours} hours",),
+        ) as cur:
+            return await cur.fetchall()
+
+
 async def get_duplicate_links(primary_ids: list[int]) -> dict[int, list[tuple[str, str]]]:
     """For each primary id, the (source_name, original_url) of duplicates muted
     under it — rendered as links beside the surviving item."""
@@ -146,7 +160,9 @@ async def get_duplicate_links(primary_ids: list[int]) -> dict[int, list[tuple[st
                        items.original_url AS original_url
                 FROM items
                 LEFT JOIN sources ON items.source_id = sources.id
+                JOIN items AS primaries ON primaries.id = items.duplicate_of
                 WHERE items.duplicate_of IN ({placeholders})
+                  AND items.source_id != primaries.source_id
                 ORDER BY sources.sort_order ASC, items.id ASC""",
             primary_ids,
         ) as cur:

@@ -13,6 +13,7 @@ Two safety nets:
 import logging
 import re
 from collections import Counter, defaultdict
+from datetime import datetime
 
 import numpy as np
 
@@ -20,11 +21,12 @@ from src.config import settings
 from src.db.models import (
     get_duplicate_links,
     get_recent_embedded_items,
+    get_recent_sent_texts,
     mark_duplicate,
     set_item_embeddings,
 )
 from src.processor.llm.classifier import judge_pairs
-from src.common.util import row_get
+from src.common.util import detect_footers, row_get, strip_footers
 from src.processor.dedup.embedder import cosine, embed_texts, from_blob, to_blob
 
 log = logging.getLogger(__name__)
@@ -71,6 +73,88 @@ def _richness(item) -> int:
 def _post_text(item) -> str:
     """What the pair judge reads for a post: its own text, the summary when it has none."""
     return _field(item, "raw_text", "") or _field(item, "summary", "") or ""
+
+
+# Below this length a channel's repeated text is a new event in the same words: a regional
+# channel posts its drone-threat line (up to 99 letters with its footer) at every alert.
+_REPOST_MIN_LETTERS = 100
+_REPOST_MAX_COPIES = 2
+# The reply context is one line, the parent's first, which may hold a "]" of its own ("[Photo] …").
+_CONTEXT_PREFIX_RE = re.compile(r"^\[Context:[^\n]*\]\n")
+_NON_LETTERS_RE = re.compile(r"\W+")
+# A morning tally repeats the wording of yesterday's, so the judge calls it an update.
+_TALLY_RE = re.compile(
+    r"(ППО|Повітрян\w+ сил|збил|знешкоджен|знешкодил)[^.]{0,120}\d+"
+    r"|\d+[^.]{0,60}(дрон|БпЛА|безпілот)[^.]{0,80}(ППО|збил|знешкод)",
+    re.IGNORECASE,
+)
+_SAME_NIGHT_HOURS = 10
+
+
+def _repost_key(text: str, footers: set[str] = frozenset()) -> str:
+    """A post's letters and digits, its reply context and signature left out; "" when too
+    short to tell a repost from a new event in the same words — a long signature under a
+    one-line alert must not lift it over the bar."""
+    body = strip_footers(_CONTEXT_PREFIX_RE.sub("", text or ""), set(footers))
+    key = _NON_LETTERS_RE.sub("", body.lower())
+    return key if len(key) >= _REPOST_MIN_LETTERS else ""
+
+
+def _footers_by_source(items: list, sent_text: dict[int, str], sent_source: dict[int, object]) -> dict:
+    """Each source's signature lines, read off its posts in this digest and the sent pool."""
+    texts: dict = defaultdict(list)
+    for sid, text in sent_text.items():
+        texts[sent_source.get(sid)].append(text)
+    for item in items:
+        texts[_field(item, "source_id")].append(_field(item, "raw_text", "") or "")
+    return {src: detect_footers(group) for src, group in texts.items()}
+
+
+def _exact_reposts(items: list, sent_text: dict[int, str], sent_source: dict[int, object],
+                   hidden: set[int] = frozenset()) -> dict[int, int]:
+    """Each post whose whole text its own source already published, shown or in this
+    digest -> that earlier post. Text alone decides, so no judge and no cosine. A `hidden`
+    post of the pool only counts how often its text recurs: it is never the earlier post."""
+    footers = _footers_by_source(items, sent_text, sent_source)
+    seen = {}
+    times: Counter = Counter()
+    for sid, text in sent_text.items():
+        src = sent_source.get(sid)
+        if key := _repost_key(text, footers.get(src, set())):
+            if sid not in hidden:
+                seen[(src, key)] = sid
+            times[(src, key)] += 1
+    slots = {}
+    for item in items:
+        key = _repost_key(_field(item, "raw_text", ""), footers.get(_field(item, "source_id"), set()))
+        if key:
+            slots[_field(item, "id")] = (_field(item, "source_id"), key)
+            times[slots[_field(item, "id")]] += 1
+    out: dict[int, int] = {}
+    for item in sorted(items, key=lambda it: _field(it, "published_at", "") or ""):
+        slot = slots.get(_field(item, "id"))
+        # A text a channel posts again and again is its template for a recurring event (an
+        # alert, a notice), each one new: only a text seen twice is a repost.
+        if slot is None or times[slot] > _REPOST_MAX_COPIES:
+            continue
+        if slot in seen:
+            out[_field(item, "id")] = seen[slot]
+        else:
+            seen[slot] = _field(item, "id")
+    return out
+
+
+def _hours_apart(a: str, b: str) -> float:
+    try:
+        return abs((datetime.fromisoformat(a) - datetime.fromisoformat(b)).total_seconds()) / 3600
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _other_night_tally(text: str, shown_text: str, published: str, shown_published: str) -> bool:
+    """Two attack tallies this far apart are two nights: the later one continues nothing."""
+    return (bool(_TALLY_RE.search(text or "")) and bool(_TALLY_RE.search(shown_text or ""))
+            and _hours_apart(published, shown_published) >= _SAME_NIGHT_HOURS)
 
 
 def _sort_key(item) -> tuple[int, int, float, str]:
@@ -181,6 +265,7 @@ async def _confirm_mutes(
     vec: dict[int, np.ndarray],
     sent_vec: dict[int, np.ndarray],
     judged: set[frozenset] | None = None,
+    sent_published: dict[int, str] | None = None,
 ) -> tuple[dict[int, int], dict[int, int]]:
     """B1 — confirm each candidate against the very post it would hide under.
 
@@ -201,6 +286,13 @@ async def _confirm_mutes(
     pending: list[tuple[int, int]] = []
     score_of: dict[int, float] = {}
     for mid, pid in muted.items():
+        # Two nights' attack tallies share their template wording; neither cosine nor the
+        # judge tells them apart, so the later night is never hidden under the earlier.
+        if pid not in item_by_id and _other_night_tally(
+                _post_text(item_by_id[mid]), sent_text.get(pid, ""),
+                _field(item_by_id[mid], "published_at", "") or "", (sent_published or {}).get(pid, "")):
+            log.info("B1: kept item id=%d — another night's tally than shown id=%d", mid, pid)
+            continue
         mv = vec.get(mid)
         pv = vec.get(pid)
         if pv is None:
@@ -481,7 +573,7 @@ def _with_earlier(item, earlier: tuple[str, str]) -> dict:
 
 async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, dict[int, list[tuple[str, str]]]]:
     items = list(items)
-    if len(items) < 2 or len(vec) < 2:
+    if not items:
         return items, {}
 
     item_by_id = {_field(item, "id"): item for item in items}
@@ -495,6 +587,18 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
     sent_summary: dict[int, str] = {}
     sent_text: dict[int, str] = {}
     sent_link: dict[int, tuple[str, str]] = {}  # id -> (published_at, original_url)
+    # Text-only pool for exact reposts, which need no vector and so keep working while
+    # embeddings are down — posts shown during such an outage included.
+    sent_raw: dict[int, str] = {}
+    sent_source: dict[int, object] = {}
+    sent_hidden: set[int] = set()
+    for row in await get_recent_sent_texts(settings.dedup_window_hours):
+        if row["id"] in current_ids or _is_placeholder(row_get(row, "summary", "") or ""):
+            continue
+        sent_raw[row["id"]] = row_get(row, "raw_text", "") or ""
+        sent_source[row["id"]] = row_get(row, "source_id")
+        if row_get(row, "duplicate_of") is not None:
+            sent_hidden.add(row["id"])
     for row in window:
         if row["id"] in current_ids or not row["sent"]:
             continue
@@ -511,6 +615,16 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
             sent_summary[row["id"]] = row_get(row, "summary", "") or ""
             sent_text[row["id"]] = row_get(row, "raw_text", "") or sent_summary[row["id"]]
             sent_link[row["id"]] = (row_get(row, "published_at", "") or "", row_get(row, "original_url", "") or "")
+
+    reposts = _exact_reposts(items, sent_raw, sent_source, sent_hidden)
+    for mid, pid in reposts.items():
+        log.info("Exact repost: item id=%d repeats id=%d of its own source", mid, pid)
+    if len(items) < 2 or len(vec) < 2:
+        if settings.dedup_shadow or not reposts:
+            return items, {}
+        for mid, pid in reposts.items():
+            await mark_duplicate(mid, pid)
+        return [it for it in items if _field(it, "id") not in reposts], {}
 
     near_thr = settings.merge_near_dup_threshold
 
@@ -547,7 +661,7 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
                 near_muted[mid] = primary
 
     # Keep the near-dups resolved above out of the floor pass, or they re-anchor onto a weak sent primary.
-    cur = [(iid, v) for iid, v in cur_all if iid not in near_muted]
+    cur = [(iid, v) for iid, v in cur_all if iid not in near_muted and iid not in reposts]
     muted: dict[int, int] = {}  # duplicate id -> primary id (primary may be a sent-pool id)
 
     sent_hits, follow = _sent_matches(cur, sent_meta, item_by_id)
@@ -602,7 +716,7 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
             else:
                 muted[mid] = primary
 
-    if not muted and not near_muted and not follow:
+    if not muted and not near_muted and not reposts and not follow:
         log.info("Cross-source dedup: no duplicates among %d item(s)", len(items))
         return items, {}
 
@@ -628,21 +742,23 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
         )
 
     if settings.dedup_shadow:
-        log.info("Cross-source dedup SHADOW: %d duplicate(s) detected, nothing hidden", len(muted) + len(near_muted))
+        log.info("Cross-source dedup SHADOW: %d duplicate(s) detected, nothing hidden", len(muted) + len(near_muted) + len(reposts))
         return items, {}
 
     candidates = len(muted)
     # Every pair the judge has seen, so the direct-twin pass never asks about one again.
     judged: set[frozenset] = set()
-    confirmed, updates = (await _confirm_mutes(muted, item_by_id, sent_text, vec, sent_vec, judged)
+    sent_published = {sid: link[0] for sid, link in sent_link.items()}
+    confirmed, updates = (await _confirm_mutes(muted, item_by_id, sent_text, vec, sent_vec, judged, sent_published)
                           if muted else ({}, {}))
     # A fallback whose own primary is being hidden would re-point through it to a shown
     # story the item was never compared with — skip those.
     retry = {mid: pid for mid, pid in fallback.items() if mid not in confirmed and pid not in confirmed}
     if retry:
         candidates += len(retry)
-        confirmed.update((await _confirm_mutes(retry, item_by_id, sent_text, vec, sent_vec, judged))[0])
+        confirmed.update((await _confirm_mutes(retry, item_by_id, sent_text, vec, sent_vec, judged, sent_published))[0])
     confirmed.update(near_muted)
+    confirmed.update(reposts)
     judged.update(frozenset(p) for p in (*muted.items(), *retry.items(), *near_muted.items()))
     confirmed.update(await _judge_direct_pairs(item_by_id, vec, confirmed, judged))
     updates.update(await _confirm_follow_ups(
@@ -654,7 +770,11 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
         for it in survivors:
             sid = updates.get(_field(it, "id"))
             if sid is not None and sent_link.get(sid, ("", ""))[1]:
-                it = _with_earlier(it, sent_link[sid])
+                if _other_night_tally(_post_text(it), sent_text.get(sid, ""),
+                                      _field(it, "published_at", "") or "", sent_link[sid][0]):
+                    log.info("No earlier link: item id=%d is another night's tally than id=%d", _field(it, "id"), sid)
+                else:
+                    it = _with_earlier(it, sent_link[sid])
             out.append(it)
         return out
 
@@ -684,6 +804,7 @@ async def _deduplicate(items: list, vec: dict[int, np.ndarray]) -> tuple[list, d
     survivors = _linked([it for it in items if _field(it, "id") not in muted])
     link_map = await get_duplicate_links([_field(it, "id") for it in survivors])
     log.info("Cross-source dedup: muted %d by verdict or cosine (of %d) + %d near-identical, %d survivor(s) | "
-             "%d update(s) linked back", len(muted) - len(near_muted), candidates, len(near_muted), len(survivors),
-             sum(1 for it in survivors if _field(it, "id") in updates))
+             "%d update(s) linked back | %d exact repost(s)", len(set(muted) - set(near_muted) - set(reposts)), candidates,
+             len(near_muted), len(survivors),
+             sum(1 for it in survivors if _field(it, "id") in updates), len(reposts))
     return survivors, link_map

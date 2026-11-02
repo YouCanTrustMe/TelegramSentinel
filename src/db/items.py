@@ -52,7 +52,7 @@ async def get_items_by_message_ids(message_ids: list[str]) -> dict[str, aiosqlit
     placeholders = ",".join("?" * len(message_ids))
     async with get_db() as db:
         async with db.execute(
-            f"SELECT id, message_id, summary, raw_text, original_url, published_at FROM items "
+            f"SELECT id, message_id, summary, raw_text, original_url, published_at, duplicate_of, source_id FROM items "
             f"WHERE message_id IN ({placeholders})", list(message_ids),
         ) as cur:
             return {row["message_id"]: row for row in await cur.fetchall()}

@@ -3,6 +3,7 @@ import html
 import inspect
 import logging
 import os
+import re
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -268,6 +269,59 @@ def _peer(chat_ref: str) -> "int | str":
     # A chat id must go in as an int: pyrogram reads a digit string as a phone number.
     peer = chat_ref.lstrip("@")
     return int(peer) if peer.lstrip("-").isdigit() else peer
+
+
+_POST_URL_RE = re.compile(r"^https://t\.me/(?:c/(\d+)|([A-Za-z0-9_]+))/(\d+)$")
+_GET_MESSAGES_MAX = 200
+_DELETED_CHECK_CONCURRENCY = 4
+_DELETED_CHECK_BUDGET = 20
+
+
+def _post_ref(url: str) -> "tuple[int | str, int] | None":
+    """(peer, message id) of a t.me post link, None for anything else."""
+    m = _POST_URL_RE.match(url or "")
+    if not m:
+        return None
+    return (int(f"-100{m.group(1)}") if m.group(1) else m.group(2)), int(m.group(3))
+
+
+async def deleted_posts(urls: list[str]) -> set[str]:
+    """The t.me post links among `urls` whose post the channel has deleted: one request per
+    200 posts of a channel, a few channels at a time. Fail-open and bounded: a channel that
+    cannot be read marks nothing, and the whole check gives up after _DELETED_CHECK_BUDGET
+    seconds, so a slow Telegram never holds the digest."""
+    by_peer: dict = {}
+    for url in set(urls):
+        ref = _post_ref(url)
+        if ref:
+            by_peer.setdefault(ref[0], {})[ref[1]] = url
+    gone: set[str] = set()
+    slots = asyncio.Semaphore(_DELETED_CHECK_CONCURRENCY)
+
+    async def check(peer, wanted: dict) -> None:
+        ids = sorted(wanted)
+        for start in range(0, len(ids), _GET_MESSAGES_MAX):
+            async with slots:
+                try:
+                    messages = await userbot.get_messages(peer, ids[start:start + _GET_MESSAGES_MAX])
+                except Exception as exc:
+                    log.info("Deleted-post check skipped for %s: %s", peer, describe_exc(exc))
+                    return
+            batch = [m for m in (messages if isinstance(messages, list) else [messages]) if m is not None]
+            empty = [m for m in batch if getattr(m, "empty", False) and m.id in wanted]
+            if len(batch) > 1 and len(empty) == len(batch):
+                # Every post of the channel "deleted" at once is a renamed or lost channel read
+                # under its old name, not a cleanup: mark none of them.
+                log.info("Deleted-post check: all %d post(s) of %s came back empty, skipped", len(batch), peer)
+                return
+            gone.update(wanted[m.id] for m in empty)
+
+    try:
+        await asyncio.wait_for(asyncio.gather(*(check(p, w) for p, w in by_peer.items())), _DELETED_CHECK_BUDGET)
+    except asyncio.TimeoutError:
+        log.info("Deleted-post check stopped after %ds; marking what it found", _DELETED_CHECK_BUDGET)
+    log.info("Deleted-post check: %d of %d post(s) gone", len(gone), sum(len(w) for w in by_peer.values()))
+    return gone
 
 
 def _parent_query(get_messages, message_id: int) -> dict:

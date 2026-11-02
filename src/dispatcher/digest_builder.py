@@ -283,6 +283,15 @@ def _reply_line(item) -> str:
     parent = row_get(item, "_reply_parent")
     if not parent:
         return ""
+    shown = row_get(parent, "_shown_as")
+    if shown:
+        # The original was hidden under another source's post in this digest: point at that
+        # line by its source instead of quoting the story the reader has just read there.
+        label = _earlier_label(row_get(shown, "published_at"))
+        url = row_get(shown, "original_url")
+        link = f'<a href="{escape(url, quote=True)}">{label}</a>' if url else label
+        name = _plain_name(row_get(shown, "source_name") or "")
+        return f"<i>↳ to {link} {name}</i>" if name else f"<i>↳ to {link}</i>"
     label = _earlier_label(row_get(parent, "published_at"))
     url = row_get(parent, "original_url")
     link = f'<a href="{escape(url, quote=True)}">{label}</a>' if url else label
@@ -332,13 +341,39 @@ def _thread_lines(lines: list, parents: dict[int, dict]) -> list:
     return ordered
 
 
+async def _mark_deleted(cat_meta: dict) -> None:
+    """Flag every line whose Telegram post was deleted since it was collected."""
+    from src.collectors.telegram_collector import deleted_posts
+
+    blocks = [lines for data in cat_meta.values() for lines in data["sources"].values()]
+    blocks += [data["war_block"]["items"] for data in cat_meta.values() if data.get("war_block")]
+    urls = [row_get(line, "original_url") or "" for lines in blocks for line in lines]
+    gone = await deleted_posts([u for u in urls if u.startswith("https://t.me/")])
+    if not gone:
+        return
+    for lines in blocks:
+        lines[:] = [{**dict(line), "_deleted": True} if (row_get(line, "original_url") or "") in gone else line
+                    for line in lines]
+
+
 async def _reply_parents(items: list) -> dict[int, dict]:
     """item id -> the stored post it replies to, for every reply in this digest."""
     wanted = {item["id"]: row_get(item, "reply_to") for item in items if row_get(item, "reply_to")}
     if not wanted:
         return {}
     rows = await get_items_by_message_ids(sorted(set(wanted.values())))
-    return {iid: dict(rows[mid]) for iid, mid in wanted.items() if mid in rows}
+    by_id = {item["id"]: item for item in items}
+    out = {}
+    for iid, mid in wanted.items():
+        if mid not in rows:
+            continue
+        parent = dict(rows[mid])
+        survivor = by_id.get(parent.get("duplicate_of"))
+        # Only another source's line: a channel's own repeat is the same block, read anyway.
+        if survivor is not None and row_get(survivor, "source_id") != parent.get("source_id"):
+            parent["_shown_as"] = {key: row_get(survivor, key) for key in ("published_at", "original_url", "source_name")}
+        out[iid] = parent
+    return out
 
 
 # Telegram turns a name like "Index.hr ZAGREB" into a link to index.hr by itself. A word
@@ -417,7 +452,9 @@ def _format_item_base(item: dict) -> str:
     # A forum story's votes say why it is here at all: it made the front page.
     suffix = f" <i>· ▲ {votes}</i>" if votes else ""
 
-    prefix = (f"{'  ' if nested else ''}{stamp}  " if stamp else "") + marker
+    # The channel deleted the post after it was collected: the link opens nothing.
+    deleted = "🗑 " if row_get(item, "_deleted") else ""
+    prefix = (f"{'  ' if nested else ''}{stamp}  " if stamp else "") + deleted + marker
     key_phrase = (row_get(item, "key_phrase", "") or "").strip()
     if url and summary_text.strip():
         rest_text = summary_text.strip()
@@ -585,14 +622,6 @@ def _digest_number(now: datetime) -> int:
     return now.timetuple().tm_yday
 
 
-def _category_tags(cat_meta: dict) -> str:
-    return " · ".join(
-        f"{data['emoji']} {escape(name)}"
-        for name, data in cat_meta.items()
-        if any(data["sources"].values()) or data.get("war_block")
-    )
-
-
 _WAR_BLOCK_TITLE = "🌙 War overnight"
 # Strikes on cities are daily now; the rest of the day folds them too, under a plainer
 # title, so one expandable line replaces a screen of them without losing any.
@@ -658,18 +687,15 @@ async def _fold_war_reports(cat_meta: dict, now: datetime) -> None:
     log.info("War block: folded %d of %d %s item(s)", len(picked), len(candidates), settings.war_block_category)
 
 
-def _digest_header(now: datetime, tags: str) -> str:
+def _digest_header(now: datetime) -> str:
     """Opening line of a digest. Several digests go out per day, hence the time —
     the date alone labelled them all the same."""
-    subline = now.strftime("%d %B")
-    if tags:
-        subline = f"{subline} · {tags}"
     # Italic carries the service bits (issue number, part marker, closing line) and
     # bold the title, so the chrome never uses a third typeface: a <code> chip
     # rendered as a grey monospace box and stood out more than the digest itself.
     return (
         f"<i>#{_digest_number(now)}</i>  <b>Digest</b>  <b>{now.strftime('%H:%M')}</b>\n"
-        f"<i>{subline}</i>"
+        f"<i>{now.strftime('%d %B')}</i>"
     )
 
 
@@ -682,20 +708,19 @@ def _digest_footer(now: datetime, item_count: int) -> str:
     return f"<i>end #{_digest_number(now)} · {item_count} {label}</i>"
 
 
-def _chrome_reserve(now: datetime, tags: str, item_count: int) -> int:
+def _chrome_reserve(now: datetime, item_count: int) -> int:
     """Room the header/part marker/footer will take once _decorate_messages runs.
     Reserved before splitting, or decorating could push a message past Telegram's
     limit and the send would fail."""
     # Part index/total are unknown before the split, so reserve for a marker far
     # wider than any real digest produces.
-    head = max(len(_digest_header(now, tags)), len(_part_marker(now, 999, 999)))
+    head = max(len(_digest_header(now)), len(_part_marker(now, 999, 999)))
     return head + len(_digest_footer(now, item_count)) + 4
 
 
 def _decorate_messages(
     messages: list[tuple[str, list[int]]],
     now: datetime,
-    tags: str,
     item_count: int,
 ) -> list[tuple[str, list[int]]]:
     """Wrap the split digest in its chrome: a header on the first message, a part
@@ -704,7 +729,7 @@ def _decorate_messages(
     total = len(messages)
     decorated: list[tuple[str, list[int]]] = []
     for index, (text, ids) in enumerate(messages):
-        head = _digest_header(now, tags) if index == 0 else _part_marker(now, index, total)
+        head = _digest_header(now) if index == 0 else _part_marker(now, index, total)
         # Normalise the seam: a body may or may not start with the blank line that
         # separates categories, so strip it and always leave exactly one.
         stripped = text.lstrip("\n")
@@ -1246,6 +1271,10 @@ async def _build_and_send_digest(
             log.info("Reply threads: %d repl(ies) to the channel's own earlier post", len(parents))
     except Exception:
         log.exception("Reply threads failed, rendering replies unthreaded")
+    try:
+        await _mark_deleted(cat_meta)
+    except Exception:
+        log.exception("Deleted-post check failed, rendering every line as is")
     if _is_morning(now):
         cat_meta = _order_for_morning(cat_meta)
 
@@ -1260,9 +1289,8 @@ async def _build_and_send_digest(
             segments.append((silent_block, []))
             log.info("Appended quiet-sources block to digest")
 
-    tags = _category_tags(cat_meta)
-    messages = _split_into_messages(segments, reserve=_chrome_reserve(now, tags, len(items)))
-    messages = _decorate_messages(messages, now, tags, len(items))
+    messages = _split_into_messages(segments, reserve=_chrome_reserve(now, len(items)))
+    messages = _decorate_messages(messages, now, len(items))
 
     await _update("⏳ Sending...")
     await _discard_building(building_msg_id)

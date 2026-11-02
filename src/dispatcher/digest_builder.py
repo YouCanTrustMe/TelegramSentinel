@@ -13,7 +13,7 @@ from src.config import settings
 from src.db.models import get_app_setting, get_blocked_words, get_categories, get_items_by_message_ids, get_recent_raw_texts, get_silent_sources, get_unsent_items, get_views_baseline, get_word_category_map, get_word_source_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
 from src.processor.llm.classifier import acquire_classify_lock, background_classify_running, check_blocked_filters, classify_batch, pick_war_reports, release_classify_lock, split_for_summary, _wants_no_merge, _wants_no_filter
-from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings
+from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings, unembedded
 from src.processor.llm.llm_client import format_llm_stats, reset_llm_stats, is_task_dead
 from src.processor.dedup.merge import MERGE_MIN_ITEMS, merge_source_items
 from src.common.media import MEDIA_EMOJI as _MEDIA_EMOJI, MEDIA_LABEL as _MEDIA_LABEL, is_media_placeholder
@@ -1065,6 +1065,50 @@ async def _deliver(messages: list[tuple[str, list[int]]]) -> tuple[int, int, int
     return sent_count, total_messages, len(confirmed_ids), failed
 
 
+# Shadow top-stories block: a story told by this many sources (itself + its hidden duplicates).
+_TOP_STORY_MIN_SOURCES = 3
+
+
+def _log_top_stories(items: list, dup_link_map: dict[int, list[tuple[str, str]]]) -> None:
+    """Shadow: the stories most sources carried, logged for review. Counting sources only
+    picks; nothing is written by a model and nothing in the digest changes."""
+    try:
+        ranked = []
+        for item in items:
+            names = {row_get(item, "source_name")} | {name for name, _url in dup_link_map.get(item["id"], [])}
+            names.discard(None)
+            if len(names) >= _TOP_STORY_MIN_SOURCES:
+                ranked.append((len(names), item))
+        ranked.sort(key=lambda pair: -pair[0])
+        for count, item in ranked:
+            log.info("Top story (shadow): item id=%d sources=%d %s | %s", item["id"], count,
+                     row_get(item, "category"), (row_get(item, "summary") or "")[:90])
+        log.info("Top stories (shadow): %d of %d item(s) carried by %d+ sources",
+                 len(ranked), len(items), _TOP_STORY_MIN_SOURCES)
+    except Exception:
+        log.exception("Top-story shadow log failed")
+
+
+_embedding_gap_reported = False
+
+
+def _note_embedding_gap(missing: int, total: int) -> None:
+    """Warn when a digest goes out with items no vector covers — a partial failure too —
+    once until a digest is whole again; a missing key would otherwise warn three times a day."""
+    global _embedding_gap_reported
+    if not missing:
+        if _embedding_gap_reported:
+            log.info("Embeddings whole again at digest time: %d item(s) covered", total)
+        _embedding_gap_reported = False
+        return
+    if _embedding_gap_reported:
+        log.info("Embeddings still missing at digest time: %d of %d item(s)", missing, total)
+        return
+    _embedding_gap_reported = True
+    log.warning("Embeddings unavailable at digest time: %d of %d item(s) without a vector — "
+                "they skip cross-source dedup and within-source merge", missing, total)
+
+
 _ENGAGEMENT_TOP = 5
 # Fewer measured posts than this and a channel's median says little.
 _ENGAGEMENT_MIN_BASELINE = 10
@@ -1216,10 +1260,12 @@ async def _build_and_send_digest(
     vectors: dict = {}
     if settings.dedup_enabled or settings.merge_via_embeddings:
         vectors = await ensure_embeddings(items)
+        _note_embedding_gap(unembedded(items, vectors), len(items))
 
     dup_link_map: dict[int, list[tuple[str, str]]] = {}
     if settings.dedup_enabled:
         items, dup_link_map = await deduplicate(items, vectors)
+        _log_top_stories(items, dup_link_map)
         if not items:
             log.info("Digest triggered: all items deduplicated away | filter=%s", categories)
             await _discard_building(building_msg_id)

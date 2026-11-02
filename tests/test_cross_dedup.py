@@ -831,6 +831,12 @@ def test_a_story_following_a_tally_keeps_its_link():
     assert not cd._other_night_tally(story, tally, "2026-10-31T19:56:00+00:00", "2026-10-30T05:47:00+00:00")
 
 
+def test_unembedded_counts_only_readable_items_without_a_vector():
+    items = [{"id": 1, "summary": "story"}, {"id": 2, "summary": "story"}, {"id": 3, "summary": "no text"},
+             {"id": 4, "summary": ""}]
+    assert cd.unembedded(items, {1: _vec(1, 0)}) == 1
+
+
 async def test_tonights_tally_never_hides_under_last_nights(monkeypatch):
     """Template wording puts two nights' tallies at 0.95+: auto-hide would bury tonight's."""
     judge, _ = _judge(lambda a, b: "same")

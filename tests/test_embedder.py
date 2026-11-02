@@ -60,7 +60,7 @@ def test_single_failed_pass_stays_quiet(caplog):
 
 def test_sustained_failure_warns_once_per_outage(caplog):
     embedder._reset_failure_state()
-    with caplog.at_level(logging.WARNING, logger="src.processor.dedup.embedder"):
+    with caplog.at_level(logging.INFO, logger="src.processor.dedup.embedder"):
         for _ in range(6):
             embedder._note_pass(0, 3)
     assert len(caplog.records) == 1
@@ -69,7 +69,7 @@ def test_sustained_failure_warns_once_per_outage(caplog):
 
 def test_recovery_warns_and_rearms_the_outage_alert(caplog):
     embedder._reset_failure_state()
-    with caplog.at_level(logging.WARNING, logger="src.processor.dedup.embedder"):
+    with caplog.at_level(logging.INFO, logger="src.processor.dedup.embedder"):
         for _ in range(4):
             embedder._note_pass(0, 3)
         embedder._note_pass(3, 3)
@@ -152,7 +152,17 @@ def test_mixed_length_response_does_not_change_the_dimension(monkeypatch):
 
 def test_missing_key_counts_toward_the_outage_alert(caplog):
     embedder._reset_failure_state()
-    with caplog.at_level(logging.WARNING, logger="src.processor.dedup.embedder"):
+    with caplog.at_level(logging.INFO, logger="src.processor.dedup.embedder"):
         for _ in range(4):
             embedder._note_pass(0, 2)
     assert len(caplog.records) == 1
+
+
+def test_an_outage_between_digests_never_warns(caplog):
+    """26.10: down 18:00-19:05 and healed before the 21:20 digest, yet it pinged twice."""
+    embedder._reset_failure_state()
+    with caplog.at_level(logging.WARNING, logger="src.processor.dedup.embedder"):
+        for _ in range(5):
+            embedder._note_pass(0, 3)
+        embedder._note_pass(3, 3)
+    assert caplog.records == []

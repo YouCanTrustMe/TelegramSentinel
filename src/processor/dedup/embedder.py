@@ -61,7 +61,9 @@ class _RateLimited(Exception):
 # single failed pass costs nothing but a skipped comparison, and paging the admin
 # for each one produced an hourly alert for a condition nobody can act on. Warn
 # once when the provider looks genuinely down — several passes in a row with no
-# vector at all — and again only after it has recovered in between.
+# vector at all — and again only after it has recovered in between. Both at INFO:
+# an outage between digests heals unseen (26.10: 18:00-19:05, two pings for nothing),
+# so only a digest built without vectors warns (digest_builder._note_embedding_gap).
 _MAX_QUIET_FAILURES = 4
 _consecutive_failures = 0
 _outage_reported = False
@@ -72,14 +74,14 @@ def _note_pass(ok: int, total: int) -> None:
     global _consecutive_failures, _outage_reported
     if ok:
         if _outage_reported:
-            log.warning("Embeddings recovered: %d/%d vector(s) after an outage", ok, total)
+            log.info("Embeddings recovered: %d/%d vector(s) after an outage", ok, total)
         _consecutive_failures = 0
         _outage_reported = False
         return
     _consecutive_failures += 1
     if _consecutive_failures >= _MAX_QUIET_FAILURES and not _outage_reported:
         _outage_reported = True
-        log.warning(
+        log.info(
             "Embeddings unavailable: %d consecutive pass(es) returned no vectors — "
             "cross-source dedup and within-source merge are running without embeddings",
             _consecutive_failures,

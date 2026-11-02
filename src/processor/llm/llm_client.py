@@ -73,12 +73,16 @@ TASK_ROUTING: dict[str, list[tuple[str, str]]] = {
     "recheck":   [("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b"), ("mistral", "ministral-14b-latest")],
     # id-array grouping + within-source merge
     "group":     [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
-    # content filter (rate 1-10)
-    "filter":    [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    # content filter (rate 1-10). Benched 2026-11-01 on a week's 1490 posts: flash-lite changed
+    # no verdict between runs, hid 12 sports results to ministral's 1 and the 31.10 alerts it
+    # let through, and missed 5 of ministral's 79 feed/finance hides.
+    "filter":    [("gemini", "gemini-3.1-flash-lite"), ("mistral", "ministral-14b-latest"), ("groq", "openai/gpt-oss-120b")],
     # B1 dedup confirm: one same / update / different verdict per pair of posts
     "pair":      [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
     # picks the war reports out of the morning feed and the one tally that leads them
-    "war":       [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    # Benched 2026-11-01 on 19 digests, 2 runs each: flash-lite changed no pick between runs
+    # and left out Eurovision and the UN Security Council; ministral took both and flipped 2.
+    "war":       [("gemini", "gemini-3.1-flash-lite"), ("mistral", "ministral-14b-latest"), ("groq", "openai/gpt-oss-120b")],
     # Picks another category for a story from a mixed-topic source (Hacker News), in the
     # background pass. Benched 2026-10-26 on 114 HN titles: flash-lite moved the same 12
     # in 3 of 3 runs (Kushner, AfD leak, Paris 1.5°C…), ministral 18-27 with half of them

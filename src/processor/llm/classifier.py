@@ -1,4 +1,5 @@
 import asyncio
+import time
 import logging
 import re
 from dataclasses import dataclass, field
@@ -750,7 +751,12 @@ async def check_blocked_filters(
         return data, set(applicable), {item["id"] for item in chunk}
 
     chunks = [to_judge[i:i + _FILTER_CHUNK] for i in range(0, len(to_judge), _FILTER_CHUNK)]
+    started = time.monotonic()
     answers = await asyncio.gather(*(check_chunk(c) for c in chunks), return_exceptions=True)
+    # A chunk that raised (a dead chain) went unanswered too: that is the case this line is for.
+    unanswered = sum(1 for a in answers if isinstance(a, Exception) or (not isinstance(a, BaseException) and a[1] and not a[0]))
+    log.info("Filter: %d chunk(s) of %d item(s), %d chunk(s) left unanswered, %.1fs",
+             len(chunks), len(to_judge), unanswered, time.monotonic() - started)
     for answer in answers:
         if isinstance(answer, asyncio.CancelledError):
             raise answer  # a cancelled digest must unwind, not carry on filtering

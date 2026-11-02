@@ -718,6 +718,32 @@ def test_strict_prompt_lets_the_model_write_an_english_name_in_cyrillic():
     assert "Give a first name only where the item gives it" in _STRICT_SYSTEM_PROMPT
 
 
+def test_check_blocked_filters_logs_chunks_the_model_left_unanswered(monkeypatch, caplog):
+    async def fake_llm(messages, max_retries=3, task="classify"):
+        return {}
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    items = [{"id": 1, "text": "post", "source": "s", "category": "feed"}]
+    with caplog.at_level("INFO", logger=classifier.log.name):
+        out = asyncio.run(classifier.check_blocked_filters(items, ["ads"]))
+
+    assert out == {}
+    assert "1 chunk(s) of 1 item(s), 1 chunk(s) left unanswered, " in caplog.text
+
+
+def test_check_blocked_filters_counts_a_chunk_that_raised_as_unanswered(monkeypatch, caplog):
+    async def dead_chain(messages, max_retries=3, task="classify"):
+        raise RuntimeError("all providers out")
+
+    monkeypatch.setattr(classifier, "llm_json", dead_chain)
+    items = [{"id": 1, "text": "post", "source": "s", "category": "feed"}]
+    with caplog.at_level("INFO", logger=classifier.log.name):
+        out = asyncio.run(classifier.check_blocked_filters(items, ["ads"]))
+
+    assert out == {}
+    assert "1 chunk(s) of 1 item(s), 1 chunk(s) left unanswered, " in caplog.text
+
+
 def test_a_rule_limited_to_one_source_never_judges_the_others(monkeypatch):
     """The Kiwi rule ("tweets with no event") hid The Block's explainer in the 11-01 bench."""
     seen = []

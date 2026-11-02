@@ -63,6 +63,7 @@ from src.db.items import (
     mark_duplicate,
     discard_unsent_items,
     get_recent_embedded_items,
+    get_recent_sent_texts,
     get_duplicate_links,
 )
 from src.db.categories import (
@@ -102,7 +103,7 @@ __all__ = [
     "get_source_health",
     "is_seen", "save_item", "get_items_by_message_ids", "get_unsent_items", "set_item_category", "set_item_engagement", "get_views_baseline", "get_sent_empty_items", "get_recent_raw_texts",
     "update_item_classification", "increment_classify_attempts", "mark_sent", "mark_blocked", "log_digest", "get_recent_digests",
-    "prune_old_items", "set_item_embeddings", "mark_duplicate", "get_recent_embedded_items", "discard_unsent_items",
+    "prune_old_items", "set_item_embeddings", "mark_duplicate", "get_recent_embedded_items", "get_recent_sent_texts", "discard_unsent_items",
     "count_unsent_items", "get_last_digest",
     "get_duplicate_links",
     "category_exists", "get_categories", "add_category", "update_category",

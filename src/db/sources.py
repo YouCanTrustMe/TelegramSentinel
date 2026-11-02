@@ -169,6 +169,13 @@ async def revive_error_rss_sources(max_fail_count: int | None = None) -> list[st
 async def remove_source(source_id: int) -> bool:
     async with get_db() as db:
         await db.execute("DELETE FROM items WHERE source_id = ?", (source_id,))
+        # A rule limited to this source alone keeps the id and so judges nothing: without it
+        # the rule would fall back to every source of its categories.
+        await db.execute(
+            """DELETE FROM blocked_word_sources WHERE source_id = ? AND word_id IN
+               (SELECT word_id FROM blocked_word_sources WHERE source_id != ?)""",
+            (source_id, source_id),
+        )
         cur = await db.execute("DELETE FROM sources WHERE id = ?", (source_id,))
         await db.commit()
         return cur.rowcount > 0
@@ -188,6 +195,13 @@ async def get_sources_of_type(type_: str) -> list[aiosqlite.Row]:
             "SELECT * FROM sources WHERE type = ? ORDER BY category ASC, sort_order ASC, name ASC",
             (type_,),
         ) as cur:
+            return await cur.fetchall()
+
+
+async def get_all_sources() -> list[aiosqlite.Row]:
+    """Every source whatever its status: a feed in error still has its posts judged once it revives."""
+    async with get_db() as db:
+        async with db.execute("SELECT * FROM sources ORDER BY sort_order ASC, name ASC") as cur:
             return await cur.fetchall()
 
 

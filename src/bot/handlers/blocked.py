@@ -9,10 +9,14 @@ from src.bot.state import _pending
 from src.db.models import (
     get_blocked_hit_counts,
     get_blocked_words,
+    get_all_sources,
     get_categories,
     get_categories_for_word,
+    get_source,
+    get_sources_for_word,
     link_word_category,
     remove_blocked_word,
+    toggle_word_source,
     unlink_word_category,
 )
 
@@ -21,6 +25,20 @@ log = logging.getLogger(__name__)
 # Room for a block title in the digest's Filtered section; the cut rule text it
 # replaces runs to 45.
 RULE_LABEL_MAX = 40
+
+
+SOURCES_PAGE = 10
+
+
+def rule_source_choices(sources, scoped_categories: set[str], chosen=()) -> list:
+    """The sources a rule can be limited to: those of its categories, or all of them for a
+    rule that applies everywhere, ordered as the source lists are. A source already chosen
+    stays on the list even when it left those categories or was removed, or a limit nobody
+    can see would keep the rule from ever firing."""
+    pool = [s for s in sources if not scoped_categories or s["category"] in scoped_categories]
+    listed = {s["id"] for s in pool}
+    pool += [s for s in chosen if s["id"] not in listed]
+    return sorted(pool, key=lambda s: ((s["category"] or ""), s["name"].lower()))
 
 
 def parse_rule_label(text: str) -> str | None:
@@ -35,6 +53,7 @@ async def _render_blocked_view(word_id: int) -> tuple[str, InlineKeyboardMarkup]
         return None
     categories = await get_categories()
     scoped = set(await get_categories_for_word(word_id))
+    limited = await get_sources_for_word(word_id)
 
     buttons, row = [], []
     for cat in categories:
@@ -47,6 +66,8 @@ async def _render_blocked_view(word_id: int) -> tuple[str, InlineKeyboardMarkup]
             row = []
     if row:
         buttons.append(row)
+    buttons.append([InlineKeyboardButton(
+        f"📡 Sources: {len(limited)} selected" if limited else "📡 Sources: all", callback_data=f"blocked_src:{word_id}:0")])
     buttons.append([
         InlineKeyboardButton("🏷 Short name", callback_data=f"blocked_label:{word_id}"),
         InlineKeyboardButton("🗑 Remove", callback_data=f"blocked_del:{word_id}"),
@@ -54,13 +75,49 @@ async def _render_blocked_view(word_id: int) -> tuple[str, InlineKeyboardMarkup]
     buttons.append([InlineKeyboardButton("« Back", callback_data="blocked_list")])
 
     applies = f"selected ({len(scoped)})" if scoped else "all categories"
+    by_id = {row["id"]: row for row in await get_all_sources()}
+    stray = [by_id[sid]["name"] for sid in limited if sid in by_id and scoped and by_id[sid]["category"] not in scoped]
+    warn = (f"\n⚠️ Outside these categories, so never judged: {escape(', '.join(stray))}" if stray else "")
+    if any(sid not in by_id for sid in limited):
+        warn += "\n⚠️ Limited to a removed source, so never judged there"
     short = word["label"] or "—"
     text = (
         f"🔴 {escape(word['rule'])}\n\n"
         f"<b>Short name:</b> {escape(short)}\n"
         f"<b>Applies to:</b> {applies}\n"
+        f"<b>Sources:</b> {f'{len(limited)} selected' if limited else 'all of these categories'}{warn}\n"
         f"<i>Tap a category to toggle this filter. None selected = applies everywhere.</i>"
     )
+    return text, InlineKeyboardMarkup(buttons)
+
+
+async def _render_rule_sources(word_id: int, page: int) -> tuple[str, InlineKeyboardMarkup] | None:
+    if not any(w["id"] == word_id for w in await get_blocked_words()):
+        return None
+    limited = set(await get_sources_for_word(word_id))
+    sources = await get_all_sources()
+    by_id = {row["id"]: row for row in sources}
+    # A removed source stays listed while the rule is limited to it, so the limit can be taken off.
+    chosen = [by_id.get(sid) or {"id": sid, "name": f"removed source #{sid}", "category": ""} for sid in sorted(limited)]
+    choices = rule_source_choices(sources, set(await get_categories_for_word(word_id)), chosen)
+    pages = max(1, (len(choices) + SOURCES_PAGE - 1) // SOURCES_PAGE)
+    page = min(max(page, 0), pages - 1)
+    buttons = [
+        [InlineKeyboardButton(f"{'✅' if s['id'] in limited else '⬜'} {s['name']}" + (f" · {s['category']}" if s['category'] else ""),
+                              callback_data=f"blocked_src_toggle:{word_id}:{s['id']}:{page}")]
+        for s in choices[page * SOURCES_PAGE:(page + 1) * SOURCES_PAGE]
+    ]
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("‹", callback_data=f"blocked_src:{word_id}:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton("›", callback_data=f"blocked_src:{word_id}:{page + 1}"))
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("« Back", callback_data=f"blocked_view:{word_id}")])
+    text = ("<b>Sources this rule judges</b>\n"
+            "<i>Tap to toggle. None selected = every source of the rule's categories.</i>")
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -131,6 +188,35 @@ def register_blocked_handlers(bot, admin_msg, admin_cb) -> None:
             await link_word_category(word_id, category)
             log.info("Filter rule id=%d scoped to category=%s", word_id, category)
         rendered = await _render_blocked_view(word_id)
+        if rendered is None:
+            await query.answer("Filter rule not found.", show_alert=True)
+            return
+        text, kb = rendered
+        await query.message.edit_text(text, reply_markup=kb)
+
+    @bot.on_callback_query(pf.regex(r"^blocked_src:\d+:\d+$") & admin_cb)
+    async def cb_blocked_sources(_, query: CallbackQuery) -> None:
+        _, word_id_s, page_s = query.data.split(":")
+        rendered = await _render_rule_sources(int(word_id_s), int(page_s))
+        if rendered is None:
+            await query.answer("Filter rule not found.", show_alert=True)
+            return
+        text, kb = rendered
+        await query.message.edit_text(text, reply_markup=kb)
+
+    @bot.on_callback_query(pf.regex(r"^blocked_src_toggle:\d+:\d+:\d+$") & admin_cb)
+    async def cb_blocked_source_toggle(_, query: CallbackQuery) -> None:
+        _, word_id_s, source_id_s, page_s = query.data.split(":")
+        word_id, source_id = int(word_id_s), int(source_id_s)
+        if not any(w["id"] == word_id for w in await get_blocked_words()):
+            await query.answer("Filter rule not found.", show_alert=True)
+            return
+        if await get_source(source_id) is None and source_id not in await get_sources_for_word(word_id):
+            await query.answer("Source not found.", show_alert=True)
+            return
+        on = await toggle_word_source(word_id, source_id)
+        log.info("Filter rule id=%d %s source id=%d", word_id, "limited to" if on else "no longer limited to", source_id)
+        rendered = await _render_rule_sources(word_id, int(page_s))
         if rendered is None:
             await query.answer("Filter rule not found.", show_alert=True)
             return

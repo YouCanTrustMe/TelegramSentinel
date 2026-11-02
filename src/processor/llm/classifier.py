@@ -670,6 +670,7 @@ async def check_blocked_filters(
     items: list[dict],
     rules: list[str],
     rule_scopes: list[set[str] | None] | None = None,
+    rule_sources: list[set[int] | None] | None = None,
 ) -> dict[int, str]:
     """Check items against filter rules.
 
@@ -681,6 +682,8 @@ async def check_blocked_filters(
     rule_scopes: aligned with `rules`; each entry is the set of categories a rule
         applies to, or None for "all categories". A blocked match is discarded if
         the rule does not cover the item's category (guards against model drift).
+    rule_sources: aligned with `rules` the same way, by source id: a rule meant for one
+        noisy feed (Kiwi's link posts) never judges the others of its category.
     Returns: {item_id: matched_rule_text} for items that should be blocked.
     Returns {} on quota exhaustion or error (pass-through, no blocking).
     """
@@ -689,6 +692,12 @@ async def check_blocked_filters(
 
     item_category = {item["id"]: (item.get("category") or "other") for item in items}
     scopes = rule_scopes if rule_scopes is not None else [None] * len(rules)
+    sources = rule_sources if rule_sources is not None else [None] * len(rules)
+    item_source = {item["id"]: item.get("source_id") for item in items}
+
+    def _applies(j: int, item_id) -> bool:
+        return ((not scopes[j] or item_category.get(item_id) in scopes[j])
+                and (not sources[j] or item_source.get(item_id) in sources[j]))
     result: dict[int, str] = {}
     # Per call, not module level: an asyncio.Semaphore binds to the first loop that
     # contends on it and then raises in any other one.
@@ -702,8 +711,7 @@ async def check_blocked_filters(
             haystack = _normalize_for_match(item.get("text", ""))
             hit = next(
                 (j for j, pattern in literal.items()
-                 if pattern is not None and pattern.search(haystack)
-                 and not (scopes[j] and item_category.get(item["id"]) not in scopes[j])),
+                 if pattern is not None and pattern.search(haystack) and _applies(j, item["id"])),
                 None,
             )
             if hit is None:
@@ -718,8 +726,10 @@ async def check_blocked_filters(
         # input tokens and fewer chances to mis-match an irrelevant rule. Original
         # rule indices are preserved so rule_scopes/rules stay aligned for validation.
         chunk_cats = {item_category[item["id"]] for item in chunk}
+        chunk_srcs = {item_source[item["id"]] for item in chunk}
         applicable = [j for j, sc in enumerate(scopes)
-                      if j not in literal and (sc is None or (sc & chunk_cats))]
+                      if j not in literal and (sc is None or (sc & chunk_cats))
+                      and (not sources[j] or (sources[j] & chunk_srcs))]
         if not applicable:
             return None, set(), set()
         numbered_rules = "\n".join(f"{j}. {rules[j]}" for j in applicable)
@@ -754,8 +764,7 @@ async def check_blocked_filters(
             item_id = entry.get("id")
             rule_idx = entry.get("rule")
             confidence = entry.get("confidence", 10)
-            scope = rule_scopes[rule_idx] if (rule_scopes and isinstance(rule_idx, int) and 0 <= rule_idx < len(rule_scopes)) else None
-            out_of_scope = bool(scope) and item_category.get(item_id) not in scope
+            out_of_scope = isinstance(rule_idx, int) and 0 <= rule_idx < len(rules) and not _applies(rule_idx, item_id)
             # A verdict only counts for what the chunk actually carried. The numbered
             # rule list has gaps (out-of-scope and literal rules are left out), and item
             # ids are consecutive, so one drifted digit lands on a real item of the
@@ -779,7 +788,7 @@ async def check_blocked_filters(
                 result[item_id] = rules[rule_idx]
                 log.info("Filter: blocked item id=%d | rule=%r | confidence=%d", item_id, rules[rule_idx], confidence)
             elif out_of_scope and isinstance(item_id, int) and isinstance(rule_idx, int) and 0 <= rule_idx < len(rules):
-                log.info("Filter: kept item id=%d | rule=%r matched but out of scope for category=%s", item_id, rules[rule_idx], item_category.get(item_id))
+                log.info("Filter: kept item id=%d | rule=%r matched but out of scope for category=%s source=%s", item_id, rules[rule_idx], item_category.get(item_id), item_source.get(item_id))
             elif isinstance(item_id, int) and isinstance(rule_idx, int) and 0 <= rule_idx < len(rules):
                 log.info("Filter: kept item id=%d | rule=%r | confidence=%d (below threshold %d)", item_id, rules[rule_idx], confidence, _FILTER_BLOCK_THRESHOLD)
     return result

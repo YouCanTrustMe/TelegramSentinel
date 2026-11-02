@@ -10,7 +10,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.db.models import get_app_setting, get_blocked_words, get_categories, get_items_by_message_ids, get_recent_raw_texts, get_silent_sources, get_unsent_items, get_views_baseline, get_word_category_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
+from src.db.models import get_app_setting, get_blocked_words, get_categories, get_items_by_message_ids, get_recent_raw_texts, get_silent_sources, get_unsent_items, get_views_baseline, get_word_category_map, get_word_source_map, log_digest, mark_blocked, mark_sent, set_app_setting, update_item_classification
 from src.dispatcher.sender import delete_message, edit_message, pin_message, send_message, unpin_message
 from src.processor.llm.classifier import acquire_classify_lock, background_classify_running, check_blocked_filters, classify_batch, pick_war_reports, release_classify_lock, split_for_summary, _wants_no_merge, _wants_no_filter
 from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings
@@ -919,11 +919,14 @@ async def _apply_rule_filter(items: list) -> tuple[list, list]:
         rules = [r["rule"] for r in filter_rules_rows]
         labels = {r["rule"]: row_get(r, "label") for r in filter_rules_rows}
         scope_map = await get_word_category_map()
-        # Aligned with `rules`: None means the rule applies to every category.
+        source_map = await get_word_source_map()
+        # Aligned with `rules`: None means the rule applies to every category / source.
         rule_scopes = [scope_map.get(r["id"]) or None for r in filter_rules_rows]
+        rule_sources = [source_map.get(r["id"]) or None for r in filter_rules_rows]
 
-        def _has_applicable_rule(cat: str) -> bool:
-            return any(scope is None or cat in scope for scope in rule_scopes)
+        def _has_applicable_rule(cat: str, source_id) -> bool:
+            return any((scope is None or cat in scope) and (srcs is None or source_id in srcs)
+                       for scope, srcs in zip(rule_scopes, rule_sources))
 
         filterable, no_filter = [], []
         for item in items:
@@ -931,7 +934,7 @@ async def _apply_rule_filter(items: list) -> tuple[list, list]:
             cat = item["category"] or "other"
             # Skip the LLM filter for items no rule targets (saves tokens), opted-out sources,
             # and media-only placeholders (unreadable content → any block would be a blind guess).
-            if _wants_no_filter(prompt_extra) or not _has_applicable_rule(cat) or is_media_placeholder(item["summary"]):
+            if _wants_no_filter(prompt_extra) or not _has_applicable_rule(cat, row_get(item, "source_id")) or is_media_placeholder(item["summary"]):
                 no_filter.append(item)
             else:
                 filterable.append(item)
@@ -940,11 +943,12 @@ async def _apply_rule_filter(items: list) -> tuple[list, list]:
                 "id": item["id"],
                 "text": (item["summary"] or "") + " " + (item["raw_text"] or ""),
                 "source": item["source_name"] or "unknown",
+                "source_id": row_get(item, "source_id"),
                 "category": item["category"] or "other",
             }
             for item in filterable
         ]
-        blocked_map = await check_blocked_filters(check_input, rules, rule_scopes)
+        blocked_map = await check_blocked_filters(check_input, rules, rule_scopes, rule_sources)
         if blocked_map:
             for item in filterable:
                 matched_rule = blocked_map.get(item["id"])

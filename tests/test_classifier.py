@@ -1,5 +1,6 @@
 """Classifier pure helpers: Ukrainian detection, prompt-extra keyword switches,
 media-prefix stripping and the truncation marker."""
+import asyncio
 import pytest
 
 import src.db.models as models
@@ -715,3 +716,31 @@ def test_strict_prompt_lets_the_model_write_an_english_name_in_cyrillic():
     # Without it the fidelity rule kept "Donald Trump заявив" in 39 summaries a week.
     assert "not an added fact" in _STRICT_SYSTEM_PROMPT and "Trump → Трамп" in _STRICT_SYSTEM_PROMPT
     assert "Give a first name only where the item gives it" in _STRICT_SYSTEM_PROMPT
+
+
+def test_a_rule_limited_to_one_source_never_judges_the_others(monkeypatch):
+    """The Kiwi rule ("tweets with no event") hid The Block's explainer in the 11-01 bench."""
+    seen = []
+
+    async def fake_llm(messages, max_retries=3, task="classify"):
+        seen.append(messages[1]["content"])
+        return {"blocked": [{"id": 1, "rule": 0, "confidence": 10}, {"id": 2, "rule": 0, "confidence": 10}]}
+
+    monkeypatch.setattr(classifier, "llm_json", fake_llm)
+    items = [{"id": 1, "text": "a tweet", "source": "Kiwi News", "source_id": 7, "category": "crypto"},
+             {"id": 2, "text": "an explainer", "source": "Kiwi News", "source_id": 8, "category": "crypto"}]
+    # Two sources share a name; only the chosen one is judged.
+    out = asyncio.run(classifier.check_blocked_filters(items, ["tweets with no event"], [None], [{7}]))
+    assert out == {1: "tweets with no event"}
+
+    seen.clear()
+    only_block = [items[1]]
+    assert asyncio.run(classifier.check_blocked_filters(only_block, ["tweets"], [None], [{7}])) == {}
+    assert seen == []  # no chunk holds a Kiwi post, so the model is never asked
+
+
+def test_a_literal_rule_limited_to_one_source_spares_the_others():
+    items = [{"id": 1, "text": "= promo now", "source": "A", "source_id": 1, "category": "feed"},
+             {"id": 2, "text": "= promo now", "source": "B", "source_id": 2, "category": "feed"}]
+    out = asyncio.run(classifier.check_blocked_filters(items, ["= promo now"], [None], [{1}]))
+    assert out == {1: "= promo now"}

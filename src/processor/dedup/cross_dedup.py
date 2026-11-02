@@ -194,6 +194,17 @@ class _UnionFind:
             self.parent[ra] = rb
 
 
+def _embed_text(item) -> str:
+    """The text an item is embedded from; "" for one that is never embedded."""
+    text = (_field(item, "summary", "") or _field(item, "raw_text", "") or "").strip()
+    return "" if _is_placeholder(text) else text
+
+
+def unembedded(items: list, vec: dict[int, np.ndarray]) -> int:
+    """How many items that should carry a vector have none, i.e. sit outside dedup and merge."""
+    return sum(1 for item in items if _embed_text(item) and _field(item, "id") not in vec)
+
+
 async def ensure_embeddings(items: list) -> dict[int, np.ndarray]:
     """Return {item_id: vector} for the given items, embedding (and persisting)
     any that lack a stored vector. Computed once per digest and shared by both
@@ -205,8 +216,8 @@ async def ensure_embeddings(items: list) -> dict[int, np.ndarray]:
         iid = _field(item, "id")
         if iid is None:
             continue
-        text = (_field(item, "summary", "") or _field(item, "raw_text", "") or "").strip()
-        if not text or _is_placeholder(text):
+        text = _embed_text(item)
+        if not text:
             continue
         existing = from_blob(_field(item, "embedding"))
         if existing is not None:

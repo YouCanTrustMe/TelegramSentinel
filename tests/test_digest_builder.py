@@ -768,6 +768,28 @@ def test_a_forum_story_shows_its_votes_after_the_line():
     assert "▲" not in digest_builder._format_item_base({**item, "votes": None})
 
 
+def test_top_stories_shadow_counts_each_source_once(caplog):
+    items = [{"id": 1, "source_name": "Бабель", "category": "feed", "summary": "Су-34 знищено"},
+             {"id": 2, "source_name": "WSJ", "category": "finance", "summary": "ECB holds"}]
+    links = {1: [("Лачен", "u1"), ("Бавовна", "u2"), ("Лачен", "u3")], 2: [("CNBC", "u4")]}
+    with caplog.at_level("INFO", logger=digest_builder.log.name):
+        digest_builder._log_top_stories(items, links)
+    assert "item id=1 sources=3 feed" in caplog.text
+    assert "item id=2" not in caplog.text
+    assert "1 of 2 item(s) carried by 3+ sources" in caplog.text
+
+
+def test_an_embedding_gap_warns_once_until_a_digest_is_whole(caplog, monkeypatch):
+    monkeypatch.setattr(digest_builder, "_embedding_gap_reported", False)
+    with caplog.at_level("INFO", logger=digest_builder.log.name):
+        digest_builder._note_embedding_gap(2, 30)   # partial: 2 of 30 left out
+        digest_builder._note_embedding_gap(30, 30)  # still down at the next digest
+        digest_builder._note_embedding_gap(0, 30)
+        digest_builder._note_embedding_gap(5, 30)
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2 and "2 of 30" in warnings[0].getMessage() and "5 of 30" in warnings[1].getMessage()
+
+
 async def test_a_rule_limited_to_one_source_sends_only_that_sources_posts_to_the_filter(monkeypatch):
     seen: dict = {}
 

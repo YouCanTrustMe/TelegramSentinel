@@ -30,66 +30,80 @@ PROVIDERS: dict[str, dict] = {
     # rpm/tpm read off each provider's own x-ratelimit headers (2026-08-31) and paced
     # just under. Groq's 8K tokens/minute is the binding one: a 12-item batch prompt is
     # ~5K tokens, so barely one fits per minute — hence Groq tails rather than heads.
-    "groq":     {"base": "https://api.groq.com/openai/v1/chat/completions",        "rpm": 28, "tpm": 8000},
+    # per_model: the provider counts its limits per model, so each model gets its own pace
+    # and a fallback to a sibling model does not queue behind the one that just failed.
+    "groq":     {"base": "https://api.groq.com/openai/v1/chat/completions",        "rpm": 28, "tpm": 8000, "per_model": True},
     "mistral":  {"base": "https://api.mistral.ai/v1/chat/completions",             "rpm": 45, "tpm": 50000},
     # Gemini speaks OpenAI's protocol on this path, so it needs no special transport.
     # Free tier is ~15 RPM / 1500 RPD per model; paced just under to leave room for
     # the embedding calls that share the key (a different model, so a separate RPD).
-    "gemini":   {"base": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "rpm": 14, "tpm": 250000},
+    "gemini":   {"base": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "rpm": 14, "tpm": 250000, "per_model": True},
     "zhipu":    {"base": "https://open.bigmodel.cn/api/paas/v4/chat/completions",  "rpm": 20, "tpm": 100000},
 }
 
 # Per-task routing: ordered (provider, model) chain. Each entry falls over to the
 # next on quota death / persistent rate-limit; fallbacks live on SEPARATE provider
-# quotas by design, so one exhausted bucket never stalls a task. Groq tails every
-# chain as the always-present last resort. Entries whose provider has no API key
-# are skipped automatically, so the system degrades gracefully if a key is missing.
+# quotas by design, so one exhausted bucket never stalls a task. Entries whose
+# provider has no API key are skipped automatically, so the system degrades
+# gracefully if a key is missing.
+#
+# Re-benchmarked 2026-11-02..11 on frozen prod samples, 2 runs per model, every
+# disagreement labelled by reading the originals (.bench/mb): 15 free models over
+# filter, war, pair, summary, group and route. Where the numbers below come from:
+# .bench/mb/score_*.py and the labels_*_2026_11_10 files next to them.
+# - gemini-3.1-flash-lite: best or tied-best on every task and never changed a verdict
+#   between runs. Google lists its shutdown as 2027-05-07 at the earliest.
+# - gemini-3.5-flash-lite: its successor, on its OWN quota, so it sits right behind
+#   3.1 and takes over when 3.1 is retired. Weaker: 7-19 flipped verdicts between runs.
+#   Same provider, though — both shed load with 503 on the same mornings — so a
+#   non-Google model always follows the two.
+# - groq qwen3.8-27b: the most precise on war and route (fewest wrong picks, 0 flips);
+#   its 8K tokens/minute 429s about every second call under load, so it heads only the
+#   small tasks (war: 1-5 calls a digest; route: background).
+# - ministral-14b: weakest of the old chain — glued different events into one line
+#   (34-37 wrong merges of 48 vs flash-lite's 2) and 7 summary errors of 60 vs 1.
+#   Kept behind the Google pair only where it was not worse than the rest.
+# Rejected: Cloudflare (gpt-oss ~470 429s and over the 10K-neuron day in one run; qwen3
+# invented facts), Kilo gateway models (15-55s per call, 120s timeouts, free «until
+# withdrawn»), CF glm-4.7 / Kilo beam / Kilo ling (broken).
+FLASH_LITE = ("gemini", "gemini-3.1-flash-lite")
+FLASH_LITE_NEXT = ("gemini", "gemini-3.5-flash-lite")
+MINISTRAL = ("mistral", "ministral-14b-latest")
+QWEN = ("groq", "qwen/qwen3.8-27b")
+GPT_OSS = ("groq", "openai/gpt-oss-120b")
+
 TASK_ROUTING: dict[str, list[tuple[str, str]]] = {
-    # Re-benchmarked 2026-09-04 on the same 60 prod items, after Mistral's free tier
-    # stopped serving its premier models: mistral-small/medium/magistral answer 429
-    # ("Rate limit exceeded") to EVERY call, even a single one on an idle key, while
-    # ministral-* and mistral-embed on the same key answer 200. It is a per-model cap,
-    # not our burst and not the account.
-    # ministral-14b heads every chain: 60/60 then 58/60 ids over two runs, 0 bad calls,
-    # ~9.5s per 12-item batch — the only candidate that never dropped a call.
-    # gemini-3.1-flash-lite is second: same recall as the rest of the Gemini family when
-    # it answers, but 8-70x faster than 3.5-flash-lite, whose 20-67s latency is what
-    # turned the 2026-09-04 morning digest into a 374s build with re-classify timeouts.
-    # Groq tails as a third separate quota (its json_object mode still 400s on gpt-oss,
-    # which llm_json repairs from `failed_generation`).
-    # Rejected here: mistral-small/medium/large (429/403 — dead for this key),
-    # gemini-3.5-flash (2x the latency of 3.1-flash-lite for the same recall),
-    # groq gpt-oss-20b and qwen3.6-27b (5/5 bad calls, 400 + 429).
-    "classify":  [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
-    # id-array batch summarise (no merge) at digest time, under the digest's burst
-    "batch":     [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    # single-item summarise; not re-benched 11-02, unchanged
+    "classify":  [MINISTRAL, FLASH_LITE, GPT_OSS],
+    # id-array batch summarise at digest time (the re-classify). Summaries read by eye on
+    # 60 posts: flash-lite 1 error, 3.5 1, ministral 7. On 10-18 flash-lite failed under
+    # the digest burst here — then 3.5 (own quota) and ministral catch it.
+    "batch":     [FLASH_LITE, FLASH_LITE_NEXT, MINISTRAL, GPT_OSS],
     # The background summary pass: 1-3 posts per call, 50-70 calls a day, never a burst.
-    # gemini-3.1-flash-lite heads it (benched 2026-10-18 on 60 real posts: 0 invented facts
-    # with the strict prompt vs ministral's 7) — it answered 0 times in 8 of 11 digests where
-    # it was tried, but those were bursts; out of one it answered 80 of 80 bench calls.
-    # Any failure falls to ministral, i.e. to what every summary was before.
-    "summary":   [("gemini", "gemini-3.1-flash-lite"), ("mistral", "ministral-14b-latest"), ("groq", "openai/gpt-oss-120b")],
-    # Re-writes one summary the fact check flagged, on a model other than the usual writer.
-    "recheck":   [("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b"), ("mistral", "ministral-14b-latest")],
-    # id-array grouping + within-source merge
-    "group":     [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
-    # content filter (rate 1-10). Benched 2026-11-01 on a week's 1490 posts: flash-lite changed
-    # no verdict between runs, hid 12 sports results to ministral's 1 and the 31.10 alerts it
-    # let through, and missed 5 of ministral's 79 feed/finance hides.
-    "filter":    [("gemini", "gemini-3.1-flash-lite"), ("mistral", "ministral-14b-latest"), ("groq", "openai/gpt-oss-120b")],
-    # B1 dedup confirm: one same / update / different verdict per pair of posts
-    "pair":      [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
-    # picks the war reports out of the morning feed and the one tally that leads them
-    # Benched 2026-11-01 on 19 digests, 2 runs each: flash-lite changed no pick between runs
-    # and left out Eurovision and the UN Security Council; ministral took both and flipped 2.
-    "war":       [("gemini", "gemini-3.1-flash-lite"), ("mistral", "ministral-14b-latest"), ("groq", "openai/gpt-oss-120b")],
-    # Picks another category for a story from a mixed-topic source (Hacker News), in the
-    # background pass. Benched 2026-10-26 on 114 HN titles: flash-lite moved the same 12
-    # in 3 of 3 runs (Kushner, AfD leak, Paris 1.5°C…), ministral 18-27 with half of them
-    # tech (Cerebras, GrapheneOS, Tor exit nodes) and a different half each run.
-    "route":     [("gemini", "gemini-3.1-flash-lite"), ("mistral", "ministral-14b-latest"), ("groq", "openai/gpt-oss-120b")],
-    # Ukrainian translate-guard retry
-    "translate": [("mistral", "ministral-14b-latest"), ("gemini", "gemini-3.1-flash-lite"), ("groq", "openai/gpt-oss-120b")],
+    "summary":   [FLASH_LITE, FLASH_LITE_NEXT, MINISTRAL, GPT_OSS],
+    # Re-writes one summary the fact check flagged; not re-benched 11-02, unchanged
+    "recheck":   [FLASH_LITE, GPT_OSS, MINISTRAL],
+    # id-array grouping + within-source merge. Right merges / wrong merges of 53 / 48
+    # labelled pairs: flash-lite 33/2, qwen3.8 31/1, 3.5 24-30/0, ministral 41/34-37.
+    # ministral is left out: a failed call keeps the posts as separate lines, a wrong
+    # merge hides a story.
+    "group":     [FLASH_LITE, FLASH_LITE_NEXT, QWEN, GPT_OSS],
+    # content filter. Hid right / hid wrong of 61 / 48 labelled posts: flash-lite 50/0
+    # (0 flips), 3.5 48/2-4, qwen3.8 40/3 (0 flips), ministral 19-23/5-6.
+    "filter":    [FLASH_LITE, FLASH_LITE_NEXT, QWEN, MINISTRAL],
+    # B1 dedup confirm. Dups called «same» of 80 / wrong of 47 / flips: flash-lite 39/5/0,
+    # ministral 39-41/8/3, 3.5 42-43/3/19. Every model finds about half — a prompt matter.
+    "pair":      [FLASH_LITE, MINISTRAL, FLASH_LITE_NEXT, GPT_OSS],
+    # War reports + the one tally that leads them. Reports caught of 20 / non-war picked /
+    # good lead of 17: qwen3.8 18/3/17 (0 flips), flash-lite 20/9/14 (it led with a
+    # regional item when no country-wide tally existed), 3.5 20/11-14/16, ministral 8-10/12/15.
+    "war":       [QWEN, FLASH_LITE, FLASH_LITE_NEXT, GPT_OSS],
+    # Moves a mixed-source story (Hacker News) to another category; shadow, log only.
+    # Right moves of 23 / wrong moves of 58: qwen3.8 19-21/3, flash-lite 20/9 (0 flips),
+    # 3.5 20-21/5-9, ministral 12-15/10.
+    "route":     [QWEN, FLASH_LITE, FLASH_LITE_NEXT],
+    # Ukrainian translate-guard retry; not re-benched 11-02, unchanged
+    "translate": [MINISTRAL, FLASH_LITE, GPT_OSS],
 }
 
 _QUOTA_DEAD_THRESHOLD = 300.0
@@ -233,10 +247,16 @@ def _parse_reset(value: str | None) -> float | None:
 
 
 def _retry_after(headers) -> float | None:
+    """How long a 429 asks us to stay away. A Retry-After header is the provider's own
+    answer and wins. Never x-ratelimit-reset-requests: on Groq that is the time until the
+    DAILY request bucket is full again (~86s per request used), so taking it turned a
+    plain per-minute 429 into a 10-30 min park of a model that answered the next call
+    (bench 2026-11-09: «dead for 1642s» while every later call got 200)."""
+    explicit = _parse_reset(headers.get("retry-after"))
+    if explicit is not None:
+        return explicit
     candidates = [
-        headers.get("retry-after"),
         headers.get("x-ratelimit-reset-tokens"),
-        headers.get("x-ratelimit-reset-requests"),
         headers.get("x-ratelimit-reset-tokens-minute"),
     ]
     values = [v for v in (_parse_reset(c) if c else None for c in candidates) if v is not None]
@@ -363,7 +383,7 @@ def is_task_dead(task: str) -> bool:
 
 
 # ---- per-provider token-bucket rate limiter ----
-_buckets: dict[str, list[float]] = {}  # provider -> [tokens, last_refill]
+_buckets: dict[str, list[float]] = {}  # provider or provider/model -> [tokens, last_refill]
 _bucket_lock = asyncio.Lock()
 
 
@@ -381,13 +401,17 @@ def _reserve_token(bucket: list[float], now: float, rate: float, capacity: float
     return -bucket[0] / rate if bucket[0] < 0 else 0.0
 
 
-async def _rate_gate(provider: str) -> None:
+def _bucket_key(provider: str, model: str) -> str:
+    return f"{provider}/{model}" if PROVIDERS[provider].get("per_model") else provider
+
+
+async def _rate_gate(provider: str, model: str) -> None:
     rpm = PROVIDERS[provider]["rpm"]
     rate = rpm / 60.0
     capacity = max(2.0, rpm / 10.0)
     async with _bucket_lock:
         now = time.monotonic()
-        bucket = _buckets.setdefault(provider, [capacity, now])
+        bucket = _buckets.setdefault(_bucket_key(provider, model), [capacity, now])
         wait = _reserve_token(bucket, now, rate, capacity)
     if wait > 0:
         await asyncio.sleep(wait)
@@ -458,18 +482,25 @@ def _routed_providers() -> list[str]:
     return seen
 
 
-def _sample_model(provider: str) -> str | None:
+def _routed_models(provider: str) -> list[str]:
+    """Every model the routing sends to this provider, in first-use order."""
+    models: list[str] = []
     for chain in TASK_ROUTING.values():
         for p, m in chain:
-            if p == provider:
-                return m
-    return None
+            if p == provider and m not in models:
+                models.append(m)
+    return models
 
 
-async def _ping(provider: str) -> int | None:
+def _sample_model(provider: str) -> str | None:
+    models = _routed_models(provider)
+    return models[0] if models else None
+
+
+async def _ping(provider: str, model: str | None = None) -> int | None:
     """Tiny live call; returns the HTTP status (used to distinguish a bad key
     (401/403) from a healthy/quota-limited one). None on network failure."""
-    model = _sample_model(provider)
+    model = model or _sample_model(provider)
     if not model:
         return None
     try:
@@ -503,6 +534,14 @@ async def verify_llm_providers() -> None:
             await _alert_provider(provider, f"model '{_sample_model(provider)}' not found (HTTP 404) — retired? routing entry needs updating")
         elif status is not None:
             log.info("LLM verify: %s key OK (HTTP %d)", provider, status)
+        if status in (401, 402, 403):
+            continue
+        # The key answers for one model; a retired or mistyped id of a fallback (3.5
+        # flash-lite, groq qwen) would otherwise surface only as a 404 mid-digest.
+        for model in _routed_models(provider)[1:]:
+            if await _ping(provider, model) == 404:
+                await _alert_provider(f"{provider}:{model}",
+                                      f"model '{model}' not found (HTTP 404) — retired? routing entry needs updating")
 
 
 class _ContentRefused(Exception):
@@ -525,7 +564,7 @@ async def _call_once(provider: str, model: str, messages: list[dict], temperatur
     parsed is {} on a recoverable empty/error so the caller can distinguish from a
     hard failure via status; raw_snippet is the start of what came back when it
     could not be parsed, so the caller can log the evidence."""
-    await _rate_gate(provider)
+    await _rate_gate(provider, model)
     session = await _get_session()
     payload = {
         "model": model,

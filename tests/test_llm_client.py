@@ -109,12 +109,13 @@ def test_unknown_task_falls_back_to_classify_chain():
     assert _resolve_chain("nonexistent") == _resolve_chain("classify")
 
 
-def test_group_leads_with_high_rpm_provider(monkeypatch):
-    # §6 lever: id-heavy `group` must lead with Mistral (50 RPM), not Cerebras
-    # (5 RPM) — Cerebras serialised big digests behind 60s Retry-After walls.
-    for name in ("cerebras_api_key", "mistral_api_key"):
-        monkeypatch.setattr(llm_client.settings, name, "x-test-key", raising=False)
-    assert _resolve_chain("group")[0][0] == "mistral"
+def test_group_never_routes_to_ministral():
+    """ministral glued different events into one line (34-37 wrong merges of 48 labelled
+    pairs in the 2026-11 bench): a failed group call keeps posts apart, a wrong merge
+    hides a story, so group must fail rather than fall to it."""
+    chain = llm_client.TASK_ROUTING["group"]
+    assert chain[0] == llm_client.FLASH_LITE
+    assert llm_client.MINISTRAL not in chain
 
 
 def test_is_task_dead_false_when_alive():
@@ -126,7 +127,7 @@ def test_verify_alerts_on_missing_key(monkeypatch):
     calls = []
     async def fake_alert(provider, msg):
         calls.append(provider)
-    async def fake_ping(provider):
+    async def fake_ping(provider, model=None):
         return 200
     monkeypatch.setattr(llm_client, "_alert_provider", fake_alert)
     monkeypatch.setattr(llm_client, "_ping", fake_ping)
@@ -142,7 +143,7 @@ def test_verify_alerts_on_invalid_key(monkeypatch):
     calls = []
     async def fake_alert(provider, msg):
         calls.append(provider)
-    async def fake_ping(provider):
+    async def fake_ping(provider, model=None):
         return 401
     monkeypatch.setattr(llm_client, "_alert_provider", fake_alert)
     monkeypatch.setattr(llm_client, "_ping", fake_ping)
@@ -285,7 +286,7 @@ def test_unparseable_body_is_returned_for_the_log(monkeypatch):
     async def fake_session():
         return _Session()
 
-    async def no_gate(provider):
+    async def no_gate(provider, model):
         return None
 
     monkeypatch.setattr(llm_client, "_get_session", fake_session)
@@ -320,7 +321,7 @@ def test_null_content_is_unparseable_not_a_crash(monkeypatch):
     async def fake_session():
         return _Session()
 
-    async def no_gate(provider):
+    async def no_gate(provider, model):
         return None
 
     monkeypatch.setattr(llm_client, "_get_session", fake_session)
@@ -355,7 +356,7 @@ def test_a_safety_refusal_is_told_apart_from_unparseable_json(monkeypatch):
     async def fake_session():
         return _Session()
 
-    async def no_gate(provider):
+    async def no_gate(provider, model):
         return None
 
     monkeypatch.setattr(llm_client, "_get_session", fake_session)
@@ -390,7 +391,7 @@ def test_the_openai_refusal_shape_is_a_refusal_too(monkeypatch, body):
     async def fake_session():
         return _Session()
 
-    async def no_gate(provider):
+    async def no_gate(provider, model):
         return None
 
     monkeypatch.setattr(llm_client, "_get_session", fake_session)
@@ -945,3 +946,62 @@ def test_a_shadow_task_never_pages_the_admin(monkeypatch, caplog):
     assert [r.message for r in caplog.records if r.levelno >= logging.WARNING] == []
     assert alerts == []
     llm_client._quota_dead_until.clear()
+
+
+def test_retry_after_prefers_the_header_and_ignores_the_daily_request_bucket():
+    """Groq's x-ratelimit-reset-requests is the refill time of its 1000/day request
+    bucket; taking it parked a model for 27 min on a per-minute 429 (bench 2026-11-09)."""
+    headers = {"retry-after": "7", "x-ratelimit-reset-requests": "27m24s",
+               "x-ratelimit-reset-tokens": "1.2s"}
+    assert llm_client._retry_after(headers) == 7.0
+    assert llm_client._retry_after({"x-ratelimit-reset-requests": "27m24s"}) is None
+    assert llm_client._retry_after({"x-ratelimit-reset-requests": "27m24s",
+                                    "x-ratelimit-reset-tokens": "2m3s"}) == 123.0
+    assert llm_client._retry_after({}) is None
+
+
+def test_per_model_providers_pace_each_model_apart():
+    """gemini 3.1 and 3.5 flash-lite have separate quotas: a failover to 3.5 must not
+    queue behind 3.1's pace. Mistral keeps one pace for the key."""
+    assert llm_client._bucket_key("gemini", "a") != llm_client._bucket_key("gemini", "b")
+    assert llm_client._bucket_key("groq", "a") != llm_client._bucket_key("groq", "b")
+    assert llm_client._bucket_key("mistral", "a") == llm_client._bucket_key("mistral", "b")
+
+
+def test_rate_gate_keeps_a_separate_bucket_per_gemini_model(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(llm_client, "_buckets", {})
+    asyncio.run(llm_client._rate_gate("gemini", "gemini-3.1-flash-lite"))
+    asyncio.run(llm_client._rate_gate("gemini", "gemini-3.5-flash-lite"))
+    asyncio.run(llm_client._rate_gate("mistral", "ministral-14b-latest"))
+    assert set(llm_client._buckets) == {"gemini/gemini-3.1-flash-lite",
+                                        "gemini/gemini-3.5-flash-lite", "mistral"}
+
+
+def test_every_chain_holds_a_second_provider():
+    """Both flash-lite models shed load with 503 on the same mornings, so a chain that a
+    Google model heads must hold another provider after the Google models, and a chain
+    headed by another provider (war, route: groq qwen) keeps Google only as its fallback."""
+    for task, chain in llm_client.TASK_ROUTING.items():
+        providers = [p for p, _ in chain]
+        assert len(set(providers)) >= 2, task
+        if providers[0] == "gemini":
+            last_gemini = max(i for i, p in enumerate(providers) if p == "gemini")
+            assert any(p != "gemini" for p in providers[last_gemini + 1:]), task
+
+
+def test_verify_pings_every_routed_model_and_names_a_retired_fallback(monkeypatch):
+    import asyncio
+    alerts, pinged = [], []
+    async def fake_alert(provider, msg):
+        alerts.append(provider)
+    async def fake_ping(provider, model=None):
+        pinged.append((provider, model))
+        return 404 if model == "gone" else 200
+    monkeypatch.setattr(llm_client, "_alert_provider", fake_alert)
+    monkeypatch.setattr(llm_client, "_ping", fake_ping)
+    monkeypatch.setattr(llm_client, "TASK_ROUTING", {"t": [("groq", "head"), ("groq", "gone")]})
+    monkeypatch.setattr(llm_client.settings, "groq_api_key", "x", raising=False)
+    asyncio.run(llm_client.verify_llm_providers())
+    assert ("groq", "gone") in pinged
+    assert alerts == ["groq:gone"]

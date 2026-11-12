@@ -135,7 +135,7 @@ SQLite at `data/sentinel.db`.
 | Layer | Tech |
 |---|---|
 | Collectors | Pyrogram 2.0, feedparser |
-| AI | Mistral (`mistral-small`) → Gemini (`3.5-flash-lite`) → Groq (`gpt-oss-120b`) + `mistral-embed` for dedup |
+| AI | per task: Gemini `3.1-flash-lite` → `3.5-flash-lite` → Groq `qwen3.8-27b` / Mistral `ministral-14b` / Groq `gpt-oss-120b` (war and route lead with `qwen3.8`) + `mistral-embed` for dedup |
 | Storage | SQLite + aiosqlite |
 | Scheduler | APScheduler 3.x |
 | Bot | Pyrogram bot + Bot HTTP API |

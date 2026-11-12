@@ -14,8 +14,8 @@ class Settings(BaseSettings):
 
     # LLM provider API keys — each a SEPARATE free-tier quota. Per-task model
     # routing + failover across these lives in src/processor/llm_client.py
-    # (TASK_ROUTING). Groq is the always-present last resort; the others are
-    # optional — a missing key just drops that provider from every chain.
+    # (TASK_ROUTING). Every chain holds at least two providers; a missing key
+    # just drops that provider from every chain.
     groq_api_key: str
     cerebras_api_key: str = ""
     mistral_api_key: str = ""

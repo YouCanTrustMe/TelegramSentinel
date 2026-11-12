@@ -990,6 +990,122 @@ def test_every_chain_holds_a_second_provider():
             assert any(p != "gemini" for p in providers[last_gemini + 1:]), task
 
 
+def test_error_kind_tells_provider_capacity_from_our_quota():
+    mistral_3505 = '{"object":"error","message":"Service tier capacity exceeded for this model.","code":"3505"}'
+    gemini_503 = '{"error":{"code":503,"message":"This model is currently experiencing high demand.","status":"UNAVAILABLE"}}'
+    gemini_quota = '{"error":{"code":429,"message":"You exceeded your current quota","status":"RESOURCE_EXHAUSTED"}}'
+    groq_tpm = '{"error":{"message":"Rate limit reached for model `qwen/qwen3.8-27b` on tokens per minute (TPM)"}}'
+    assert llm_client._error_kind(429, mistral_3505) == "busy"
+    assert llm_client._error_kind(503, gemini_503) == "busy"
+    assert llm_client._error_kind(503, "") == "busy"
+    assert llm_client._error_kind(429, gemini_quota) == "quota"
+    assert llm_client._error_kind(429, groq_tpm) == "quota"
+    assert llm_client._error_kind(500, "boom") == ""
+
+
+def test_error_kind_never_reads_a_number_in_a_quota_message_as_busy():
+    """«Requested 3505» or «try again in 1.3505s» in a Groq TPM 429 is our quota."""
+    for body in ('{"error":{"message":"Rate limit reached on tokens per minute (TPM): Limit 8000, '
+                 'Used 4495, Requested 3505. Please try again in 1.3505s."}}',
+                 '{"error":{"message":"Service unavailable for this tier? no: you exceeded your quota"}}'):
+        assert llm_client._error_kind(429, body) == "quota"
+    assert llm_client._error_kind(429, '{"code": 3505, "message": "x"}') == "busy"
+
+
+def test_a_capacity_429_never_counts_toward_the_withdrawn_park(monkeypatch):
+    """2026-11-04: Mistral answered 3505 «out of capacity» all morning and prod parked
+    ministral for 24h as if its free tier were withdrawn."""
+    import asyncio
+    monkeypatch.setattr(llm_client, "_quota_dead_until", {})
+    monkeypatch.setattr(llm_client, "_throttle_streak", {})
+    monkeypatch.setattr(llm_client, "_model_stats", {})
+    monkeypatch.setattr(llm_client, "_last_limits", {})
+    monkeypatch.setattr(llm_client, "_failover_count", 0)
+    monkeypatch.setattr(llm_client.settings, "mistral_api_key", "x", raising=False)
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_busy429", [("mistral", "m1"), ("groq", "g1")])
+    body = '{"message":"Service tier capacity exceeded","code":"3505"}'
+
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        if model == "m1":
+            return None, 429, {}, body
+        return {"ok": 1}, 200, {}, ""
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    for _ in range(10):
+        llm_client._quota_dead_until.clear()
+        assert asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_busy429")) == {"ok": 1}
+    assert "mistral/m1" not in llm_client._throttle_streak
+    assert llm_client._model_stats["mistral/m1"]["busy"] >= 10
+
+
+def test_a_capacity_429_honours_a_longer_retry_after(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(llm_client, "_quota_dead_until", {})
+    monkeypatch.setattr(llm_client, "_throttle_streak", {})
+    monkeypatch.setattr(llm_client, "_model_stats", {})
+    monkeypatch.setattr(llm_client.settings, "mistral_api_key", "x", raising=False)
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_busy_ra", [("mistral", "m1"), ("groq", "g1")])
+
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        if model == "m1":
+            return None, 429, {"retry-after": "240"}, '{"message":"x","code":"3505"}'
+        return {"ok": 1}, 200, {}, ""
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    before = llm_client.time.monotonic()
+    assert asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_busy_ra")) == {"ok": 1}
+    assert llm_client._quota_dead_until["mistral/m1"] - before >= 239
+
+
+def test_a_413_fails_over_without_retrying_the_same_prompt(monkeypatch):
+    """Groq answers 413 when a prompt is over qwen's 8K tokens/minute; it never fits."""
+    import asyncio
+    monkeypatch.setattr(llm_client, "_quota_dead_until", {})
+    monkeypatch.setattr(llm_client, "_backoff_until", {})
+    monkeypatch.setattr(llm_client, "_model_stats", {})
+    monkeypatch.setattr(llm_client.settings, "mistral_api_key", "x", raising=False)
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_413", [("groq", "q"), ("mistral", "f")])
+    calls = []
+
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        calls.append(model)
+        if model == "q":
+            return None, 413, {}, '{"error":{"message":"Request too large"}}'
+        return {"ok": 1}, 200, {}, ""
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+
+    async def no_sleep(_):
+        return None
+    monkeypatch.setattr(llm_client.asyncio, "sleep", no_sleep)
+    assert asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_413")) == {"ok": 1}
+    assert calls == ["q", "f"]
+
+
+def test_usage_line_shows_what_the_provider_says_is_left(monkeypatch):
+    monkeypatch.setattr(llm_client, "_model_stats", {})
+    monkeypatch.setattr(llm_client, "_last_limits", {})
+    llm_client._note_limits("groq/q", {"X-RateLimit-Remaining-Requests": "812", "X-RateLimit-Limit-Requests": "1000",
+                                       "x-ratelimit-remaining-tokens": "6100", "x-ratelimit-limit-tokens": "8000",
+                                       "content-type": "application/json"})
+    llm_client._note_limits("gemini/f", {})
+    llm_client._bump("groq/q", "ok")
+    llm_client._bump("gemini/f", "busy")
+    line = llm_client.format_llm_stats()
+    assert "groq/q[ok=1 dead=0 rl=0 busy=0 err=0 left requests=812/1000 tokens=6100/8000]" in line
+    assert "gemini/f[ok=0 dead=0 rl=0 busy=1 err=0]" in line
+
+
+def test_mistral_models_share_one_limits_snapshot(monkeypatch):
+    """Mistral counts per key: the usage line must not show two different «left» values
+    for one bucket."""
+    monkeypatch.setattr(llm_client, "_model_stats", {})
+    monkeypatch.setattr(llm_client, "_last_limits", {})
+    llm_client._note_limits("mistral/a", {"x-ratelimit-remaining-req-minute": "1", "x-ratelimit-limit-req-minute": "2"})
+    llm_client._note_limits("mistral/b", {"x-ratelimit-remaining-req-minute": "0", "x-ratelimit-limit-req-minute": "2"})
+    llm_client._bump("mistral/a", "ok")
+    llm_client._bump("mistral/b", "ok")
+    line = llm_client.format_llm_stats()
+    assert line.count("left req-minute=0/2") == 2
+
+
 def test_verify_pings_every_routed_model_and_names_a_retired_fallback(monkeypatch):
     import asyncio
     alerts, pinged = [], []
@@ -1005,3 +1121,40 @@ def test_verify_pings_every_routed_model_and_names_a_retired_fallback(monkeypatc
     asyncio.run(llm_client.verify_llm_providers())
     assert ("groq", "gone") in pinged
     assert alerts == ["groq:gone"]
+
+
+def test_a_model_that_sheds_every_retry_is_skipped_for_the_cooldown(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(llm_client, "_quota_dead_until", {})
+    monkeypatch.setattr(llm_client, "_backoff_until", {})
+    monkeypatch.setattr(llm_client, "_model_stats", {})
+    monkeypatch.setattr(llm_client.settings, "mistral_api_key", "x", raising=False)
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_503", [("groq", "busy"), ("mistral", "ok")])
+
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        if model == "busy":
+            return None, 503, {}, '{"error":{"message":"high demand"}}'
+        return {"ok": 1}, 200, {}, ""
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+
+    async def no_sleep(_):
+        return None
+    monkeypatch.setattr(llm_client.asyncio, "sleep", no_sleep)
+    assert asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_503")) == {"ok": 1}
+    assert llm_client._is_dead("groq/busy")
+
+
+def test_unreadable_headers_never_cost_a_good_answer(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(llm_client, "_quota_dead_until", {})
+    monkeypatch.setattr(llm_client, "_model_stats", {})
+    monkeypatch.setitem(llm_client.TASK_ROUTING, "t_hdr", [("groq", "g")])
+
+    class Bad:
+        def items(self):
+            raise RuntimeError("odd header")
+
+    async def fake_call(provider, model, messages, temperature=0.1, list_key=None):
+        return {"ok": 1}, 200, Bad(), ""
+    monkeypatch.setattr(llm_client, "_call_once", fake_call)
+    assert asyncio.run(llm_client.llm_json([{"role": "user", "content": "x"}], task="t_hdr")) == {"ok": 1}

@@ -11,6 +11,7 @@ over any provider. Kept separate from prompt logic so quota handling stays testa
 import asyncio
 import json
 import logging
+import re
 import time
 
 import aiohttp
@@ -275,6 +276,8 @@ _throttle_streak: dict[str, tuple[int, float, float]] = {}
 # How much of a 200-but-unparseable answer to carry into the log, and how many
 # times to re-ask the same model before paying a failover.
 _UNPARSEABLE_SNIPPET_CHARS = 200
+# An error body is read whole by _error_kind: a busy marker can sit past the first 200 chars.
+_ERROR_BODY_CHARS = 4000
 _UNPARSEABLE_RETRIES = 1
 # The deterministic tasks call at temperature 0, where a re-ask is byte-identical
 # and so breaks the same way; nudge it just for the retry.
@@ -285,8 +288,58 @@ def _tag(provider: str, model: str) -> str:
     return f"{provider}/{model}"
 
 
+# Provider capacity, not our quota: Gemini 503 «high demand» (UNAVAILABLE), Mistral 429
+# code 3505 «backend_out_of_capacity». Until 2026-11 both logged as a bare status, so a
+# morning of Google shedding load read like our quota running out.
+_BUSY_STATUSES = frozenset({502, 503, 504, 529})
+# Phrases only, never a bare number: a Groq TPM 429 says «Requested 3505» or «try again
+# in 1.3505s», and a quota 429 read as busy would never reach the quota-dead logic.
+_BUSY_MARKERS = ("high demand", "overloaded", "out of capacity", "out_of_capacity", "capacity exceeded")
+_BUSY_CODE_RE = re.compile(r'"code"\s*:\s*"?3505\b')
+
+
+def _error_kind(status: int, body: str) -> str:
+    """'busy' when the provider sheds load, 'quota' for a 429 on our own limits, '' else."""
+    text = (body or "").lower()
+    if status in _BUSY_STATUSES or (status == 429 and (any(m in text for m in _BUSY_MARKERS)
+                                                       or _BUSY_CODE_RE.search(text))):
+        return "busy"
+    return "quota" if status == 429 else ""
+
+
+_REMAINING_PREFIX = "x-ratelimit-remaining-"
+_last_limits: dict[str, dict[str, str]] = {}
+
+
+def _limits_key(tag: str) -> str:
+    """Mistral counts its limits per key, so every Mistral model shows the one shared
+    snapshot instead of each keeping a stale copy of the same bucket."""
+    provider, _, model = tag.partition("/")
+    return _bucket_key(provider, model) if provider in PROVIDERS else tag
+
+
+def _note_limits(tag: str, hdrs) -> None:
+    """Keep the latest remaining/limit pairs a provider sent (Groq: requests per day and
+    tokens per minute; Mistral: per-minute). Gemini sends none."""
+    if not hdrs:
+        return
+    try:
+        lowered = {str(k).lower(): str(v) for k, v in hdrs.items()}
+    except AttributeError:
+        return
+    seen = {}
+    for name, value in lowered.items():
+        if name.startswith(_REMAINING_PREFIX):
+            kind = name[len(_REMAINING_PREFIX):]
+            limit = lowered.get("x-ratelimit-limit-" + kind)
+            seen[kind] = f"{value}/{limit}" if limit else value
+    if seen:
+        _last_limits[_limits_key(tag)] = seen
+        log.debug("LLM limits | %s | %s", tag, " ".join(f"{k}={v}" for k, v in sorted(seen.items())))
+
+
 def _bump(tag: str, key: str) -> None:
-    stats = _model_stats.setdefault(tag, {"ok": 0, "rate_limited": 0, "quota_dead": 0, "error": 0})
+    stats = _model_stats.setdefault(tag, {"ok": 0, "rate_limited": 0, "quota_dead": 0, "error": 0, "busy": 0})
     stats[key] += 1
     if key == "ok":
         _throttle_streak.pop(tag, None)
@@ -296,16 +349,20 @@ def format_llm_stats() -> str:
     """One-line snapshot of per-(provider,model) usage for periodic logging."""
     if not _model_stats:
         return "LLM usage: no calls yet"
-    parts = [
-        f"{t}[ok={s['ok']} dead={s['quota_dead']} rl={s['rate_limited']} err={s['error']}]"
-        for t, s in sorted(_model_stats.items())
-    ]
+    parts = []
+    for t, s in sorted(_model_stats.items()):
+        part = f"{t}[ok={s['ok']} dead={s['quota_dead']} rl={s['rate_limited']} busy={s['busy']} err={s['error']}"
+        left = _last_limits.get(_limits_key(t))
+        if left:
+            part += " left " + " ".join(f"{k}={v}" for k, v in sorted(left.items()))
+        parts.append(part + "]")
     return "LLM usage | " + " | ".join(parts) + f" | failovers={_failover_count}"
 
 
 def reset_llm_stats() -> None:
     global _failover_count
     _model_stats.clear()
+    _last_limits.clear()
     _failover_count = 0
 
 
@@ -607,7 +664,7 @@ async def _call_once(provider: str, model: str, messages: list[dict], temperatur
         except json.JSONDecodeError:
             body = {}
         return _repair_from_groq_400(body, list_key), status, hdrs, ""
-    return None, status, hdrs, ""
+    return None, status, hdrs, text[:_ERROR_BODY_CHARS]
 
 
 def _failover_level(chain: list[tuple[str, str]], idx: int) -> int:
@@ -657,6 +714,10 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
                 log.log(fail_level(idx), "LLM call error on %s: %s, failing over", tag, describe_exc(exc))
                 break  # next chain entry
 
+            try:
+                _note_limits(tag, hdrs)
+            except Exception as exc:  # a log helper never costs an answer
+                log.debug("LLM limits | %s | unreadable headers: %s", tag, describe_exc(exc))
             if status == 200 and parsed is not None:
                 _bump(tag, "ok")
                 log.debug("LLM call ok | %s", tag)
@@ -680,6 +741,22 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
                     return parsed
                 _bump(tag, "error")
                 log.log(warn, "LLM 400 on %s (json/schema), failing over", tag)
+                break  # next chain entry
+            if status == 413:
+                # Prompt over the model's per-request or per-minute token size (Groq's 8K
+                # TPM against a long morning war chunk): the same prompt fails every retry.
+                _bump(tag, "error")
+                log.log(fail_level(idx), "LLM 413 on %s (prompt too large for it), failing over", tag)
+                break  # next chain entry
+            if status == 429 and _error_kind(status, raw) == "busy":
+                # The provider is out of capacity, not us out of quota: skip it for the
+                # cooldown and never count it toward the «withdrawn» streak — on 2026-11-04
+                # a morning of Mistral 3505s parked ministral for 24h as if retired.
+                _bump(tag, "busy")
+                skip = max(_RATE_LIMIT_COOLDOWN, _retry_after(hdrs) or 0.0)
+                _quota_dead_until[tag] = time.monotonic() + skip
+                log.log(fail_level(idx), "LLM %s is out of capacity (429, provider busy, not our quota), "
+                        "failing over and skipping it for %gs", tag, skip)
                 break  # next chain entry
             if status == 429:
                 ra = _retry_after(hdrs)
@@ -749,11 +826,18 @@ async def _walk_chain(chain: list[tuple[str, str]], messages: list[dict], max_re
                 await _alert_provider(provider, "billing/credit exhausted (HTTP 402) — provider dropped for 24h")
                 break  # next chain entry
             # 5xx / other transient
-            _bump(tag, "error")
+            busy = _error_kind(status, raw) == "busy"
+            _bump(tag, "busy" if busy else "error")
             if attempt < max_retries - 1:
                 await asyncio.sleep(3)
                 continue
-            log.log(fail_level(idx), "LLM %s status=%d after %d attempts, failing over", tag, status, max_retries)
+            if busy:
+                # The retries stay (they rescue ~130 calls a week), but a model that shed
+                # all of them is skipped for the cooldown, so the next call of the digest
+                # burst starts on the next provider instead of paying the same retries.
+                _quota_dead_until[tag] = time.monotonic() + _RATE_LIMIT_COOLDOWN
+            log.log(fail_level(idx), "LLM %s status=%d (%s) after %d attempts, failing over", tag, status,
+                    "provider busy, not our quota" if busy else "error", max_retries)
             break
     return None
 

@@ -16,7 +16,7 @@ from src.processor.llm.classifier import acquire_classify_lock, background_class
 from src.processor.dedup.cross_dedup import deduplicate, ensure_embeddings, unembedded
 from src.processor.llm.llm_client import format_llm_stats, reset_llm_stats, is_task_dead
 from src.processor.dedup.merge import MERGE_MIN_ITEMS, merge_source_items
-from src.common.media import MEDIA_EMOJI as _MEDIA_EMOJI, MEDIA_LABEL as _MEDIA_LABEL, is_media_placeholder
+from src.common.media import MEDIA_EMOJI as _MEDIA_EMOJI, MEDIA_LABEL as _MEDIA_LABEL, is_media_placeholder, without_image_note
 from src.common.util import clean_invisible, describe_exc, detect_footers, needs_summary, row_get, source_link
 from src.processor.llm.prompts import UNSIGNED_AD_RULE, UNSIGNED_TAG
 
@@ -876,7 +876,8 @@ def _is_unsigned_own_post(raw: str, footers: set[str]) -> bool:
     """A post its channel did not sign: the channel has a signature, the post's last line does
     not end with it (an album caption reads "[Photo] → Про Бізнес"), and it is neither a forward
     (signed by its origin) nor a textless album part."""
-    raw = (raw or "").strip()
+    # The picture's line (image_reader) is not the channel's: a textless photo stays a textless photo here.
+    raw = without_image_note(raw).strip()
     # A signature of padding alone would end every line, and sign every post.
     signatures = [sig for sig in (clean_invisible(footer).strip() for footer in footers) if sig]
     if not signatures or not raw or raw.startswith("[Forwarded from") or is_media_placeholder(raw):

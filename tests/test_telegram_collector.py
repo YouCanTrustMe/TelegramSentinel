@@ -2,6 +2,7 @@
 (MessageMediaUnsupported — high-level Message exposes nothing) must still be kept
 as a 📦 placeholder with a link, while genuinely empty / service messages are
 dropped as before."""
+import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -727,3 +728,107 @@ async def test_the_rest_of_the_page_is_counted_from_where_the_bookmark_landed(mo
     monkeypatch.setattr(tc, "set_source_last_message_id", nothing)
     await tc._poll_channel(CHAT, {"id": 77, "name": "Chan", "last_message_id": 5, "chat_id": 1})
     assert budgets == [left]
+
+
+# --- the picture of a post with few words (2026-11-12) ---
+
+class _Buf:
+    def __init__(self, data):
+        self._data = data
+
+    def getvalue(self):
+        return self._data
+
+
+@pytest.fixture
+def pictures(monkeypatch):
+    """A userbot that hands any picture over, and a reader that says what it read."""
+    calls = {"download": [], "read": []}
+
+    async def fake_download(file_id, in_memory=False):
+        calls["download"].append((file_id, in_memory))
+        return _Buf(b"\xff\xd8jpeg")
+
+    async def fake_read(data, text):
+        calls["read"].append(text)
+        return "[Image: Скриншот. Text on it: «Посол России в США скончался»]"
+    monkeypatch.setattr(tc, "userbot", SimpleNamespace(download_media=fake_download))
+    monkeypatch.setattr(tc, "read_image", fake_read)
+    monkeypatch.setattr(tc, "_image_reads_left", tc._IMAGE_READS_PER_CYCLE)
+    monkeypatch.setattr(tc, "_image_deadline", tc.time.monotonic() + 60)
+    return calls
+
+
+async def test_a_photo_post_with_few_words_gets_its_picture_read(captured, pictures):
+    await tc._process_message(CHAT, SOURCE, _msg(photo=SimpleNamespace(file_id="P1"), caption="Лох",
+                                                 forward_from_chat=SimpleNamespace(title="Лачен")))
+    assert pictures["download"] == [("P1", True)]
+    # First line, so a channel signature stays the last; the forward label still opens the post.
+    assert captured["raw_text"] == ("[Forwarded from Лачен] [Image: Скриншот. Text on it: «Посол России в США скончался»]\n"
+                                    "[Photo] Лох")
+    # Empty summary: the post now goes to the summary pass instead of being shown as «Лох».
+    assert captured["summary"] == ""
+
+
+async def test_a_captionless_photo_takes_the_captioned_path_once_read(captured, pictures):
+    await tc._process_message(CHAT, SOURCE, _msg(photo=SimpleNamespace(file_id="P2")))
+    assert captured["raw_text"].startswith("[Image: Скриншот") and captured["raw_text"].endswith("\n[Photo]")
+    assert captured["summary"] == "" and not is_media_placeholder(captured["summary"] or "x")
+
+
+async def test_a_video_is_read_from_its_largest_thumbnail(captured, pictures):
+    thumbs = [SimpleNamespace(file_id="small", width=90, height=160), SimpleNamespace(file_id="big", width=320, height=568)]
+    await tc._process_message(CHAT, SOURCE, _msg(video=SimpleNamespace(duration=12, thumbs=thumbs), caption="В Омську"))
+    assert pictures["download"] == [("big", True)]
+
+
+async def test_a_video_note_or_a_long_caption_is_not_read(captured, pictures):
+    await tc._process_message(CHAT, SOURCE, _msg(video_note=SimpleNamespace(duration=30)))
+    assert captured["raw_text"] == "[Video note]"
+    await tc._process_message(CHAT, SOURCE, _msg(photo=SimpleNamespace(file_id="P3"),
+                                                 caption="Новина з достатньою кількістю слів у підписі. " * 3))
+    assert pictures["download"] == [] and "[Image" not in captured["raw_text"]
+
+
+async def test_a_failed_download_or_read_keeps_the_post_as_before(captured, pictures, monkeypatch):
+    async def broken(file_id, in_memory=False):
+        raise TimeoutError("flood")
+    monkeypatch.setattr(tc, "userbot", SimpleNamespace(download_media=broken))
+    await tc._process_message(CHAT, SOURCE, _msg(photo=SimpleNamespace(file_id="P4")))
+    assert captured["raw_text"] == "[Photo]" and captured["summary"] == "[Photo]"
+
+    async def nothing(data, text):
+        return None
+    monkeypatch.setattr(tc, "userbot", SimpleNamespace(download_media=lambda *a, **k: asyncio.sleep(0, _Buf(b"x"))))
+    monkeypatch.setattr(tc, "read_image", nothing)
+    await tc._process_message(CHAT, SOURCE, _msg(photo=SimpleNamespace(file_id="P5")))
+    assert captured["raw_text"] == "[Photo]" and captured["summary"] == "[Photo]"
+
+
+async def test_a_poll_reads_at_most_its_budget_of_pictures(captured, pictures, monkeypatch):
+    monkeypatch.setattr(tc, "_image_reads_left", 2)
+    for i in range(4):
+        await tc._process_message(CHAT, SOURCE, _msg(id=300 + i, photo=SimpleNamespace(file_id=f"B{i}")))
+    assert len(pictures["read"]) == 2
+    assert captured["raw_text"] == "[Photo]"
+
+
+async def test_a_poll_stops_reading_pictures_once_its_time_is_up(captured, pictures, monkeypatch):
+    # The pre-digest collect is awaited by the digest: a morning of 503s must not hold it for minutes.
+    monkeypatch.setattr(tc, "_image_deadline", tc.time.monotonic() - 1)
+    await tc._process_message(CHAT, SOURCE, _msg(photo=SimpleNamespace(file_id="T1")))
+    assert pictures["download"] == [] and captured["raw_text"] == "[Photo]"
+
+
+async def test_a_picture_too_big_is_not_downloaded(captured, pictures):
+    await tc._process_message(CHAT, SOURCE, _msg(photo=SimpleNamespace(file_id="Big", file_size=50 * 1024 * 1024)))
+    assert pictures["download"] == [] and captured["raw_text"] == "[Photo]"
+
+
+def test_a_picture_the_library_cannot_name_is_skipped():
+    class Broken:
+        def __getattr__(self, name):
+            raise ValueError("undecodable")
+    assert tc._image_file(Broken()) is None
+    assert tc._image_file(_msg(video=SimpleNamespace(thumbs=None))) is None
+    assert tc._image_file(_msg(sticker=SimpleNamespace(file_id="S"))) is None

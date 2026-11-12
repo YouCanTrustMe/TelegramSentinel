@@ -770,3 +770,17 @@ def test_a_literal_rule_limited_to_one_source_spares_the_others():
              {"id": 2, "text": "= promo now", "source": "B", "source_id": 2, "category": "feed"}]
     out = asyncio.run(classifier.check_blocked_filters(items, ["= promo now"], [None], [{1}]))
     assert out == {1: "= promo now"}
+
+
+async def test_a_post_with_a_read_picture_always_goes_to_the_model(monkeypatch):
+    """2026-11-12 review: a short Ukrainian description of the picture would have made the post «short», and
+    the digest would have shown the raw «[Image: …]» notes as its line."""
+    async def no_history(source_id, limit=100):
+        return []
+
+    monkeypatch.setattr(models, "get_recent_raw_texts", no_history)
+    rows = [{"id": 1, "source_id": 6, "raw_text": "[Image: Селфі чоловіка в машині.]\n[Photo]"},
+            {"id": 2, "source_id": 6, "raw_text": "[Photo] Ось і наслідки удару."}]
+    short, long_items = await classifier.split_for_summary(rows)
+    assert [item["id"] for item, _ in long_items] == [1]
+    assert [item["id"] for item, _ in short] == [2]

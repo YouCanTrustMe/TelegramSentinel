@@ -6,6 +6,7 @@ Personal AI news digest bot. Collects posts from Telegram channels and RSS feeds
 
 - **Multi-source collection** — Telegram channels (via userbot) + RSS/Atom feeds
 - **AI classification** — a concise Ukrainian summary (≤15 words, up to ~25 for detail-heavy items) plus a key phrase used as the link anchor; each task is routed to a free-tier model and fails over across separate provider quotas (Mistral, Gemini, Groq) so no single daily quota stalls a digest
+- **Pictures read** — a Telegram post with a photo or video and few words of its own has its picture read by a vision model (what it shows, the text on it), so a screenshot of a news report is summarised, filtered and deduplicated like any other post; fail-open, the post is kept as it was when the picture cannot be read
 - **Per-source prompt instructions** — custom AI hints per source (e.g. "keep proper nouns", "focus on numbers", "no merge", "no translate")
 - **Digest** — sent on a per-category schedule, grouped by category → source; same-topic follow-ups within a source are AI-merged into one entry
 - **Content filter** — natural-language rules (e.g. "local traffic accidents without casualties", "ads and promos") that an LLM applies each digest to silently exclude matching items

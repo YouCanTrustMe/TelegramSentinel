@@ -29,6 +29,8 @@ from src.processor.llm.classifier import judge_pairs
 from src.common.util import detect_footers, row_get, strip_footers
 from src.processor.dedup.embedder import cosine, embed_texts, from_blob, to_blob
 
+from src.common.media import without_image_note
+
 log = logging.getLogger(__name__)
 
 
@@ -65,7 +67,8 @@ def _richness(item) -> int:
     """How much the post itself says, in _RICHNESS_STEP steps. The summaries are all
     capped to one line, so the raw text is what tells a one-line repost ("Poland and
     Romania refused the grain transit") from the report that also says why."""
-    text = _field(item, "raw_text", "") or ""
+    # What a vision model read off a picture is not what the post says (a screenshot transcript ran 600 chars).
+    text = without_image_note(_field(item, "raw_text", "") or "")
     text = _BRACKET_PREFIX_RE.sub("", _URL_RE.sub("", text))
     return len(" ".join(text.split())) // _RICHNESS_STEP
 

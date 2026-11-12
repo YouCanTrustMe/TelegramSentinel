@@ -1,6 +1,8 @@
 """Single source of truth for caption-less media posts: the token the collector
 tags them with and the emoji chip the digest renders. Driving both sides from this
 one table means a new media type is added in exactly one place."""
+import re
+
 
 # Ordered: caption detection picks the first matching Pyrogram Message attribute.
 MEDIA_TYPES: list[tuple[str, str, str]] = [
@@ -33,6 +35,27 @@ MEDIA_KINDS: list[tuple[str, str, str, str]] = [
     ("INVOICE", "[Invoice]", "🧾", "Invoice"),
 ]
 MEDIA_KIND_TOKEN: dict[str, str] = {kind: token for kind, token, _, _ in MEDIA_KINDS}
+
+# The picture of a post with few words, read by a vision model (processor/llm/image_reader.py). The collector puts
+# it FIRST, so a channel signature stays the last line; only the forward label goes before it.
+IMAGE_LINE_RE = re.compile(r"^(\[Forwarded from [^\]\n]*\] )?\[Image: [^\n]*\]\n")
+
+
+def has_image_note(text: str | None) -> bool:
+    return bool(IMAGE_LINE_RE.search(_after_context(text or "")))
+
+
+def without_image_note(text: str | None) -> str:
+    """The post as its channel wrote it: richness, the unsigned-ad check and the like must not count what a
+    vision model read off the picture. A reply's "[Context: …]" line stays where it is."""
+    text = text or ""
+    context = text[: len(text) - len(_after_context(text))]
+    return context + IMAGE_LINE_RE.sub(lambda m: m.group(1) or "", _after_context(text), count=1)
+
+
+def _after_context(text: str) -> str:
+    return re.sub(r"^\[Context: [^\n]*\]\n", "", text, count=1)
+
 
 # Media we cannot name (an undecodable post, or a type missing from both tables).
 GENERIC_MEDIA_TOKEN = "[Media]"

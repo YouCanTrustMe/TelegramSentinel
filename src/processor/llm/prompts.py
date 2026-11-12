@@ -46,6 +46,11 @@ Never use as key_phrase: автор, допис, інформація, поді�
 # destroyed outright, 2 damaged").
 _REPLY_CONTEXT_RULE = """REPLY CONTEXT: an item may open with `[Context: …]` — the channel's earlier post that this item replies to. Summarise the item AFTER it, never the context; use the context only to say what the item is about (which aircraft, which accident)."""
 
+# A post that says little in words carries its news in the picture (2026-11-12: «[Photo] Лох» was a screenshot of
+# the Russian ambassador's death notice). The collector reads such a picture and appends what it shows. The
+# description is a vision model's guess (it named a face once), the text on the picture is what the post says.
+_IMAGE_RULE = """IMAGE: an item may open with `[Image: <description> Text on it: «…»]` — the picture attached to the post, read by a vision model. The text on it is part of the post: a screenshot of a news report IS that news, so summarise it. The description is only a guess about the picture: never take a name, number, date or place from the description alone — only from the item's own words or the text on the picture. A meme, selfie or reaction with no news: say in a few words what it shows."""
+
 _BATCH_SYSTEM_PROMPT = f"""Group news items from one source by event, then summarize each group in Ukrainian. Output JSON only.
 
 Each item is prefixed with its numeric id (e.g. `16321: ...`). Use those EXACT ids in your output — never renumber, never start from 0. Every id MUST appear in exactly one group's `ids` — none omitted or duplicated.
@@ -58,6 +63,7 @@ Examples of wrong merges: "OPEC raises output" + "Saudi Arabia oil strategy" = s
 {_BREVITY_RULE}
 {_ACCURACY_RULE}
 {_REPLY_CONTEXT_RULE}
+{_IMAGE_RULE}
 Per group:
 - summary: Single item: up to 12 words. Merged (2-3 items): up to 24 words — include the key development from each merged item. Start with key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Never start with: повідомляється, стало відомо, автор, допис, пост.
 - {_KEY_PHRASE_RULE}
@@ -74,6 +80,7 @@ Each item is prefixed with its numeric id (e.g. `16321: ...`). Produce exactly o
 {_BREVITY_RULE}
 {_ACCURACY_RULE}
 {_REPLY_CONTEXT_RULE}
+{_IMAGE_RULE}
 Per item:
 - summary: Up to 12 words; up to 18 words for events with multiple key details. Start with the key entity (person, org, asset, place). Strong verb. Keep all numbers and names exact. Do not abbreviate proper nouns. Never start with: повідомляється, стало відомо, автор, допис, пост.
 - {_KEY_PHRASE_RULE}
@@ -168,3 +175,12 @@ For each numbered pair answer one verdict:
 - "different": B is a different event — even if it shares the topic, country, person, company, asset or type of event (two different strikes, two different attacks, two different aid packages, two different price moves are DIFFERENT).
 Judge by facts (who, what, where, when, numbers), not by vocabulary. Posts may be in different languages.
 Respond ONLY with JSON: {"pairs": [{"n": 1, "verdict": "same"}]}"""
+
+
+# Reads the picture of a post that says little in words. It only describes and copies: a vision model asked for a
+# summary as well invented «losses in the attack on St Petersburg» for a black card that held nothing but a date
+# (11-12 bench, 1 of 85); the summary is written later, with the caption, by the usual summary pass.
+IMAGE_READ_PROMPT = """This is a picture attached to a Telegram channel post (for a video, one frame). The post's own words: «{caption}».
+Answer ONLY with JSON: {"kind": "news|meme|reaction|ad|announcement|other", "image": "what the picture shows, one short sentence in Ukrainian", "image_text": "the text written on the picture, copied as written (in its own language), or empty"}.
+kind: news = it reports an event (a screenshot of a report, a strike, a document); meme = a joke picture; reaction = a selfie, emoji, mood or a personal moment; ad = it sells or promotes; announcement = an event, schedule or course notice.
+Describe only what is visible. Never name a person unless the name is written on the picture or in the post's words."""

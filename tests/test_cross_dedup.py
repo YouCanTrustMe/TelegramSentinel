@@ -871,3 +871,9 @@ def test_a_reply_context_holding_a_bracket_is_cut_whole():
     one = f"[Context: [Photo] Ракетний удар по Києву вночі, є загиблі та поранені серед мешканців]\n{body}"
     two = f"[Context: Інший пост каналу]\n{body}"
     assert cd._repost_key(one) == cd._repost_key(two) == cd._repost_key(body)
+
+
+def test_a_read_picture_does_not_make_a_post_richer():
+    # 2026-11-12 review: a 600-char screenshot transcript would outrank a real report as the dedup primary.
+    screenshot = {"raw_text": "[Image: Скриншот. Text on it: «" + "слово " * 100 + "»]\n[Photo] Лох"}
+    assert cd._richness(screenshot) == cd._richness({"raw_text": "[Photo] Лох"}) == 0

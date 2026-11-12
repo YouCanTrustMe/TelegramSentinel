@@ -105,6 +105,10 @@ TASK_ROUTING: dict[str, list[tuple[str, str]]] = {
     "route":     [QWEN, FLASH_LITE, FLASH_LITE_NEXT],
     # Ukrainian translate-guard retry; not re-benched 11-02, unchanged
     "translate": [MINISTRAL, FLASH_LITE, GPT_OSS],
+    # The picture of a post that says little in words (2026-11-12): flash-lite answered 85 of 85 a week's such
+    # posts, ~3.6s and ~1.3K tokens each, and read the text on screenshots right; qwen3.8 and ministral read
+    # pictures too (checked live), so the chain does not end at Google. ~14 posts a day.
+    "image":     [FLASH_LITE, FLASH_LITE_NEXT, QWEN, MINISTRAL],
 }
 
 _QUOTA_DEAD_THRESHOLD = 300.0
@@ -142,13 +146,15 @@ _BILLING_DOWN_SECONDS = 86400.0
 # id-array / structured tasks must be deterministic: any sampling raises the chance
 # of a dropped or hallucinated id and broken JSON (the source of "N item(s) missing"
 # warnings). Free-text summary tasks (classify, translate) keep a little sampling.
-_DETERMINISTIC_TASKS = frozenset({"batch", "summary", "recheck", "group", "filter", "translate", "war", "pair", "route"})
+_DETERMINISTIC_TASKS = frozenset({"batch", "summary", "recheck", "group", "filter", "translate", "war", "pair", "route",
+                                  "image"})
 
 
 # Shadow tasks whose answer only feeds a log line: a failure of theirs is logged at INFO
 # and never sends the "rate limit exhausted" alert. A model's own health (parked,
 # quota dead, bad key) still warns whichever task found it.
-_QUIET_TASKS = frozenset({"route"})
+# A picture read is an enrichment: when its chain is out, the post is only kept as it was, nothing degrades.
+_QUIET_TASKS = frozenset({"route", "image"})
 
 
 # ---- JSON repair (provider-agnostic) ----

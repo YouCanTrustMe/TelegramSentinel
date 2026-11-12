@@ -16,7 +16,7 @@ from src.processor.llm.prompts import (
     _PAIR_JUDGE_PROMPT,
     _ROUTE_SYSTEM_PROMPT,
 )
-from src.common.media import MEDIA_KINDS
+from src.common.media import MEDIA_KINDS, has_image_note
 from src.common.util import clean_invisible, describe_exc, detect_footers, host_listed, needs_summary, row_get, strip_footers
 from src.processor.llm.fact_check import unsupported_facts
 
@@ -453,7 +453,8 @@ async def split_for_summary(rows: list, label: str = "Background classify") -> t
         text = _strip_media_prefix(own)
         reads_ukrainian = (_looks_ukrainian(text) if source_id in ukrainian_sources
                            else _reads_ukrainian(text))
-        trivial = len(text) < _TRIVIAL_MAX_LEN and (
+        # A read picture is never shown as written: its line is a vision model's notes, not the post.
+        trivial = len(text) < _TRIVIAL_MAX_LEN and not has_image_note(raw) and (
             reads_ukrainian or _wants_no_translate(row_get(item, "source_prompt_extra")))
         if trivial:
             short.append((item, own))

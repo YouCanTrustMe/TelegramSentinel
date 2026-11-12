@@ -17,6 +17,7 @@ from src.db.models import find_sources_by_chat_id, get_active_sources, increment
 from src.dispatcher.admin_alert import admin_alert
 from src.common.media import GENERIC_MEDIA_TOKEN, MEDIA_KIND_TOKEN, MEDIA_TOKENS, MEDIA_TYPES, NO_TEXT
 from src.processor.dedup.deduplicator import is_duplicate, make_message_id
+from src.processor.llm.image_reader import read_image, wants_image_read
 from src.common.util import describe_exc, plain_text, row_get
 
 log = logging.getLogger(__name__)
@@ -48,6 +49,15 @@ _SERVER_ERROR_REWARN_EVERY = 72
 _server_error_streak: dict[int, tuple[int, int]] = {}
 _SERVER_ERROR_STREAK_GAP = 2
 _poll_cycle = 0
+# Pictures read per poll cycle (~14 a day in a normal week): a catch-up after an outage would otherwise hold
+# the poll on one model call per post. A post past the budget is kept as it was.
+_IMAGE_READS_PER_CYCLE = 12
+_image_reads_left = _IMAGE_READS_PER_CYCLE
+# ...and seconds: the pre-digest collect is awaited by the digest, and one read may walk a whole chain of 503s.
+_IMAGE_CYCLE_SECONDS = 90.0
+_image_deadline = 0.0
+_IMAGE_DOWNLOAD_TIMEOUT = 20.0
+_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
 
 def _server_error_level(streak: int) -> int:
@@ -260,6 +270,56 @@ def _read_message(message: Message) -> tuple[str, bool] | None:
     return raw_text, no_caption
 
 
+def _image_file(message: Message):
+    """The picture to read: a photo itself, a video's or GIF's largest thumbnail. A video note (a face talking)
+    and anything else gives None. Never raises: a post the library cannot fully read just has no picture."""
+    try:
+        if getattr(message, "photo", None):
+            return message.photo if getattr(message.photo, "file_id", None) else None
+        for attr in ("video", "animation"):
+            media = getattr(message, attr, None)
+            if media:
+                thumbs = [t for t in (getattr(media, "thumbs", None) or []) if getattr(t, "file_id", None)]
+                if not thumbs:
+                    return None
+                return max(thumbs, key=lambda t: (getattr(t, "width", 0) or 0) * (getattr(t, "height", 0) or 0))
+    except Exception:
+        return None
+    return None
+
+
+async def _image_note(message: Message, text: str, url: str) -> str | None:
+    """What the picture of a post with few words shows, as a line to append (image_reader). Fail-open: a post
+    whose picture cannot be fetched or read is kept exactly as before."""
+    global _image_reads_left
+    if not wants_image_read(text):
+        return None
+    picture = _image_file(message)
+    if picture is None:
+        return None
+    size = getattr(picture, "file_size", None)
+    if isinstance(size, int) and size > _IMAGE_MAX_BYTES:
+        log.info("Image not read: %d bytes | %s", size, url)
+        return None
+    if _image_reads_left <= 0 or time.monotonic() > _image_deadline:
+        log.info("Image read skipped (this poll's budget of %d reads / %.0fs is spent) | %s",
+                 _IMAGE_READS_PER_CYCLE, _IMAGE_CYCLE_SECONDS, url)
+        return None
+    _image_reads_left -= 1
+    try:
+        buf = await asyncio.wait_for(userbot.download_media(picture.file_id, in_memory=True), _IMAGE_DOWNLOAD_TIMEOUT)
+        data = buf.getvalue() if hasattr(buf, "getvalue") else None
+    except Exception as exc:
+        log.info("Image download failed: %s | %s", describe_exc(exc), url)
+        return None
+    if not data or len(data) > _IMAGE_MAX_BYTES:
+        log.info("Image not read: %s bytes | %s", len(data) if data else 0, url)
+        return None
+    note = await read_image(data, text)
+    log.info("Image read %s | %s", f"-> {note[:160]}" if note else "gave nothing", url)
+    return note
+
+
 def _forward_label(raw_text: str, message: Message, _parent_msg: "Message | None") -> str:
     fwd_title = _forwarded_from(message)
     return f"[Forwarded from {fwd_title}] {raw_text}" if fwd_title else raw_text
@@ -445,7 +505,14 @@ async def _process_message(chat_ref: str, source: dict, message: Message, parent
     if unreadable is not None:
         kept = "as 📦" if no_caption else "with only the text it gave up"
         await _report_unreadable(chat_ref, message, original_url, unreadable, kept=kept)
-    elif not no_caption and not message.poll:
+    else:
+        if not message.poll:
+            note = await _image_note(message, raw_text, original_url)
+            if note:
+                # The post now has words to summarise, filter and compare, so it takes the captioned path. First
+                # line: a channel signature must stay the last one (the unsigned-ad check, detect_footers).
+                raw_text, no_caption = f"{note}\n{raw_text}", False
+    if unreadable is None and not no_caption and not message.poll:
         for name, label in (("forward", _forward_label), ("reply context", _context_label)):
             try:
                 raw_text = label(raw_text, message, parent_msg)
@@ -738,8 +805,10 @@ async def poll_telegram_once() -> None:
     # Catch-up gaps are reported as ONE message after the cycle: an outage hits every
     # channel at once, and a message per source would arrive as a burst that also holds
     # up polling the rest. Local, because the pre-digest collect runs a cycle of its own.
-    global _poll_cycle
+    global _poll_cycle, _image_reads_left, _image_deadline
     _poll_cycle += 1
+    _image_reads_left = _IMAGE_READS_PER_CYCLE
+    _image_deadline = time.monotonic() + _IMAGE_CYCLE_SECONDS
     gaps: list[tuple[str, int]] = []
     try:
         sources = await get_active_sources(type_="telegram")

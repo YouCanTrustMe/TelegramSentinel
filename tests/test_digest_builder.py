@@ -820,3 +820,11 @@ async def test_a_rule_limited_to_one_source_sends_only_that_sources_posts_to_the
     kept, _ = await digest_builder._apply_semantic_filter(items)
     assert seen["ids"] == [1]
     assert sorted(k["id"] for k in kept) == [1, 2]
+
+
+def test_a_read_picture_never_makes_a_post_unsigned():
+    # The picture's line is not the channel's: a textless or signed photo stays as it was before 11-12.
+    footers = {"→ Про Бізнес"}
+    assert not digest_builder._is_unsigned_own_post("[Image: Графік курсу.]\n[Photo]", footers)
+    assert not digest_builder._is_unsigned_own_post("[Image: Графік. Text on it: «45 грн»]\n[Photo] 😀\n\n→ Про Бізнес", footers)
+    assert digest_builder._is_unsigned_own_post("[Image: Банер банку.]\n[Photo] ПУМБ – вигідний проєкт", footers)
